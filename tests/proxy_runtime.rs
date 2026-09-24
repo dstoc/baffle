@@ -8,7 +8,7 @@ use baffle_proxy::{
 use hudsucker::rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::TcpStream,
+    net::{TcpStream, UnixStream},
     sync::mpsc,
     time::timeout,
 };
@@ -95,25 +95,36 @@ async fn multiple_proxy_instances_deny_outbound_requests_and_stop_independently(
         first_id.clone(),
         session_config(),
         Arc::clone(&ca),
+        directory.path().join("first.sock"),
+        8,
         event_sender.clone(),
     )
     .await
     .expect("first runtime should start");
     let first_address = first.local_addr();
-    let second = ProxyRuntime::start(second_id.clone(), session_config(), ca, event_sender)
-        .await
-        .expect("second runtime should start");
+    let second = ProxyRuntime::start(
+        second_id.clone(),
+        session_config(),
+        ca,
+        directory.path().join("second.sock"),
+        8,
+        event_sender,
+    )
+    .await
+    .expect("second runtime should start");
     let second_address = second.local_addr();
 
     assert!(first_address.ip().is_loopback());
     assert!(second_address.ip().is_loopback());
     assert_ne!(first_address, second_address);
+    assert_ne!(first.socket_path(), second.socket_path());
     assert_eq!(first.runtime_id(), &first_id);
     assert_eq!(second.runtime_id(), &second_id);
 
     assert_denied(first_address, "GET", "http://example.com/").await;
     assert_denied(first_address, "CONNECT", "example.com:443").await;
     assert_denied(second_address, "GET", "http://example.com/").await;
+    assert_unix_proxy_denied(first.socket_path()).await;
 
     first.shutdown(Duration::from_secs(2)).await;
     assert_exit(&mut events, &first_id).await;
@@ -121,8 +132,106 @@ async fn multiple_proxy_instances_deny_outbound_requests_and_stop_independently(
         TcpStream::connect(first_address).await.is_err(),
         "stopped runtime should close only its own listener"
     );
+    assert!(!directory.path().join("first.sock").exists());
+    assert!(directory.path().join("second.sock").exists());
     assert_denied(second_address, "GET", "http://example.com/").await;
+    assert_unix_proxy_denied(second.socket_path()).await;
 
     second.shutdown(Duration::from_secs(2)).await;
     assert_exit(&mut events, &second_id).await;
+    assert!(!directory.path().join("second.sock").exists());
+}
+
+async fn assert_unix_proxy_denied(path: &std::path::Path) {
+    let mut stream = UnixStream::connect(path)
+        .await
+        .expect("proxy Unix socket should accept an ordinary HTTP proxy request");
+    stream
+        .write_all(
+            b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .expect("HTTP proxy request should be sent through the Unix socket");
+    let mut reader = BufReader::new(stream);
+    let mut status = String::new();
+    timeout(Duration::from_secs(2), reader.read_line(&mut status))
+        .await
+        .expect("Hudsucker should respond through the Unix bridge")
+        .expect("proxy response should be readable");
+    assert!(
+        status.starts_with("HTTP/1.1 403") || status.starts_with("HTTP/1.0 403"),
+        "the assigned Hudsucker instance should respond: {status:?}"
+    );
+}
+
+#[tokio::test]
+async fn replacing_a_session_socket_does_not_delete_the_replacement_on_shutdown() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-replaced-socket");
+    let path = directory.path().join("replaced.sock");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        session_config(),
+        ca,
+        path.clone(),
+        1,
+        event_sender,
+    )
+    .await
+    .expect("runtime should start");
+
+    fs::remove_file(&path).expect("test should remove the original socket path");
+    fs::write(&path, b"unrelated replacement")
+        .expect("test should create an unrelated replacement file");
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+    assert_eq!(
+        fs::read(&path).expect("replacement should remain"),
+        b"unrelated replacement"
+    );
+}
+
+#[tokio::test]
+async fn unix_socket_path_that_is_a_symlink_is_left_untouched() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let target = directory.path().join("target");
+    let path = directory.path().join("proxy.sock");
+    fs::write(&target, b"target contents").expect("test target should be created");
+    symlink(&target, &path).expect("test symlink should be created");
+    let (event_sender, _events) = mpsc::unbounded_channel();
+
+    let error = match ProxyRuntime::start(
+        RuntimeId::new("runtime-symlink"),
+        session_config(),
+        ca,
+        path.clone(),
+        1,
+        event_sender,
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(runtime) => {
+            runtime.shutdown(Duration::from_secs(2)).await;
+            panic!("runtime must not bind through an existing symlink");
+        }
+    };
+
+    assert!(error.to_string().contains("already exists"));
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("symlink should remain")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read(&target).expect("target should remain"),
+        b"target contents"
+    );
 }

@@ -138,6 +138,7 @@ impl ControlServer {
                 sessions: SessionManager::new(
                     socket_dir.clone(),
                     config.daemon.max_sessions,
+                    config.daemon.max_connections_per_session,
                     Duration::from_secs(config.daemon.shutdown_grace_seconds),
                     ca,
                     runtime_event_sender,
@@ -410,6 +411,7 @@ async fn write_value(stream: &mut UnixStream, value: Value) -> io::Result<()> {
 struct SessionManager {
     socket_dir: PathBuf,
     max_sessions: usize,
+    max_connections_per_session: usize,
     shutdown_grace: Duration,
     ca: Arc<ManagedCa>,
     runtime_events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
@@ -420,6 +422,7 @@ impl SessionManager {
     fn new(
         socket_dir: PathBuf,
         max_sessions: usize,
+        max_connections_per_session: usize,
         shutdown_grace: Duration,
         ca: Arc<ManagedCa>,
         runtime_events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
@@ -427,6 +430,7 @@ impl SessionManager {
         Self {
             socket_dir,
             max_sessions,
+            max_connections_per_session,
             shutdown_grace,
             ca,
             runtime_events,
@@ -449,20 +453,19 @@ impl SessionManager {
             return Err(SessionError::Internal);
         }
 
+        let socket_path = self.socket_dir.join(format!("{id}.sock"));
         let runtime = ProxyRuntime::start(
             RuntimeId::new(id.clone()),
             session,
             Arc::clone(&self.ca),
+            socket_path,
+            self.max_connections_per_session,
             self.runtime_events.clone(),
         )
         .await
         .map_err(SessionError::Runtime)?;
         let info = SessionInfo {
-            socket: self
-                .socket_dir
-                .join(format!("{id}.sock"))
-                .to_string_lossy()
-                .into_owned(),
+            socket: runtime.socket_path().to_string_lossy().into_owned(),
             id: id.clone(),
             persistent,
         };
@@ -599,6 +602,7 @@ mod tests {
         SessionManager::new(
             directory.to_path_buf(),
             max_sessions,
+            128,
             Duration::from_secs(1),
             ca,
             runtime_events,
