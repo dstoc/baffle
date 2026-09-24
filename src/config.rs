@@ -93,6 +93,7 @@ pub struct CaConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretStoreConfig {
     pub directory: PathBuf,
+    pub allowed: HashSet<String>,
 }
 
 impl DaemonConfig {
@@ -139,6 +140,7 @@ impl DaemonConfig {
             },
             secrets: SecretStoreConfig {
                 directory: required_path(raw.secrets.directory, "secrets.directory")?,
+                allowed: validate_allowed_secrets(raw.secrets.allowed)?,
             },
         })
     }
@@ -632,6 +634,21 @@ fn validate_secret_id(input: &str) -> Result<SecretRef, &'static str> {
     Ok(SecretRef(input.to_string()))
 }
 
+fn validate_allowed_secrets(raw: Vec<RawSecretRef>) -> Result<HashSet<String>, ConfigError> {
+    let mut allowed = HashSet::with_capacity(raw.len());
+    for secret in raw {
+        let secret = validate_secret_id(&secret.0).map_err(|_| {
+            ConfigError::new("secrets.allowed must contain valid secret identifiers")
+        })?;
+        if !allowed.insert(secret.as_str().to_owned()) {
+            return Err(ConfigError::new(
+                "secrets.allowed must not contain duplicate secret identifiers",
+            ));
+        }
+    }
+    Ok(allowed)
+}
+
 fn validate_basic_username(input: &str) -> Result<(), &'static str> {
     if input.is_empty()
         || input.contains(':')
@@ -685,6 +702,8 @@ struct RawCaConfig {
 #[serde(deny_unknown_fields)]
 struct RawSecretStoreConfig {
     directory: PathBuf,
+    #[serde(default)]
+    allowed: Vec<RawSecretRef>,
 }
 
 fn default_max_sessions() -> usize {
@@ -852,6 +871,7 @@ mode = "intercept"
             config.ca.certificate,
             PathBuf::from("/var/lib/baffle/ca.pem")
         );
+        assert!(config.secrets.allowed.is_empty());
 
         let config = DaemonConfig::from_toml(
             r#"
@@ -1024,6 +1044,18 @@ directory = "/var/lib/baffle/secrets"
                 "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"../credential\"\nformat = \"bearer\"\n".to_string(),
             ),
             (
+                "absolute secret path",
+                "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"/var/lib/token\"\nformat = \"bearer\"\n".to_string(),
+            ),
+            (
+                "relative secret path",
+                "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"credentials/token\"\nformat = \"bearer\"\n".to_string(),
+            ),
+            (
+                "embedded credentials",
+                "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"operator:credential\"\nformat = \"bearer\"\n".to_string(),
+            ),
+            (
                 "basic password without username",
                 "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"basic_password\"\n".to_string(),
             ),
@@ -1077,6 +1109,32 @@ format = "raw"
         let error = DaemonConfig::from_toml(&input).expect_err("unknown field should fail");
         assert!(error.to_string().contains("unsupported field"));
         assert!(!error.to_string().contains("do-not-leak-this"));
+    }
+
+    #[test]
+    fn parses_daemon_secret_entitlements_and_rejects_unsafe_names() {
+        let configured = DAEMON_EXAMPLE.replace(
+            "directory = \"/var/lib/baffle/secrets\"",
+            "directory = \"/var/lib/baffle/secrets\"\nallowed = [\"github-api\", \"github-git\"]",
+        );
+        let config =
+            DaemonConfig::from_toml(&configured).expect("daemon secret entitlements should parse");
+        assert!(config.secrets.allowed.contains("github-api"));
+        assert!(config.secrets.allowed.contains("github-git"));
+
+        for allowed in [
+            "allowed = [\"../credential\"]",
+            "allowed = [\"/tmp/credential\"]",
+            "allowed = [\"same\", \"same\"]",
+        ] {
+            let input = DAEMON_EXAMPLE.replace(
+                "directory = \"/var/lib/baffle/secrets\"",
+                &format!("directory = \"/var/lib/baffle/secrets\"\n{allowed}"),
+            );
+            let error = DaemonConfig::from_toml(&input)
+                .expect_err("unsafe or duplicate entitlements should fail");
+            assert!(!error.to_string().contains("credential"));
+        }
     }
 
     #[test]

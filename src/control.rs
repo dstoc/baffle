@@ -23,6 +23,7 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::config::{ControlRequest, DaemonConfig, PROTOCOL_VERSION};
+use crate::secrets::{ResolvedSecrets, SecretStore, SecretStoreError};
 
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 
@@ -37,6 +38,10 @@ const ERR_READ_TIMEOUT: (&str, &str) = ("read_timeout", "request read timed out"
 const ERR_BUSY: (&str, &str) = ("busy", "server is busy");
 const ERR_SESSION_LIMIT: (&str, &str) = ("session_limit", "session limit has been reached");
 const ERR_SESSION_NOT_FOUND: (&str, &str) = ("session_not_found", "session was not found");
+const ERR_SECRET_UNAVAILABLE: (&str, &str) = (
+    "secret_unavailable",
+    "one or more requested secrets are unavailable",
+);
 const ERR_INTERNAL: (&str, &str) = ("internal_error", "request could not be completed");
 
 pub struct ControlServer {
@@ -49,6 +54,7 @@ pub struct ControlServer {
 struct ControlState {
     trusted_operator_uid: u32,
     read_timeout: Duration,
+    secret_store: SecretStore,
     sessions: SessionManager,
     provisioning_slots: Arc<Semaphore>,
 }
@@ -116,6 +122,11 @@ impl ControlServer {
             state: Arc::new(ControlState {
                 trusted_operator_uid: trusted_uid,
                 read_timeout: Duration::from_millis(config.daemon.control_read_timeout_ms),
+                secret_store: SecretStore::new(
+                    config.secrets.directory.clone(),
+                    trusted_uid,
+                    config.secrets.allowed.clone(),
+                ),
                 sessions: SessionManager::new(socket_dir.clone(), config.daemon.max_sessions),
                 provisioning_slots: Arc::new(Semaphore::new(
                     config.daemon.max_provisioning_requests,
@@ -185,8 +196,8 @@ fn ensure_private_directory(path: &Path, expected_uid: u32) -> Result<()> {
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
-    match stream.peer_cred() {
-        Ok(credentials) if credentials.uid() == state.trusted_operator_uid => {}
+    let client_uid = match stream.peer_cred() {
+        Ok(credentials) if credentials.uid() == state.trusted_operator_uid => credentials.uid(),
         Ok(_) => {
             let _ = write_error(&mut stream, ERR_UNAUTHORIZED).await;
             return;
@@ -195,7 +206,7 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
             let _ = write_error(&mut stream, ERR_UNAUTHORIZED).await;
             return;
         }
-    }
+    };
 
     let request_body = match read_request_frame(&mut stream, state.read_timeout).await {
         Ok(Some(body)) => body,
@@ -234,8 +245,19 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
                     return;
                 }
             };
+            let secrets = match state.secret_store.resolve(client_uid, &session) {
+                Ok(secrets) => secrets,
+                Err(
+                    SecretStoreError::UnauthorizedClient
+                    | SecretStoreError::NotEntitled
+                    | SecretStoreError::Unavailable,
+                ) => {
+                    let _ = write_error(&mut stream, ERR_SECRET_UNAVAILABLE).await;
+                    return;
+                }
+            };
             let result = {
-                let result = state.sessions.create(session.persistent).await;
+                let result = state.sessions.create(session.persistent, secrets).await;
                 drop(permit);
                 result
             };
@@ -356,7 +378,7 @@ async fn write_value(stream: &mut UnixStream, value: Value) -> io::Result<()> {
 struct SessionManager {
     socket_dir: PathBuf,
     max_sessions: usize,
-    sessions: Arc<Mutex<HashMap<String, SessionInfo>>>,
+    sessions: Arc<Mutex<HashMap<String, ManagedSession>>>,
 }
 
 impl SessionManager {
@@ -368,7 +390,11 @@ impl SessionManager {
         }
     }
 
-    async fn create(&self, persistent: bool) -> std::result::Result<SessionInfo, SessionError> {
+    async fn create(
+        &self,
+        persistent: bool,
+        secrets: ResolvedSecrets,
+    ) -> std::result::Result<SessionInfo, SessionError> {
         let id = new_session_id().map_err(|_| SessionError::Internal)?;
         let info = SessionInfo {
             socket: self
@@ -386,7 +412,13 @@ impl SessionManager {
         if sessions.contains_key(&id) {
             return Err(SessionError::Internal);
         }
-        sessions.insert(id, info.clone());
+        sessions.insert(
+            id,
+            ManagedSession {
+                info: info.clone(),
+                _secrets: secrets,
+            },
+        );
         Ok(info)
     }
 
@@ -404,11 +436,17 @@ impl SessionManager {
             .lock()
             .await
             .values()
-            .cloned()
+            .map(|session| session.info.clone())
             .collect::<Vec<_>>();
         sessions.sort_by(|left, right| left.id.cmp(&right.id));
         sessions
     }
+}
+
+struct ManagedSession {
+    info: SessionInfo,
+    // Secret values remain scoped to this session and are never serialized.
+    _secrets: ResolvedSecrets,
 }
 
 #[derive(Debug)]
@@ -438,7 +476,12 @@ fn new_session_id() -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        sync::Arc,
+        time::Duration,
+    };
 
     use serde_json::Value;
     use tokio::{
@@ -447,7 +490,66 @@ mod tests {
         sync::Semaphore,
     };
 
+    use crate::secrets::SecretStore;
+
     use super::{ControlState, SessionManager, handle_connection};
+
+    fn state(directory: &std::path::Path, uid: u32, allowed: &[&str]) -> ControlState {
+        ControlState {
+            trusted_operator_uid: uid,
+            read_timeout: Duration::from_secs(1),
+            secret_store: SecretStore::new(
+                directory.to_path_buf(),
+                uid,
+                allowed.iter().map(|name| (*name).to_owned()).collect(),
+            ),
+            sessions: SessionManager::new(directory.to_path_buf(), 1),
+            provisioning_slots: Arc::new(Semaphore::new(1)),
+        }
+    }
+
+    async fn connect_handler(
+        listener: &UnixListener,
+        state: Arc<ControlState>,
+    ) -> (UnixStream, tokio::task::JoinHandle<()>) {
+        let client = UnixStream::connect(listener.local_addr().unwrap().as_pathname().unwrap())
+            .await
+            .expect("test client should connect");
+        let (server, _) = listener
+            .accept()
+            .await
+            .expect("server should accept client");
+        let task = tokio::spawn(async move {
+            handle_connection(server, state).await;
+        });
+        (client, task)
+    }
+
+    async fn write_request(client: &mut UnixStream, body: &str) {
+        client
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .await
+            .expect("frame header should be written");
+        client
+            .write_all(body.as_bytes())
+            .await
+            .expect("frame payload should be written");
+    }
+
+    async fn read_response(client: &mut UnixStream) -> (Vec<u8>, Value) {
+        let mut header = [0; 4];
+        client
+            .read_exact(&mut header)
+            .await
+            .expect("response header should be complete");
+        let mut body = vec![0; u32::from_be_bytes(header) as usize];
+        client
+            .read_exact(&mut body)
+            .await
+            .expect("response body should be complete");
+        let response = serde_json::from_slice(&body).expect("response should be JSON");
+        (body, response)
+    }
 
     #[tokio::test]
     async fn denies_a_peer_whose_uid_differs_from_the_configured_operator() {
@@ -468,6 +570,11 @@ mod tests {
         let state = Arc::new(ControlState {
             trusted_operator_uid: peer_uid.wrapping_add(1),
             read_timeout: Duration::from_secs(1),
+            secret_store: SecretStore::new(
+                directory.path().to_path_buf(),
+                peer_uid.wrapping_add(1),
+                Default::default(),
+            ),
             sessions: SessionManager::new(directory.path().to_path_buf(), 1),
             provisioning_slots: Arc::new(Semaphore::new(1)),
         });
@@ -497,5 +604,73 @@ mod tests {
         let response: Value = serde_json::from_slice(&body).expect("response should be JSON");
         assert_eq!(response["error"]["code"], "unauthorized");
         task.await.expect("connection handler should finish");
+    }
+
+    #[tokio::test]
+    async fn refuses_unentitled_secret_before_creating_a_session() {
+        let directory = tempfile::tempdir().expect("test directory should be created");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("secret directory should be private");
+        let secret_path = directory.path().join("api-token");
+        fs::write(&secret_path, "credential-must-not-leak").expect("test secret should be written");
+        fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o600))
+            .expect("test secret should be private");
+
+        let socket = directory.path().join("control.sock");
+        let listener = UnixListener::bind(&socket).expect("test socket should bind");
+        let uid = fs::metadata(directory.path())
+            .expect("test directory should have metadata")
+            .uid();
+        let control_state = Arc::new(state(directory.path(), uid, &[]));
+        let (mut client, task) = connect_handler(&listener, Arc::clone(&control_state)).await;
+        let request = "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n";
+        write_request(&mut client, request).await;
+        let (body, response) = read_response(&mut client).await;
+
+        assert_eq!(response["error"]["code"], "secret_unavailable");
+        assert!(!String::from_utf8_lossy(&body).contains("credential-must-not-leak"));
+        task.await.expect("control handler should finish");
+        assert!(
+            control_state.sessions.list().await.is_empty(),
+            "unauthorized references must fail before session creation"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorized_create_keeps_secret_private_from_control_responses() {
+        let directory = tempfile::tempdir().expect("test directory should be created");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("secret directory should be private");
+        let secret_path = directory.path().join("api-token");
+        fs::write(&secret_path, "credential-must-not-leak").expect("test secret should be written");
+        fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o600))
+            .expect("test secret should be private");
+        let uid = fs::metadata(directory.path())
+            .expect("test directory should have metadata")
+            .uid();
+        let state = Arc::new(state(directory.path(), uid, &["api-token"]));
+        let socket = directory.path().join("control.sock");
+        let listener = UnixListener::bind(&socket).expect("test socket should bind");
+        let (mut client, task) = connect_handler(&listener, Arc::clone(&state)).await;
+        let request = "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n";
+        write_request(&mut client, request).await;
+        let (body, response) = read_response(&mut client).await;
+        task.await.expect("control handler should finish");
+
+        assert!(response["ok"].as_bool().expect("ok should be boolean"));
+        assert!(!String::from_utf8_lossy(&body).contains("credential-must-not-leak"));
+        let id = response["result"]["id"]
+            .as_str()
+            .expect("created session should have an id");
+        let sessions = state.sessions.sessions.lock().await;
+        let created = sessions.get(id).expect("session should be retained");
+        assert_eq!(
+            created
+                ._secrets
+                .get("api-token")
+                .expect("session should own its resolved secret")
+                .as_str(),
+            "credential-must-not-leak"
+        );
     }
 }
