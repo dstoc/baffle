@@ -13,6 +13,7 @@ use std::{
 };
 
 use serde::{Deserialize, de::DeserializeOwned};
+use url::Host;
 
 pub const PROTOCOL_VERSION: u16 = 1;
 
@@ -431,7 +432,17 @@ fn validate_hostname(input: &str) -> Result<String, &'static str> {
             return Err("contains an invalid DNS label");
         }
     }
-    Ok(host.to_string())
+
+    // Match the URL host parser used for HTTP destinations. It recognizes
+    // non-canonical IPv4 forms such as 127.1, octal components, and a single
+    // integer. Parsing is local and does not perform DNS resolution.
+    match Host::parse(host) {
+        Ok(Host::Domain(domain)) => Ok(domain),
+        Ok(Host::Ipv4(_) | Host::Ipv6(_)) => {
+            Err("must be an exact DNS hostname, not an IP address or wildcard")
+        }
+        Err(_) => Err("must be a valid exact DNS hostname"),
+    }
 }
 
 fn validate_path(input: &str) -> Result<PathRule, &'static str> {
@@ -879,6 +890,26 @@ directory = "/var/lib/baffle/secrets"
             (
                 "IP literal",
                 config_with("host = \"127.0.0.1\"\nmode = \"tunnel\""),
+            ),
+            (
+                "abbreviated IPv4 address",
+                config_with("host = \"127.1\"\nmode = \"tunnel\""),
+            ),
+            (
+                "three-part IPv4 address",
+                config_with("host = \"127.0.1\"\nmode = \"tunnel\""),
+            ),
+            (
+                "octal IPv4 address",
+                config_with("host = \"0177.0.0.1\"\nmode = \"tunnel\""),
+            ),
+            (
+                "hexadecimal IPv4 address",
+                config_with("host = \"0x7f.1\"\nmode = \"tunnel\""),
+            ),
+            (
+                "single-integer IPv4 address",
+                config_with("host = \"2130706433\"\nmode = \"tunnel\""),
             ),
             (
                 "zero port",
