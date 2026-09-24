@@ -73,6 +73,8 @@ max_connections_per_session = 128
 shutdown_grace_seconds = 5
 control_read_timeout_ms = 5000
 max_provisioning_requests = 8
+connection_timeout_ms = 5000
+io_timeout_ms = 30000
 
 [ca]
 certificate = "/var/lib/baffle/ca.pem"
@@ -84,6 +86,8 @@ allowed = ["github-api", "github-git"] # symbolic names available to the trusted
 ```
 
 Runtime directories, ownership and permissions must be controlled by the daemon (typically a private runtime directory with mode `0700`). Production integrations should expose only explicitly selected proxy data sockets to clients, not the entire proxy socket directory. The CA public certificate can be separately mounted into clients that need to trust intercepted HTTPS; the CA private key must remain daemon-only. Secrets are loaded by stable symbolic name from daemon-managed storage and are never sourced from client-supplied filesystem paths. The daemon's `secrets.allowed` list grants the trusted operator access to specific names; it is empty when omitted. The daemon authenticates the control peer before it checks these entitlements and resolves the referenced files.
+
+`connection_timeout_ms` bounds each Unix-to-loopback bridge connection attempt. `io_timeout_ms` bounds each bridge read, write, and half-close operation. A bridge closes when either direction makes no I/O progress within this interval; active traffic remains streamed without buffering the full request or response.
 
 ### 5.2 Example session configuration
 

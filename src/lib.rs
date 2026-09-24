@@ -6,3 +6,4 @@ pub mod control;
 pub mod daemon;
 pub mod proxy_runtime;
 mod secrets;
+pub mod telemetry;

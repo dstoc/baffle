@@ -22,6 +22,8 @@ const DEFAULT_MAX_CONNECTIONS_PER_SESSION: usize = 128;
 const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 5;
 const DEFAULT_CONTROL_READ_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_MAX_PROVISIONING_REQUESTS: usize = 8;
+const DEFAULT_CONNECTION_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_IO_TIMEOUT_MS: u64 = 30_000;
 
 /// A safe configuration error. Error text never contains input values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +84,8 @@ pub struct DaemonSettings {
     pub shutdown_grace_seconds: u64,
     pub control_read_timeout_ms: u64,
     pub max_provisioning_requests: usize,
+    pub connection_timeout_ms: u64,
+    pub io_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +114,8 @@ impl DaemonConfig {
             shutdown_grace_seconds: raw.daemon.shutdown_grace_seconds,
             control_read_timeout_ms: raw.daemon.control_read_timeout_ms,
             max_provisioning_requests: raw.daemon.max_provisioning_requests,
+            connection_timeout_ms: raw.daemon.connection_timeout_ms,
+            io_timeout_ms: raw.daemon.io_timeout_ms,
         };
         if daemon.max_sessions == 0 {
             return Err(ConfigError::new(
@@ -129,6 +135,16 @@ impl DaemonConfig {
         if daemon.max_provisioning_requests == 0 {
             return Err(ConfigError::new(
                 "daemon.max_provisioning_requests must be greater than zero",
+            ));
+        }
+        if daemon.connection_timeout_ms == 0 {
+            return Err(ConfigError::new(
+                "daemon.connection_timeout_ms must be greater than zero",
+            ));
+        }
+        if daemon.io_timeout_ms == 0 {
+            return Err(ConfigError::new(
+                "daemon.io_timeout_ms must be greater than zero",
             ));
         }
 
@@ -689,6 +705,10 @@ struct RawDaemonSettings {
     control_read_timeout_ms: u64,
     #[serde(default = "default_max_provisioning_requests")]
     max_provisioning_requests: usize,
+    #[serde(default = "default_connection_timeout_ms")]
+    connection_timeout_ms: u64,
+    #[serde(default = "default_io_timeout_ms")]
+    io_timeout_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -724,6 +744,14 @@ fn default_control_read_timeout_ms() -> u64 {
 
 fn default_max_provisioning_requests() -> usize {
     DEFAULT_MAX_PROVISIONING_REQUESTS
+}
+
+fn default_connection_timeout_ms() -> u64 {
+    DEFAULT_CONNECTION_TIMEOUT_MS
+}
+
+fn default_io_timeout_ms() -> u64 {
+    DEFAULT_IO_TIMEOUT_MS
 }
 
 #[derive(Deserialize)]
@@ -895,6 +923,8 @@ directory = "/var/lib/baffle/secrets"
         assert_eq!(config.daemon.trusted_operator_uid, 1000);
         assert_eq!(config.daemon.control_read_timeout_ms, 5_000);
         assert_eq!(config.daemon.max_provisioning_requests, 8);
+        assert_eq!(config.daemon.connection_timeout_ms, 5_000);
+        assert_eq!(config.daemon.io_timeout_ms, 30_000);
     }
 
     #[test]
@@ -1142,7 +1172,12 @@ format = "raw"
         let missing_operator = DAEMON_EXAMPLE.replace("trusted_operator_uid = 1000\n", "");
         assert!(DaemonConfig::from_toml(&missing_operator).is_err());
 
-        for field in ["control_read_timeout_ms", "max_provisioning_requests"] {
+        for field in [
+            "control_read_timeout_ms",
+            "max_provisioning_requests",
+            "connection_timeout_ms",
+            "io_timeout_ms",
+        ] {
             let input = DAEMON_EXAMPLE.replace(
                 "shutdown_grace_seconds = 5",
                 &format!("shutdown_grace_seconds = 5\n{field} = 0"),

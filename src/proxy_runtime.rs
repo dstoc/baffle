@@ -18,14 +18,14 @@ use hudsucker::{
     tokio_tungstenite::tungstenite::Message,
 };
 use tokio::{
-    io::copy_bidirectional,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, UnixListener},
     sync::Semaphore,
     task::{AbortHandle, JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{ca::ManagedCa, config::SessionConfig};
+use crate::{ca::ManagedCa, config::SessionConfig, telemetry::Metrics};
 
 /// A stable identifier for one running Hudsucker instance.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -52,17 +52,31 @@ pub enum ProxyRuntimeError {
     Task(String),
 }
 
+impl ProxyRuntimeError {
+    pub fn class(&self) -> &'static str {
+        match self {
+            Self::Bind(_) => "bind",
+            Self::BindSocket(_) => "socket_bind",
+            Self::Bridge(_) => "bridge",
+            Self::Build(_) => "proxy_build",
+            Self::Run(_) => "proxy_run",
+            Self::Task(_) => "task",
+        }
+    }
+}
+
 impl fmt::Display for ProxyRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bind(error) => write!(formatter, "could not bind proxy listener: {error}"),
-            Self::BindSocket(error) => {
-                write!(formatter, "could not bind proxy Unix socket: {error}")
+            Self::Bind(_) => formatter.write_str("could not bind proxy listener"),
+            Self::BindSocket(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                formatter.write_str("proxy Unix socket path already exists")
             }
-            Self::Bridge(error) => write!(formatter, "proxy Unix socket bridge failed: {error}"),
-            Self::Build(error) => write!(formatter, "could not build proxy: {error}"),
-            Self::Run(error) => write!(formatter, "proxy runtime failed: {error}"),
-            Self::Task(error) => write!(formatter, "proxy runtime task failed: {error}"),
+            Self::BindSocket(_) => formatter.write_str("could not bind proxy Unix socket"),
+            Self::Bridge(_) => formatter.write_str("proxy Unix socket bridge failed"),
+            Self::Build(_) => formatter.write_str("could not build proxy"),
+            Self::Run(_) => formatter.write_str("proxy runtime failed"),
+            Self::Task(_) => formatter.write_str("proxy runtime task failed"),
         }
     }
 }
@@ -85,6 +99,7 @@ pub struct ProxyRuntime {
     runtime_abort: AbortHandle,
     bridge_abort: AbortHandle,
     task: JoinHandle<()>,
+    metrics: Arc<Metrics>,
 }
 
 impl ProxyRuntime {
@@ -99,6 +114,32 @@ impl ProxyRuntime {
         ca: Arc<ManagedCa>,
         socket_path: PathBuf,
         max_connections: usize,
+        events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
+    ) -> Result<Self, ProxyRuntimeError> {
+        Self::start_with_metrics(
+            runtime_id,
+            session,
+            ca,
+            socket_path,
+            max_connections,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            Arc::new(Metrics::default()),
+            events,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_with_metrics(
+        runtime_id: RuntimeId,
+        session: SessionConfig,
+        ca: Arc<ManagedCa>,
+        socket_path: PathBuf,
+        max_connections: usize,
+        connection_timeout: Duration,
+        io_timeout: Duration,
+        metrics: Arc<Metrics>,
         events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
     ) -> Result<Self, ProxyRuntimeError> {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -118,11 +159,13 @@ impl ProxyRuntime {
             .with_rustls_connector(aws_lc_rs::default_provider())
             .with_http_handler(DenyAllHandler {
                 runtime_id: runtime_id.clone(),
-                _session: session.clone(),
+                session: session.clone(),
+                metrics: Arc::clone(&metrics),
             })
             .with_websocket_handler(DenyAllHandler {
                 runtime_id: runtime_id.clone(),
-                _session: session,
+                session,
+                metrics: Arc::clone(&metrics),
             })
             .with_graceful_shutdown(async move {
                 shutdown.cancelled().await;
@@ -133,10 +176,16 @@ impl ProxyRuntime {
         let mut bridge_task = tokio::spawn(run_bridge(
             unix_listener,
             socket_guard,
-            local_addr,
-            Arc::new(Semaphore::new(max_connections)),
-            bridge_ingress_shutdown.clone(),
-            bridge_force_cancellation.clone(),
+            BridgeSettings {
+                upstream: local_addr,
+                permits: Arc::new(Semaphore::new(max_connections)),
+                connection_timeout,
+                io_timeout,
+                ingress_shutdown: bridge_ingress_shutdown.clone(),
+                force_cancellation: bridge_force_cancellation.clone(),
+                metrics: Arc::clone(&metrics),
+                runtime_id: runtime_id.clone(),
+            },
         ));
         let bridge_abort = bridge_task.abort_handle();
 
@@ -168,6 +217,14 @@ impl ProxyRuntime {
                 }
             };
             let result = runtime_result.and(bridge_result);
+            if result.is_err() {
+                tracing::error!(
+                    event = "session_lifecycle",
+                    session_id = %event_id.as_str(),
+                    state = "failed",
+                    "proxy session task failed"
+                );
+            }
             let _ = events.send(ProxyRuntimeEvent {
                 runtime_id: event_id,
                 result,
@@ -184,6 +241,7 @@ impl ProxyRuntime {
             runtime_abort,
             bridge_abort,
             task,
+            metrics,
         })
     }
 
@@ -203,12 +261,32 @@ impl ProxyRuntime {
 
     /// Ask Hudsucker to drain active connections, then bound the wait.
     pub async fn shutdown(mut self, grace: Duration) {
+        tracing::info!(
+            event = "session_lifecycle",
+            session_id = %self.runtime_id.as_str(),
+            state = "stopping",
+            "proxy session shutdown started"
+        );
         self.bridge_ingress_shutdown.cancel();
         self.cancellation.cancel();
         if tokio::time::timeout(grace, &mut self.task).await.is_err() {
+            let forced_shutdowns = self.metrics.forced_shutdown();
+            tracing::warn!(
+                event = "forced_shutdown",
+                session_id = %self.runtime_id.as_str(),
+                forced_shutdowns,
+                "proxy session exceeded its shutdown grace period"
+            );
             self.runtime_abort.abort();
             self.bridge_abort.abort();
             let _ = (&mut self.task).await;
+        } else {
+            tracing::info!(
+                event = "session_lifecycle",
+                session_id = %self.runtime_id.as_str(),
+                state = "stopped",
+                "proxy session stopped"
+            );
         }
     }
 }
@@ -309,14 +387,32 @@ fn bind_unix_listener(path: &Path) -> io::Result<(UnixListener, UnixSocketGuard)
     UnixSocketGuard::bind(path)
 }
 
+struct BridgeSettings {
+    upstream: SocketAddr,
+    permits: Arc<Semaphore>,
+    connection_timeout: Duration,
+    io_timeout: Duration,
+    ingress_shutdown: CancellationToken,
+    force_cancellation: CancellationToken,
+    metrics: Arc<Metrics>,
+    runtime_id: RuntimeId,
+}
+
 async fn run_bridge(
     listener: UnixListener,
     socket_guard: UnixSocketGuard,
-    upstream: SocketAddr,
-    permits: Arc<Semaphore>,
-    ingress_shutdown: CancellationToken,
-    force_cancellation: CancellationToken,
+    settings: BridgeSettings,
 ) -> io::Result<()> {
+    let BridgeSettings {
+        upstream,
+        permits,
+        connection_timeout,
+        io_timeout,
+        ingress_shutdown,
+        force_cancellation,
+        metrics,
+        runtime_id,
+    } = settings;
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -325,11 +421,18 @@ async fn run_bridge(
             _ = force_cancellation.cancelled() => break,
             Some(result) = connections.join_next(), if !connections.is_empty() => {
                 if let Err(error) = result {
-                    tracing::debug!(%error, "proxy bridge connection task failed");
+                    metrics.bridge_failure();
+                    return Err(io::Error::other(format!("bridge connection task failed: {error}")));
                 }
             }
             accepted = listener.accept() => {
-                let (mut unix_stream, _) = accepted?;
+                let (mut unix_stream, _) = match accepted {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        metrics.bridge_failure();
+                        return Err(error);
+                    }
+                };
                 let permit = match Arc::clone(&permits).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
@@ -337,18 +440,55 @@ async fn run_bridge(
                         continue;
                     }
                 };
+                metrics.connection_started();
+                let connection_metrics = Arc::clone(&metrics);
+                let session_id = runtime_id.clone();
+                let connection_guard = ActiveConnectionGuard(Arc::clone(&metrics));
                 let connection_cancellation = force_cancellation.clone();
                 connections.spawn(async move {
+                    let _connection_guard = connection_guard;
                     tokio::select! {
                         biased;
                         _ = connection_cancellation.cancelled() => {}
                         result = async {
-                            let mut tcp_stream = TcpStream::connect(upstream).await?;
-                            copy_bidirectional(&mut unix_stream, &mut tcp_stream).await?;
+                            let mut tcp_stream = match tokio::time::timeout(
+                                connection_timeout,
+                                TcpStream::connect(upstream),
+                            ).await {
+                                Ok(Ok(stream)) => stream,
+                                Ok(Err(error)) => {
+                                    let failures = connection_metrics.upstream_failure();
+                                    tracing::warn!(
+                                        event = "upstream_failure",
+                                        session_id = %session_id.as_str(),
+                                        upstream_failures = failures,
+                                        error_kind = ?error.kind(),
+                                        "proxy bridge could not connect to its upstream listener"
+                                    );
+                                    return Err(error);
+                                }
+                                Err(_) => {
+                                    let failures = connection_metrics.upstream_failure();
+                                    tracing::warn!(
+                                        event = "upstream_failure",
+                                        session_id = %session_id.as_str(),
+                                        upstream_failures = failures,
+                                        error_kind = "timed_out",
+                                        "proxy bridge connection timed out"
+                                    );
+                                    return Err(io::Error::new(io::ErrorKind::TimedOut, "upstream connection timed out"));
+                                }
+                            };
+                            copy_bidirectional_with_timeout(&mut unix_stream, &mut tcp_stream, io_timeout).await?;
                             Ok::<(), io::Error>(())
                         } => {
                             if let Err(error) = result {
-                                tracing::debug!(%error, "proxy bridge connection closed with an error");
+                                tracing::debug!(
+                                    event = "bridge_connection_closed",
+                                    session_id = %session_id.as_str(),
+                                    error_kind = ?error.kind(),
+                                    "proxy bridge connection closed"
+                                );
                             }
                         }
                     }
@@ -365,25 +505,124 @@ async fn run_bridge(
 
     while let Some(result) = connections.join_next().await {
         if let Err(error) = result {
-            tracing::debug!(%error, "proxy bridge connection task failed during shutdown");
+            metrics.bridge_failure();
+            return Err(io::Error::other(format!(
+                "bridge connection task failed during shutdown: {error}"
+            )));
         }
     }
     Ok(())
 }
 
+struct ActiveConnectionGuard(Arc<Metrics>);
+
+impl Drop for ActiveConnectionGuard {
+    fn drop(&mut self) {
+        self.0.connection_stopped();
+    }
+}
+
+async fn copy_bidirectional_with_timeout<A, B>(
+    left: &mut A,
+    right: &mut B,
+    io_timeout: Duration,
+) -> io::Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    let (left_reader, left_writer) = tokio::io::split(left);
+    let (right_reader, right_writer) = tokio::io::split(right);
+    let left_to_right = copy_with_timeout(left_reader, right_writer, io_timeout);
+    let right_to_left = copy_with_timeout(right_reader, left_writer, io_timeout);
+    tokio::try_join!(left_to_right, right_to_left)
+}
+
+async fn copy_with_timeout<R, W>(
+    mut reader: R,
+    mut writer: W,
+    io_timeout: Duration,
+) -> io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buffer = [0; 8 * 1024];
+    let mut copied = 0_u64;
+    loop {
+        let read = tokio::time::timeout(io_timeout, reader.read(&mut buffer))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "proxy read timed out"))??;
+        if read == 0 {
+            tokio::time::timeout(io_timeout, writer.shutdown())
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "proxy write shutdown timed out")
+                })??;
+            return Ok(copied);
+        }
+        tokio::time::timeout(io_timeout, writer.write_all(&buffer[..read]))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "proxy write timed out"))??;
+        copied = copied.saturating_add(read as u64);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{fs, sync::Arc, time::Duration};
 
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, UnixStream},
+        net::{TcpListener, TcpStream, UnixStream},
         sync::Semaphore,
         time::timeout,
     };
     use tokio_util::sync::CancellationToken;
 
-    use super::{UnixSocketGuard, run_bridge};
+    use super::{BridgeSettings, ProxyRuntime, RuntimeId, UnixSocketGuard, run_bridge};
+    use crate::{
+        ca::ManagedCa,
+        config::{CaConfig, ControlRequest},
+        telemetry::Metrics,
+    };
+    use hudsucker::rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
+
+    fn write_test_ca(directory: &std::path::Path) -> Arc<ManagedCa> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let key_pair = KeyPair::generate().expect("CA key should be generated");
+        let mut parameters = CertificateParams::default();
+        parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let certificate = parameters
+            .self_signed(&key_pair)
+            .expect("CA certificate should be generated");
+        let certificate_path = directory.join("runtime-test-ca.pem");
+        let private_key_path = directory.join("runtime-test-ca-key.pem");
+        fs::write(&certificate_path, certificate.pem()).expect("CA certificate should be saved");
+        fs::write(&private_key_path, key_pair.serialize_pem()).expect("CA key should be saved");
+        fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o600))
+            .expect("CA key permissions should be restricted");
+        Arc::new(
+            ManagedCa::load(&CaConfig {
+                certificate: certificate_path,
+                private_key: private_key_path,
+            })
+            .expect("test CA should load"),
+        )
+    }
+
+    fn session_config() -> crate::config::SessionConfig {
+        let ControlRequest::Create { session, .. } = ControlRequest::from_toml(
+            "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"runtime.example.test\"\nmode = \"tunnel\"\n",
+        )
+        .expect("session config should parse")
+        else {
+            panic!("test request should create a session");
+        };
+        session
+    }
 
     #[tokio::test]
     async fn admission_limit_rejects_before_opening_another_upstream_connection() {
@@ -402,10 +641,16 @@ mod tests {
         let bridge = tokio::spawn(run_bridge(
             unix_listener,
             socket_guard,
-            upstream_address,
-            Arc::new(Semaphore::new(1)),
-            cancellation.clone(),
-            force_cancellation.clone(),
+            BridgeSettings {
+                upstream: upstream_address,
+                permits: Arc::new(Semaphore::new(1)),
+                connection_timeout: Duration::from_secs(1),
+                io_timeout: Duration::from_secs(1),
+                ingress_shutdown: cancellation.clone(),
+                force_cancellation: force_cancellation.clone(),
+                metrics: Arc::new(Metrics::default()),
+                runtime_id: RuntimeId::new("bridge-test"),
+            },
         ));
 
         let _first_client = UnixStream::connect(&socket_path)
@@ -462,10 +707,16 @@ mod tests {
         let bridge = tokio::spawn(run_bridge(
             unix_listener,
             socket_guard,
-            upstream_address,
-            Arc::new(Semaphore::new(1)),
-            ingress_shutdown.clone(),
-            force_cancellation,
+            BridgeSettings {
+                upstream: upstream_address,
+                permits: Arc::new(Semaphore::new(1)),
+                connection_timeout: Duration::from_secs(1),
+                io_timeout: Duration::from_secs(1),
+                ingress_shutdown: ingress_shutdown.clone(),
+                force_cancellation,
+                metrics: Arc::new(Metrics::default()),
+                runtime_id: RuntimeId::new("bridge-test"),
+            },
         ));
 
         let mut client = UnixStream::connect(&socket_path)
@@ -522,6 +773,113 @@ mod tests {
             .expect("bridge task should join")
             .expect("bridge should shut down cleanly");
     }
+
+    #[tokio::test]
+    async fn idle_bridge_io_times_out_and_releases_its_connection_slot() {
+        let directory = tempfile::tempdir().expect("test directory should be created");
+        let socket_path = directory.path().join("idle.sock");
+        let (unix_listener, socket_guard) =
+            UnixSocketGuard::bind(&socket_path).expect("Unix bridge should bind");
+        let upstream = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test upstream should bind");
+        let upstream_address = upstream
+            .local_addr()
+            .expect("test upstream address should be available");
+        let ingress_shutdown = CancellationToken::new();
+        let force_cancellation = CancellationToken::new();
+        let metrics = Arc::new(Metrics::default());
+        let bridge = tokio::spawn(run_bridge(
+            unix_listener,
+            socket_guard,
+            BridgeSettings {
+                upstream: upstream_address,
+                permits: Arc::new(Semaphore::new(1)),
+                connection_timeout: Duration::from_secs(1),
+                io_timeout: Duration::from_millis(50),
+                ingress_shutdown: ingress_shutdown.clone(),
+                force_cancellation,
+                metrics: Arc::clone(&metrics),
+                runtime_id: RuntimeId::new("idle-bridge"),
+            },
+        ));
+
+        let mut client = UnixStream::connect(&socket_path)
+            .await
+            .expect("Unix client should connect");
+        let (_upstream_stream, _) = timeout(Duration::from_secs(2), upstream.accept())
+            .await
+            .expect("bridge should connect to its upstream")
+            .expect("upstream accept should succeed");
+        let mut byte = [0; 1];
+        let read = timeout(Duration::from_secs(1), client.read(&mut byte))
+            .await
+            .expect("idle bridge should close after the I/O timeout")
+            .expect("timed out bridge should close cleanly");
+        assert_eq!(read, 0);
+        assert_eq!(metrics.snapshot().active_connections, 0);
+        assert_eq!(metrics.snapshot().upstream_failures, 0);
+
+        ingress_shutdown.cancel();
+        timeout(Duration::from_secs(1), bridge)
+            .await
+            .expect("bridge should stop after ingress cancellation")
+            .expect("bridge task should join")
+            .expect("bridge should shut down cleanly");
+        assert!(!socket_path.exists());
+    }
+
+    #[tokio::test]
+    async fn one_proxy_task_failure_is_reported_without_stopping_another_session() {
+        let directory = tempfile::tempdir().expect("test directory should be created");
+        let ca = write_test_ca(directory.path());
+        let (event_sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let first_id = RuntimeId::new("runtime-fails");
+        let first = ProxyRuntime::start(
+            first_id.clone(),
+            session_config(),
+            Arc::clone(&ca),
+            directory.path().join("fails.sock"),
+            4,
+            event_sender.clone(),
+        )
+        .await
+        .expect("first runtime should start");
+        let second = ProxyRuntime::start(
+            RuntimeId::new("runtime-survives"),
+            session_config(),
+            ca,
+            directory.path().join("survives.sock"),
+            4,
+            event_sender,
+        )
+        .await
+        .expect("second runtime should start");
+
+        first.runtime_abort.abort();
+        let failure = timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("failed runtime should report its exit")
+            .expect("runtime event channel should remain open");
+        assert_eq!(failure.runtime_id, first_id);
+        assert!(
+            failure.result.is_err(),
+            "runtime task failure should propagate"
+        );
+        let surviving_connection = timeout(
+            Duration::from_secs(2),
+            TcpStream::connect(second.local_addr()),
+        )
+        .await
+        .expect("peer runtime should keep accepting connections")
+        .expect("peer runtime should remain available");
+        drop(surviving_connection);
+
+        first.shutdown(Duration::from_secs(1)).await;
+        second.shutdown(Duration::from_secs(1)).await;
+        assert!(!directory.path().join("fails.sock").exists());
+        assert!(!directory.path().join("survives.sock").exists());
+    }
 }
 
 impl Drop for ProxyRuntime {
@@ -540,18 +898,32 @@ impl Drop for ProxyRuntime {
 #[derive(Clone)]
 struct DenyAllHandler {
     runtime_id: RuntimeId,
+    session: SessionConfig,
+    metrics: Arc<Metrics>,
     // Retain the validated, immutable policy with its own handler state. Policy
     // decisions are added in the filtering milestone; this runtime denies all.
-    _session: SessionConfig,
 }
 
 impl HttpHandler for DenyAllHandler {
     fn handle_request(
         &mut self,
         _ctx: &HttpContext,
-        _request: Request<Body>,
+        request: Request<Body>,
     ) -> impl Future<Output = RequestOrResponse> + Send {
-        tracing::debug!(runtime_id = %self.runtime_id.as_str(), "denying outbound proxy request");
+        let destination = request_destination(&request);
+        let matched_rule = request_matched_rule(&request, &self.session);
+        let request_count = self.metrics.denied_request();
+        tracing::info!(
+            event = "request_decision",
+            session_id = %self.runtime_id.as_str(),
+            method = %request.method(),
+            destination = %destination,
+            matched_rule = matched_rule.as_deref().unwrap_or("none"),
+            outcome = "denied",
+            reason = "policy_handler_fail_closed",
+            denied_requests = request_count,
+            "proxy request denied"
+        );
         async {
             Response::builder()
                 .status(StatusCode::FORBIDDEN)
@@ -559,6 +931,107 @@ impl HttpHandler for DenyAllHandler {
                 .expect("static deny response is valid")
                 .into()
         }
+    }
+}
+
+fn request_authority(request: &Request<Body>) -> Option<hudsucker::hyper::http::uri::Authority> {
+    request.uri().authority().cloned().or_else(|| {
+        request
+            .headers()
+            .get(hudsucker::hyper::http::header::HOST)?
+            .to_str()
+            .ok()?
+            .parse()
+            .ok()
+    })
+}
+
+fn safe_authority_host(authority: &hudsucker::hyper::http::uri::Authority) -> Option<String> {
+    let host = authority.host();
+    if host.is_empty()
+        || host.len() > 253
+        || !host.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+        })
+    {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+fn request_destination(request: &Request<Body>) -> String {
+    let Some((host, port)) = request_destination_parts(request) else {
+        return "unknown".into();
+    };
+    match port {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    }
+}
+
+fn request_destination_parts(request: &Request<Body>) -> Option<(String, Option<u16>)> {
+    let authority = request_authority(request)?;
+    let host = safe_authority_host(&authority)?;
+    let port = authority
+        .port_u16()
+        .or_else(|| match request.uri().scheme_str() {
+            Some("http") => Some(80),
+            Some("https") => Some(443),
+            _ => None,
+        });
+    Some((host, port))
+}
+
+fn request_matched_rule(request: &Request<Body>, session: &SessionConfig) -> Option<String> {
+    let (host, port) = request_destination_parts(request)?;
+    let port = port?;
+    session
+        .rules
+        .iter()
+        .find(|rule| rule.host == host && rule.ports.contains(&port))
+        .map(|rule| format!("{}:{port}", rule.host))
+}
+
+#[cfg(test)]
+mod request_log_tests {
+    use super::{DenyAllHandler, RuntimeId, request_destination, request_matched_rule};
+    use crate::{config::ControlRequest, telemetry::Metrics};
+    use hudsucker::{Body, hyper::Request};
+    use std::sync::Arc;
+
+    fn session_config() -> crate::config::SessionConfig {
+        let ControlRequest::Create { session, .. } = ControlRequest::from_toml(
+            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"api.example.test\"\nmode = \"intercept\"\n",
+        )
+        .expect("session config should parse")
+        else {
+            panic!("test request should create a session");
+        };
+        session
+    }
+
+    #[test]
+    fn request_metadata_excludes_path_query_and_credentials() {
+        let request = Request::builder()
+            .uri("https://user:password@api.example.test/private?token=secret")
+            .body(Body::empty())
+            .expect("request should build");
+        assert_eq!(request_destination(&request), "api.example.test:443");
+        assert_eq!(
+            request_matched_rule(&request, &session_config()).as_deref(),
+            Some("api.example.test:443")
+        );
+        let wrong_port = Request::builder()
+            .uri("https://api.example.test:8443/private?token=secret")
+            .body(Body::empty())
+            .expect("request should build");
+        assert_eq!(request_matched_rule(&wrong_port, &session_config()), None);
+        let handler = DenyAllHandler {
+            runtime_id: RuntimeId::new("test-session"),
+            session: session_config(),
+            metrics: Arc::new(Metrics::default()),
+        };
+        assert_eq!(handler.runtime_id.as_str(), "test-session");
     }
 }
 
