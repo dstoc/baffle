@@ -7,7 +7,7 @@ use baffle_proxy::{
 };
 use hudsucker::rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream, UnixStream},
     sync::mpsc,
     time::timeout,
@@ -19,6 +19,18 @@ fn session_config() -> SessionConfig {
     )
     .expect("test session should be valid");
     let ControlRequest::Create { session, .. } = request else {
+        panic!("test request should create a session");
+    };
+    session
+}
+
+fn intercept_session_config(port: u16) -> SessionConfig {
+    let toml = format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]\n"
+    );
+    let ControlRequest::Create { session, .. } =
+        ControlRequest::from_toml(&toml).expect("intercept session should be valid")
+    else {
         panic!("test request should create a session");
     };
     session
@@ -140,6 +152,83 @@ async fn multiple_proxy_instances_deny_outbound_requests_and_stop_independently(
     second.shutdown(Duration::from_secs(2)).await;
     assert_exit(&mut events, &second_id).await;
     assert!(!directory.path().join("second.sock").exists());
+}
+
+#[tokio::test]
+async fn intercept_connect_with_unknown_payload_does_not_open_an_opaque_tunnel() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream
+        .local_addr()
+        .expect("test upstream address should be available")
+        .port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-intercept-unknown-connect");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(upstream_port),
+        ca,
+        directory.path().join("intercept.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("intercept runtime should start");
+
+    let mut client = TcpStream::connect(runtime.local_addr())
+        .await
+        .expect("proxy should accept CONNECT");
+    let request = format!(
+        "CONNECT localhost:{upstream_port} HTTP/1.1\r\nHost: localhost:{upstream_port}\r\n\r\n"
+    );
+    client
+        .write_all(request.as_bytes())
+        .await
+        .expect("CONNECT request should be sent");
+    let mut client = BufReader::new(client);
+    let mut status = String::new();
+    timeout(Duration::from_secs(2), client.read_line(&mut status))
+        .await
+        .expect("proxy should respond to CONNECT")
+        .expect("CONNECT response should be readable");
+    assert!(
+        status.starts_with("HTTP/1.1 200"),
+        "unexpected response: {status:?}"
+    );
+    loop {
+        let mut header = String::new();
+        timeout(Duration::from_secs(2), client.read_line(&mut header))
+            .await
+            .expect("CONNECT response headers should arrive")
+            .expect("CONNECT response header should be readable");
+        if header == "\r\n" || header.is_empty() {
+            break;
+        }
+    }
+
+    client
+        .get_mut()
+        .write_all(b"NOPE")
+        .await
+        .expect("unknown CONNECT payload should be sent");
+    assert!(
+        timeout(Duration::from_millis(250), upstream.accept())
+            .await
+            .is_err(),
+        "intercept mode must not connect to the destination for an unknown payload"
+    );
+    let mut byte = [0; 1];
+    let read = timeout(Duration::from_secs(2), client.read(&mut byte))
+        .await
+        .expect("proxy should close an unsupported intercepted payload")
+        .expect("proxy connection should close cleanly");
+    assert_eq!(read, 0, "unsupported payload must not receive tunnel data");
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
 }
 
 async fn assert_unix_proxy_denied(path: &std::path::Path) {

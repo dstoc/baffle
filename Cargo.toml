@@ -31,3 +31,6 @@ x509-parser = "0.18.1"
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio-rustls = "0.26.5"
+
+[patch.crates-io]
+hudsucker = { path = "vendor/hudsucker" }

@@ -909,6 +909,7 @@ pub(crate) struct PolicyHandler {
 }
 
 impl PolicyHandler {
+    #[cfg(test)]
     pub(crate) fn new(runtime_id: RuntimeId, policy: Arc<SessionPolicy>) -> Self {
         Self::with_metrics(runtime_id, policy, Arc::new(Metrics::default()))
     }
@@ -1018,11 +1019,13 @@ fn request_destination(request: &Request<Body>) -> String {
     let Some(host) = safe_authority_host(&authority) else {
         return "unknown".into();
     };
-    match authority.port_u16().or_else(|| match request.uri().scheme_str() {
-        Some("http") => Some(80),
-        Some("https") => Some(443),
-        _ => None,
-    }) {
+    match authority
+        .port_u16()
+        .or_else(|| match request.uri().scheme_str() {
+            Some("http") => Some(80),
+            Some("https") => Some(443),
+            _ => None,
+        }) {
         Some(port) => format!("{host}:{port}"),
         None => host,
     }
@@ -1054,7 +1057,8 @@ mod request_log_tests {
             .expect("request should build");
         assert_eq!(request_destination(&request), "api.example.test:443");
 
-        let handler = PolicyHandler::new(RuntimeId::new("test-session"), Arc::new(session_policy()));
+        let handler =
+            PolicyHandler::new(RuntimeId::new("test-session"), Arc::new(session_policy()));
         let denied = Request::builder()
             .uri("https://example.net/private?token=secret")
             .body(Body::empty())
