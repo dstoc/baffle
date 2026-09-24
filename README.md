@@ -31,6 +31,6 @@ Start the daemon with a configuration path:
 
     cargo run -- daemon --config ./daemon.toml
 
-The initial daemon accepts this command and waits for Ctrl-C to exit. It does not load the configuration file yet. TOML loading and validation, Unix sockets, and proxy sessions will be added in later implementation work.
+The daemon loads and validates the TOML configuration before it starts. It still waits for Ctrl-C to exit; Unix sockets and proxy sessions will be added in later implementation work.
 
 Read the [Baffle proposal](docs/baffle-proposal.md) for the full architecture, security requirements, and delivery plan.
