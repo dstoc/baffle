@@ -67,9 +67,12 @@ Baffle has two separate TOML configuration surfaces: a **daemon configuration**,
 [daemon]
 control_socket = "/run/baffle/control.sock"
 socket_dir = "/run/baffle/proxies"
+trusted_operator_uid = 1000 # set to the daemon operator's numeric Linux UID
 max_sessions = 64
 max_connections_per_session = 128
 shutdown_grace_seconds = 5
+control_read_timeout_ms = 5000
+max_provisioning_requests = 8
 
 [ca]
 certificate = "/var/lib/baffle/ca.pem"
@@ -85,6 +88,7 @@ Runtime directories, ownership and permissions must be controlled by the daemon 
 
 ```toml
 operation = "create"
+version = 1
 
 [session]
 persistent = false
