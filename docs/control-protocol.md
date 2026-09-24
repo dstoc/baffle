@@ -25,6 +25,24 @@ creates missing control directories with mode `0700`, requires existing
 directories to have mode `0700` or stricter, and sets the socket mode to
 `0600`.
 
+Secret access uses a daemon-owned allowlist. For example:
+
+```toml
+[secrets]
+directory = "/var/lib/baffle/secrets"
+allowed = ["github-api", "github-git"]
+```
+
+The allowlist is empty when omitted. Each name must be a symbolic identifier;
+client requests cannot add entitlements or select filesystem paths. Before a
+create request provisions a session, Baffle checks every requested name against
+the authenticated operator's allowlist and resolves each file from the private
+directory. Secret files must be regular files owned by the trusted operator,
+readable by that account, and inaccessible to group and other users. Missing,
+inaccessible, and unentitled secrets produce the same safe control error.
+Resolved values stay in the owning session's private runtime state and never
+appear in responses or diagnostics.
+
 ## Requests
 
 Every request must include `version = 1`. Baffle rejects a missing version and
@@ -97,4 +115,5 @@ Stable error codes are:
 | `busy` | The concurrent provisioning limit is full. |
 | `session_limit` | The configured maximum number of sessions is full. |
 | `session_not_found` | `stop` named an unknown session. |
+| `secret_unavailable` | One or more referenced secrets are missing, inaccessible, or not entitled to the authenticated operator. |
 | `internal_error` | The daemon could not complete the request. |

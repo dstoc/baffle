@@ -80,9 +80,10 @@ private_key = "/var/lib/baffle/ca-key.pem"
 
 [secrets]
 directory = "/var/lib/baffle/secrets"
+allowed = ["github-api", "github-git"] # symbolic names available to the trusted operator
 ```
 
-Runtime directories, ownership and permissions must be controlled by the daemon (typically a private runtime directory with mode `0700`). Production integrations should expose only explicitly selected proxy data sockets to clients, not the entire proxy socket directory. The CA public certificate can be separately mounted into clients that need to trust intercepted HTTPS; the CA private key must remain daemon-only. Secrets are loaded by stable symbolic name from daemon-managed storage and are never sourced from client-supplied filesystem paths.
+Runtime directories, ownership and permissions must be controlled by the daemon (typically a private runtime directory with mode `0700`). Production integrations should expose only explicitly selected proxy data sockets to clients, not the entire proxy socket directory. The CA public certificate can be separately mounted into clients that need to trust intercepted HTTPS; the CA private key must remain daemon-only. Secrets are loaded by stable symbolic name from daemon-managed storage and are never sourced from client-supplied filesystem paths. The daemon's `secrets.allowed` list grants the trusted operator access to specific names; it is empty when omitted. The daemon authenticates the control peer before it checks these entitlements and resolves the referenced files.
 
 ### 5.2 Example session configuration
 
