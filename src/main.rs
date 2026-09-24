@@ -10,6 +10,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         baffle_proxy::cli::Command::Daemon(args) => daemon::run(&args.config).await,
+        baffle_proxy::cli::Command::Ca(args) => match args.command {
+            baffle_proxy::cli::CaCommand::Export(args) => {
+                daemon::export_ca_certificate(&args.config, &args.output)
+            }
+        },
     }
 }
 
