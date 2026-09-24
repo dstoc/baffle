@@ -92,8 +92,12 @@ Every response has `version` and `ok` fields. A successful response contains a
 {"version":1,"ok":true,"result":{"id":"...","socket":"...sock","persistent":false}}
 ```
 
-`list` returns the session metadata array in `result.sessions`. `stop` returns
-`result.stopped = true` after it removes the named session.
+`list` returns the caller's session metadata in `result.sessions`. Each entry
+contains only `id`, `socket`, `persistent`, and `state`; it does not expose the
+validated policy or resolved credentials. `stop` returns `true` in
+`result.stopped` after it removes the named session. The daemon stops accepting control
+requests during shutdown, drains active proxies for the configured grace
+period, and then aborts remaining runtime tasks before removing their sockets.
 
 An error response contains a stable code and a safe message. The message does
 not include request data:
@@ -117,3 +121,4 @@ Stable error codes are:
 | `session_not_found` | `stop` named an unknown session. |
 | `secret_unavailable` | One or more referenced secrets are missing, inaccessible, or not entitled to the authenticated operator. |
 | `internal_error` | The daemon could not complete the request. |
+| `shutting_down` | The daemon stopped accepting new sessions. |

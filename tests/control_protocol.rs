@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::Shutdown,
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
@@ -22,6 +22,7 @@ struct DaemonProcess {
     child: Child,
     _directory: TempDir,
     socket: PathBuf,
+    socket_dir: PathBuf,
 }
 
 impl Drop for DaemonProcess {
@@ -105,58 +106,115 @@ fn control_listener_handles_requests_and_rejects_bad_connections() {
     let mut extra = [0];
     assert!(matches!(multiple.read(&mut extra), Ok(0) | Err(_)));
 
-    let persistent = request(
-        &daemon.socket,
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n",
-    );
-    assert_eq!(persistent["ok"], true);
-    assert_eq!(persistent["result"]["persistent"], true);
-    let persistent_id = persistent["result"]["id"]
+    let (ephemeral_one, created_one) = create_session(&daemon.socket, false, "one.example.test");
+    let (ephemeral_two, created_two) = create_session(&daemon.socket, false, "two.example.test");
+    let (persistent_creator, created_persistent) =
+        create_session(&daemon.socket, true, "persistent.example.test");
+    drop(persistent_creator);
+
+    let persistent_id = created_persistent["result"]["id"]
         .as_str()
-        .expect("create should return an ID");
-    let list = request(&daemon.socket, "version = 1\noperation = \"list\"\n");
-    assert_eq!(list["result"]["sessions"].as_array().unwrap().len(), 1);
+        .expect("persistent create should return an ID")
+        .to_owned();
+    let first_path = PathBuf::from(
+        created_one["result"]["socket"]
+            .as_str()
+            .expect("first create should return a socket"),
+    );
+    let second_path = PathBuf::from(
+        created_two["result"]["socket"]
+            .as_str()
+            .expect("second create should return a socket"),
+    );
+    let persistent_path = PathBuf::from(
+        created_persistent["result"]["socket"]
+            .as_str()
+            .expect("persistent create should return a socket"),
+    );
+    let listed = list_sessions(&daemon.socket);
+    assert_eq!(listed.len(), 3, "three sessions should run concurrently");
+    assert!(listed.iter().all(|session| session["state"] == "running"));
+    for session in &listed {
+        let keys = session
+            .as_object()
+            .expect("list entries should be objects")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(keys, ["id", "persistent", "socket", "state"]);
+    }
+    let list_json = serde_json::to_string(&listed).expect("list should serialize");
+    assert!(
+        !list_json.contains("example.test"),
+        "list must not expose policy hosts"
+    );
+
+    drop(ephemeral_one);
+    wait_for_session_count(&daemon.socket, 2);
+    assert!(
+        !first_path.exists(),
+        "closing the first lease removes its socket"
+    );
+    assert!(
+        second_path.exists(),
+        "closing one lease must preserve the second socket"
+    );
+    assert!(
+        persistent_path.exists(),
+        "persistent socket survives creator disconnect"
+    );
+    assert_proxy_available(&second_path);
+    assert_proxy_available(&persistent_path);
+
     let stopped = request(
         &daemon.socket,
         &format!("version = 1\noperation = \"stop\"\nsession_id = \"{persistent_id}\"\n"),
     );
     assert_eq!(stopped["result"]["stopped"], true);
-
-    let mut ephemeral = UnixStream::connect(&daemon.socket).expect("client should connect");
-    write_frame(
-        &mut ephemeral,
-        b"version = 1\noperation = \"create\"\n\n[session]\npersistent = false\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n",
+    assert!(
+        !persistent_path.exists(),
+        "explicit stop removes the persistent socket"
     );
-    let created = read_response(&mut ephemeral);
-    assert_eq!(created["result"]["persistent"], false);
-    let ephemeral_id = created["result"]["id"]
-        .as_str()
-        .expect("create should return an ID")
-        .to_owned();
-    let listed = request(&daemon.socket, "version = 1\noperation = \"list\"\n");
-    assert_eq!(listed["result"]["sessions"].as_array().unwrap().len(), 1);
-    drop(ephemeral);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let listed = request(&daemon.socket, "version = 1\noperation = \"list\"\n");
-        let sessions = listed["result"]["sessions"]
-            .as_array()
-            .expect("list should return sessions");
-        if sessions.is_empty() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "closed lease should remove its session"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(!ephemeral_id.is_empty());
+    wait_for_session_count(&daemon.socket, 1);
+    assert_proxy_available(&second_path);
+
+    drop(ephemeral_two);
+    wait_for_session_count(&daemon.socket, 0);
+    assert!(
+        !second_path.exists(),
+        "closing the remaining lease removes its socket"
+    );
+}
+
+#[test]
+fn failed_session_creation_leaves_no_socket_or_registry_entry() {
+    // Unix-domain socket paths are limited to 107 bytes on Linux. This makes
+    // runtime startup fail after the loopback listener is provisioned but
+    // before a session can be registered or its socket can be created.
+    let daemon = start_daemon_with_socket_dir(250, &"s".repeat(80));
+    let failed = request(
+        &daemon.socket,
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"rollback.example.test\"\nmode = \"tunnel\"\n",
+    );
+    assert_eq!(failed["error"]["code"], "internal_error");
+    assert!(list_sessions(&daemon.socket).is_empty());
+    assert_eq!(
+        fs::read_dir(&daemon.socket_dir)
+            .expect("session socket directory should exist")
+            .count(),
+        0,
+        "failed startup must not leave a session socket"
+    );
 }
 
 fn start_daemon(read_timeout_ms: u64) -> DaemonProcess {
+    start_daemon_with_socket_dir(read_timeout_ms, "proxies")
+}
+
+fn start_daemon_with_socket_dir(read_timeout_ms: u64, socket_dir_name: &str) -> DaemonProcess {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let socket = directory.path().join("run/control.sock");
+    let socket_dir = directory.path().join(socket_dir_name);
     let config_path = directory.path().join("daemon.toml");
     let (certificate_path, private_key_path) = write_test_ca(directory.path());
     let trusted_uid = fs::metadata(directory.path())
@@ -165,7 +223,7 @@ fn start_daemon(read_timeout_ms: u64) -> DaemonProcess {
     let config = format!(
         "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\ncontrol_read_timeout_ms = {read_timeout_ms}\n\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"unused-secrets\"\n",
         socket.display(),
-        directory.path().join("proxies").display(),
+        socket_dir.display(),
         certificate_path.display(),
         private_key_path.display(),
     );
@@ -182,6 +240,7 @@ fn start_daemon(read_timeout_ms: u64) -> DaemonProcess {
         child,
         _directory: directory,
         socket,
+        socket_dir,
     };
 
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -203,6 +262,59 @@ fn start_daemon(read_timeout_ms: u64) -> DaemonProcess {
         thread::sleep(Duration::from_millis(10));
     }
     daemon
+}
+
+fn create_session(control_socket: &PathBuf, persistent: bool, host: &str) -> (UnixStream, Value) {
+    let mut control = UnixStream::connect(control_socket).expect("client should connect");
+    control
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("client timeout should be set");
+    let body = format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n"
+    );
+    write_frame(&mut control, body.as_bytes());
+    let response = read_response(&mut control);
+    assert_eq!(response["ok"], true);
+    (control, response)
+}
+
+fn list_sessions(control_socket: &PathBuf) -> Vec<Value> {
+    request(control_socket, "version = 1\noperation = \"list\"\n")["result"]["sessions"]
+        .as_array()
+        .expect("list should return a session array")
+        .clone()
+}
+
+fn wait_for_session_count(control_socket: &PathBuf, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if list_sessions(control_socket).len() == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session count should reach {expected}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn assert_proxy_available(socket_path: &PathBuf) {
+    let mut stream = UnixStream::connect(socket_path).expect("proxy data socket should accept");
+    stream
+        .write_all(
+            b"GET http://example.test/ HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+        )
+        .expect("proxy request should be sent");
+    let mut reader = BufReader::new(stream);
+    let mut status = String::new();
+    reader
+        .read_line(&mut status)
+        .expect("proxy response should be readable");
+    assert!(
+        status.starts_with("HTTP/1.1 403") || status.starts_with("HTTP/1.0 403"),
+        "running deny-all proxy should respond through its own bridge: {status:?}"
+    );
 }
 
 fn write_test_ca(directory: &std::path::Path) -> (PathBuf, PathBuf) {

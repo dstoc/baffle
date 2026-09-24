@@ -420,6 +420,11 @@ mod tests {
 impl Drop for ProxyRuntime {
     fn drop(&mut self) {
         self.cancellation.cancel();
+        // A caller can be cancelled while awaiting graceful shutdown. Abort
+        // owned tasks on drop so that cancellation cannot detach a live proxy
+        // or bridge from its session manager.
+        self.runtime_abort.abort();
+        self.bridge_abort.abort();
     }
 }
 
