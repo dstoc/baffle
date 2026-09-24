@@ -25,6 +25,16 @@ Run these checks before submitting changes:
 
 GitHub Actions runs the formatting, Clippy, and test checks on pushes and pull requests. The workflow caches Cargo dependencies.
 
+## Certificate authority
+
+The daemon loads the CA certificate and private key from the paths in `[ca]`. The certificate must be current and marked for certificate signing. The private key must match the certificate, be a regular file, and allow read access only to its owner. Use mode `0400` or `0600` for the key file.
+
+Export the public certificate for clients that need to trust intercepted HTTPS:
+
+    cargo run -- ca export --config ./daemon.toml --output ./baffle-ca.pem
+
+The command writes a new public certificate file with mode `0644`. It fails if the output path already exists. It does not read or export the private key.
+
 ## Run
 
 Start the daemon with a configuration path:

@@ -1,3 +1,4 @@
+pub mod ca;
 pub mod cli;
 pub mod config;
 pub mod control;

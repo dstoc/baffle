@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use hudsucker::rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -157,13 +158,16 @@ fn start_daemon(read_timeout_ms: u64) -> DaemonProcess {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let socket = directory.path().join("run/control.sock");
     let config_path = directory.path().join("daemon.toml");
+    let (certificate_path, private_key_path) = write_test_ca(directory.path());
     let trusted_uid = fs::metadata(directory.path())
         .expect("temporary directory should have metadata")
         .uid();
     let config = format!(
-        "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\ncontrol_read_timeout_ms = {read_timeout_ms}\n\n[ca]\ncertificate = \"unused.pem\"\nprivate_key = \"unused-key.pem\"\n\n[secrets]\ndirectory = \"unused-secrets\"\n",
+        "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\ncontrol_read_timeout_ms = {read_timeout_ms}\n\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"unused-secrets\"\n",
         socket.display(),
         directory.path().join("proxies").display(),
+        certificate_path.display(),
+        private_key_path.display(),
     );
     fs::write(&config_path, config).expect("daemon config should be written");
     let child = Command::new(env!("CARGO_BIN_EXE_baffle"))
@@ -199,6 +203,24 @@ fn start_daemon(read_timeout_ms: u64) -> DaemonProcess {
         thread::sleep(Duration::from_millis(10));
     }
     daemon
+}
+
+fn write_test_ca(directory: &std::path::Path) -> (PathBuf, PathBuf) {
+    let key_pair = KeyPair::generate().expect("CA key should be generated");
+    let mut parameters = CertificateParams::default();
+    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let certificate = parameters
+        .self_signed(&key_pair)
+        .expect("CA certificate should be generated");
+
+    let certificate_path = directory.join("ca.pem");
+    let private_key_path = directory.join("ca-key.pem");
+    fs::write(&certificate_path, certificate.pem()).expect("CA certificate should be saved");
+    fs::write(&private_key_path, key_pair.serialize_pem()).expect("CA key should be saved");
+    fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o600))
+        .expect("CA key permissions should be restricted");
+    (certificate_path, private_key_path)
 }
 
 fn request(socket: &PathBuf, request: &str) -> Value {
