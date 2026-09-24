@@ -25,7 +25,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{ca::ManagedCa, config::SessionConfig, telemetry::Metrics};
+use crate::{
+    ca::ManagedCa,
+    config::{RuleMode, SessionConfig},
+    policy::{AuthorizationError, SessionPolicy},
+    telemetry::Metrics,
+};
 
 /// A stable identifier for one running Hudsucker instance.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -152,21 +157,22 @@ impl ProxyRuntime {
         let shutdown = cancellation.clone();
         let bridge_ingress_shutdown = CancellationToken::new();
         let bridge_force_cancellation = CancellationToken::new();
+        let policy = Arc::new(SessionPolicy::compile(&session));
 
         let proxy = Proxy::builder()
             .with_listener(listener)
             .with_ca(ca.for_proxy())
             .with_rustls_connector(aws_lc_rs::default_provider())
-            .with_http_handler(DenyAllHandler {
-                runtime_id: runtime_id.clone(),
-                session: session.clone(),
-                metrics: Arc::clone(&metrics),
-            })
-            .with_websocket_handler(DenyAllHandler {
-                runtime_id: runtime_id.clone(),
-                session,
-                metrics: Arc::clone(&metrics),
-            })
+            .with_http_handler(PolicyHandler::with_metrics(
+                runtime_id.clone(),
+                Arc::clone(&policy),
+                Arc::clone(&metrics),
+            ))
+            .with_websocket_handler(PolicyHandler::with_metrics(
+                runtime_id.clone(),
+                policy,
+                Arc::clone(&metrics),
+            ))
             .with_graceful_shutdown(async move {
                 shutdown.cancelled().await;
             })
@@ -896,41 +902,87 @@ impl Drop for ProxyRuntime {
 }
 
 #[derive(Clone)]
-struct DenyAllHandler {
+pub(crate) struct PolicyHandler {
     runtime_id: RuntimeId,
-    session: SessionConfig,
+    policy: Arc<SessionPolicy>,
     metrics: Arc<Metrics>,
-    // Retain the validated, immutable policy with its own handler state. Policy
-    // decisions are added in the filtering milestone; this runtime denies all.
 }
 
-impl HttpHandler for DenyAllHandler {
+impl PolicyHandler {
+    pub(crate) fn new(runtime_id: RuntimeId, policy: Arc<SessionPolicy>) -> Self {
+        Self::with_metrics(runtime_id, policy, Arc::new(Metrics::default()))
+    }
+
+    fn with_metrics(
+        runtime_id: RuntimeId,
+        policy: Arc<SessionPolicy>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self {
+            runtime_id,
+            policy,
+            metrics,
+        }
+    }
+
+    pub(crate) fn handle_policy_request(&self, request: Request<Body>) -> RequestOrResponse {
+        match self.policy.authorize(&request) {
+            Ok(_) => RequestOrResponse::Request(request),
+            Err(error) => {
+                let request_count = self.metrics.denied_request();
+                let destination = request_destination(&request);
+                let (status, reason) = match error {
+                    AuthorizationError::InvalidAuthority => {
+                        (StatusCode::BAD_REQUEST, "invalid_authority")
+                    }
+                    AuthorizationError::Denied => (StatusCode::FORBIDDEN, "no_matching_rule"),
+                };
+                tracing::info!(
+                    event = "request_decision",
+                    session_id = %self.runtime_id.as_str(),
+                    method = %request.method(),
+                    %destination,
+                    outcome = "denied",
+                    reason,
+                    denied_requests = request_count,
+                    "proxy request denied"
+                );
+                Response::builder()
+                    .status(status)
+                    .body(Body::empty())
+                    .expect("static policy response is valid")
+                    .into()
+            }
+        }
+    }
+
+    pub(crate) fn connect_should_intercept(&self, request: &Request<Body>) -> bool {
+        self.policy
+            .authorize(request)
+            .map(|mode| mode == RuleMode::Intercept)
+            // An invalid request is rejected by handle_request. Keep the
+            // fallback in interception mode so errors never select a tunnel.
+            .unwrap_or(true)
+    }
+}
+
+impl HttpHandler for PolicyHandler {
     fn handle_request(
         &mut self,
         _ctx: &HttpContext,
         request: Request<Body>,
     ) -> impl Future<Output = RequestOrResponse> + Send {
-        let destination = request_destination(&request);
-        let matched_rule = request_matched_rule(&request, &self.session);
-        let request_count = self.metrics.denied_request();
-        tracing::info!(
-            event = "request_decision",
-            session_id = %self.runtime_id.as_str(),
-            method = %request.method(),
-            destination = %destination,
-            matched_rule = matched_rule.as_deref().unwrap_or("none"),
-            outcome = "denied",
-            reason = "policy_handler_fail_closed",
-            denied_requests = request_count,
-            "proxy request denied"
-        );
-        async {
-            Response::builder()
-                .status(StatusCode::FORBIDDEN)
-                .body(Body::empty())
-                .expect("static deny response is valid")
-                .into()
-        }
+        let response = self.handle_policy_request(request);
+        async move { response }
+    }
+
+    fn should_intercept_connect(
+        &mut self,
+        _ctx: &HttpContext,
+        request: &Request<Body>,
+    ) -> impl Future<Output = bool> + Send {
+        let intercept = self.connect_should_intercept(request);
+        async move { intercept }
     }
 }
 
@@ -960,54 +1012,38 @@ fn safe_authority_host(authority: &hudsucker::hyper::http::uri::Authority) -> Op
 }
 
 fn request_destination(request: &Request<Body>) -> String {
-    let Some((host, port)) = request_destination_parts(request) else {
+    let Some(authority) = request_authority(request) else {
         return "unknown".into();
     };
-    match port {
+    let Some(host) = safe_authority_host(&authority) else {
+        return "unknown".into();
+    };
+    match authority.port_u16().or_else(|| match request.uri().scheme_str() {
+        Some("http") => Some(80),
+        Some("https") => Some(443),
+        _ => None,
+    }) {
         Some(port) => format!("{host}:{port}"),
         None => host,
     }
 }
 
-fn request_destination_parts(request: &Request<Body>) -> Option<(String, Option<u16>)> {
-    let authority = request_authority(request)?;
-    let host = safe_authority_host(&authority)?;
-    let port = authority
-        .port_u16()
-        .or_else(|| match request.uri().scheme_str() {
-            Some("http") => Some(80),
-            Some("https") => Some(443),
-            _ => None,
-        });
-    Some((host, port))
-}
-
-fn request_matched_rule(request: &Request<Body>, session: &SessionConfig) -> Option<String> {
-    let (host, port) = request_destination_parts(request)?;
-    let port = port?;
-    session
-        .rules
-        .iter()
-        .find(|rule| rule.host == host && rule.ports.contains(&port))
-        .map(|rule| format!("{}:{port}", rule.host))
-}
-
 #[cfg(test)]
 mod request_log_tests {
-    use super::{DenyAllHandler, RuntimeId, request_destination, request_matched_rule};
-    use crate::{config::ControlRequest, telemetry::Metrics};
-    use hudsucker::{Body, hyper::Request};
+    use super::{PolicyHandler, RuntimeId, StatusCode, request_destination};
+    use crate::{config::ControlRequest, policy::SessionPolicy};
+    use hudsucker::{Body, RequestOrResponse, hyper::Request};
     use std::sync::Arc;
 
-    fn session_config() -> crate::config::SessionConfig {
+    fn session_policy() -> SessionPolicy {
         let ControlRequest::Create { session, .. } = ControlRequest::from_toml(
             "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"api.example.test\"\nmode = \"intercept\"\n",
         )
-        .expect("session config should parse")
+        .expect("test policy should parse")
         else {
             panic!("test request should create a session");
         };
-        session
+        SessionPolicy::compile(&session)
     }
 
     #[test]
@@ -1017,30 +1053,27 @@ mod request_log_tests {
             .body(Body::empty())
             .expect("request should build");
         assert_eq!(request_destination(&request), "api.example.test:443");
-        assert_eq!(
-            request_matched_rule(&request, &session_config()).as_deref(),
-            Some("api.example.test:443")
-        );
-        let wrong_port = Request::builder()
-            .uri("https://api.example.test:8443/private?token=secret")
+
+        let handler = PolicyHandler::new(RuntimeId::new("test-session"), Arc::new(session_policy()));
+        let denied = Request::builder()
+            .uri("https://example.net/private?token=secret")
             .body(Body::empty())
             .expect("request should build");
-        assert_eq!(request_matched_rule(&wrong_port, &session_config()), None);
-        let handler = DenyAllHandler {
-            runtime_id: RuntimeId::new("test-session"),
-            session: session_config(),
-            metrics: Arc::new(Metrics::default()),
-        };
+        assert!(matches!(
+            handler.handle_policy_request(denied),
+            RequestOrResponse::Response(response) if response.status() == StatusCode::FORBIDDEN
+        ));
+        assert_eq!(handler.metrics.snapshot().denied_requests, 1);
         assert_eq!(handler.runtime_id.as_str(), "test-session");
     }
 }
 
-impl WebSocketHandler for DenyAllHandler {
+impl WebSocketHandler for PolicyHandler {
     async fn handle_message(
         &mut self,
         _ctx: &WebSocketContext,
-        _message: Message,
+        message: Message,
     ) -> Option<Message> {
-        None
+        Some(message)
     }
 }

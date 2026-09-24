@@ -8,14 +8,14 @@ use baffle_proxy::{
 use hudsucker::rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{TcpStream, UnixStream},
+    net::{TcpListener, TcpStream, UnixStream},
     sync::mpsc,
     time::timeout,
 };
 
 fn session_config() -> SessionConfig {
     let request = ControlRequest::from_toml(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\nports = [443]\n",
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"allowed.example\"\nmode = \"tunnel\"\nports = [443]\n",
     )
     .expect("test session should be valid");
     let ControlRequest::Create { session, .. } = request else {
@@ -67,7 +67,7 @@ async fn assert_denied(address: SocketAddr, method: &str, target: &str) {
         .expect("proxy response should be readable");
     assert!(
         status.starts_with("HTTP/1.1 403") || status.starts_with("HTTP/1.0 403"),
-        "deny-all handler should reject {method}: {status:?}"
+        "policy handler should reject {method}: {status:?}"
     );
 }
 
@@ -234,4 +234,51 @@ async fn unix_socket_path_that_is_a_symlink_is_left_untouched() {
         fs::read(&target).expect("target should remain"),
         b"target contents"
     );
+}
+
+#[tokio::test]
+async fn unauthorized_ip_literal_is_rejected_before_an_upstream_connection() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("upstream probe should bind");
+    let upstream_address = upstream
+        .local_addr()
+        .expect("probe address should be available");
+    let runtime_id = RuntimeId::new("runtime-ip-deny");
+    let runtime = ProxyRuntime::start(runtime_id.clone(), session_config(), ca, event_sender)
+        .await
+        .expect("proxy runtime should start");
+
+    let mut stream = TcpStream::connect(runtime.local_addr())
+        .await
+        .expect("proxy listener should accept connections");
+    let request = format!(
+        "GET http://{upstream_address}/ HTTP/1.1\r\nHost: {upstream_address}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("proxy request should be sent");
+    let mut reader = BufReader::new(stream);
+    let mut status = String::new();
+    timeout(Duration::from_secs(2), reader.read_line(&mut status))
+        .await
+        .expect("proxy should return a response")
+        .expect("proxy response should be readable");
+    assert!(
+        status.starts_with("HTTP/1.1 400") || status.starts_with("HTTP/1.0 400"),
+        "IP literal request should be rejected: {status:?}"
+    );
+    assert!(
+        timeout(Duration::from_millis(100), upstream.accept())
+            .await
+            .is_err(),
+        "rejected destination must not receive an upstream connection"
+    );
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &runtime_id).await;
 }
