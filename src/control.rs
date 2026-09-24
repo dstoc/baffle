@@ -24,6 +24,11 @@ use tracing::{info, warn};
 
 use crate::config::{ControlRequest, DaemonConfig, PROTOCOL_VERSION};
 use crate::secrets::{ResolvedSecrets, SecretStore, SecretStoreError};
+use crate::{
+    ca::ManagedCa,
+    config::SessionConfig,
+    proxy_runtime::{ProxyRuntime, ProxyRuntimeError, ProxyRuntimeEvent, RuntimeId},
+};
 
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 
@@ -49,6 +54,7 @@ pub struct ControlServer {
     _socket_guard: SocketGuard,
     state: Arc<ControlState>,
     connections: JoinSet<()>,
+    runtime_events: tokio::sync::mpsc::UnboundedReceiver<ProxyRuntimeEvent>,
 }
 
 struct ControlState {
@@ -74,7 +80,7 @@ impl Drop for SocketGuard {
 }
 
 impl ControlServer {
-    pub fn bind(config: &DaemonConfig) -> Result<Self> {
+    pub fn bind(config: &DaemonConfig, ca: Arc<ManagedCa>) -> Result<Self> {
         let control_socket = &config.daemon.control_socket;
         let socket_dir = &config.daemon.socket_dir;
         let trusted_uid = config.daemon.trusted_operator_uid;
@@ -116,6 +122,8 @@ impl ControlServer {
             "control socket listening"
         );
 
+        let (runtime_event_sender, runtime_events) = tokio::sync::mpsc::unbounded_channel();
+
         Ok(Self {
             listener,
             _socket_guard: socket_guard,
@@ -127,12 +135,19 @@ impl ControlServer {
                     trusted_uid,
                     config.secrets.allowed.clone(),
                 ),
-                sessions: SessionManager::new(socket_dir.clone(), config.daemon.max_sessions),
+                sessions: SessionManager::new(
+                    socket_dir.clone(),
+                    config.daemon.max_sessions,
+                    Duration::from_secs(config.daemon.shutdown_grace_seconds),
+                    ca,
+                    runtime_event_sender,
+                ),
                 provisioning_slots: Arc::new(Semaphore::new(
                     config.daemon.max_provisioning_requests,
                 )),
             }),
             connections: JoinSet::new(),
+            runtime_events,
         })
     }
 
@@ -151,8 +166,21 @@ impl ControlServer {
                         warn!(%error, "control connection task failed");
                     }
                 }
+                Some(event) = self.runtime_events.recv() => {
+                    let ProxyRuntimeEvent { runtime_id, result } = event;
+                    match result {
+                        Ok(()) => info!(runtime_id = %runtime_id.as_str(), "proxy runtime stopped"),
+                        Err(error) => warn!(runtime_id = %runtime_id.as_str(), %error, "proxy runtime failed"),
+                    }
+                    self.state.sessions.remove(runtime_id.as_str()).await;
+                }
             }
         }
+    }
+
+    /// Stop all owned proxy instances, allowing each Hudsucker task to drain.
+    pub async fn shutdown(&self) {
+        self.state.sessions.shutdown_all().await;
     }
 }
 
@@ -257,7 +285,7 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
                 }
             };
             let result = {
-                let result = state.sessions.create(session.persistent, secrets).await;
+                let result = state.sessions.create(session, secrets).await;
                 drop(permit);
                 result
             };
@@ -273,6 +301,10 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
                     }))
                 }
                 Err(SessionError::AtCapacity) => error_value(ERR_SESSION_LIMIT),
+                Err(SessionError::Runtime(error)) => {
+                    warn!(%error, "failed to start proxy runtime");
+                    error_value(ERR_INTERNAL)
+                }
                 Err(SessionError::Internal) => error_value(ERR_INTERNAL),
             }
         }
@@ -378,24 +410,53 @@ async fn write_value(stream: &mut UnixStream, value: Value) -> io::Result<()> {
 struct SessionManager {
     socket_dir: PathBuf,
     max_sessions: usize,
+    shutdown_grace: Duration,
+    ca: Arc<ManagedCa>,
+    runtime_events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
     sessions: Arc<Mutex<HashMap<String, ManagedSession>>>,
 }
 
 impl SessionManager {
-    fn new(socket_dir: PathBuf, max_sessions: usize) -> Self {
+    fn new(
+        socket_dir: PathBuf,
+        max_sessions: usize,
+        shutdown_grace: Duration,
+        ca: Arc<ManagedCa>,
+        runtime_events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
+    ) -> Self {
         Self {
             socket_dir,
             max_sessions,
+            shutdown_grace,
+            ca,
+            runtime_events,
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     async fn create(
         &self,
-        persistent: bool,
+        session: SessionConfig,
         secrets: ResolvedSecrets,
     ) -> std::result::Result<SessionInfo, SessionError> {
         let id = new_session_id().map_err(|_| SessionError::Internal)?;
+        let persistent = session.persistent;
+        let mut sessions = self.sessions.lock().await;
+        if sessions.len() >= self.max_sessions {
+            return Err(SessionError::AtCapacity);
+        }
+        if sessions.contains_key(&id) {
+            return Err(SessionError::Internal);
+        }
+
+        let runtime = ProxyRuntime::start(
+            RuntimeId::new(id.clone()),
+            session,
+            Arc::clone(&self.ca),
+            self.runtime_events.clone(),
+        )
+        .await
+        .map_err(SessionError::Runtime)?;
         let info = SessionInfo {
             socket: self
                 .socket_dir
@@ -405,29 +466,44 @@ impl SessionManager {
             id: id.clone(),
             persistent,
         };
-        let mut sessions = self.sessions.lock().await;
-        if sessions.len() >= self.max_sessions {
-            return Err(SessionError::AtCapacity);
-        }
-        if sessions.contains_key(&id) {
-            return Err(SessionError::Internal);
-        }
         sessions.insert(
             id,
             ManagedSession {
                 info: info.clone(),
                 _secrets: secrets,
+                runtime,
             },
         );
         Ok(info)
     }
 
     async fn stop(&self, id: &str) -> bool {
-        self.sessions.lock().await.remove(id).is_some()
+        let session = self.sessions.lock().await.remove(id);
+        if let Some(session) = session {
+            session.runtime.shutdown(self.shutdown_grace).await;
+            true
+        } else {
+            false
+        }
     }
 
     async fn remove(&self, id: &str) {
-        self.sessions.lock().await.remove(id);
+        let session = self.sessions.lock().await.remove(id);
+        if let Some(session) = session {
+            session.runtime.shutdown(self.shutdown_grace).await;
+        }
+    }
+
+    async fn shutdown_all(&self) {
+        let sessions = std::mem::take(&mut *self.sessions.lock().await);
+        let mut shutdowns = JoinSet::new();
+        for session in sessions.into_values() {
+            let grace = self.shutdown_grace;
+            shutdowns.spawn(async move {
+                session.runtime.shutdown(grace).await;
+            });
+        }
+        while shutdowns.join_next().await.is_some() {}
     }
 
     async fn list(&self) -> Vec<SessionInfo> {
@@ -447,11 +523,13 @@ struct ManagedSession {
     info: SessionInfo,
     // Secret values remain scoped to this session and are never serialized.
     _secrets: ResolvedSecrets,
+    runtime: ProxyRuntime,
 }
 
 #[derive(Debug)]
 enum SessionError {
     AtCapacity,
+    Runtime(ProxyRuntimeError),
     Internal,
 }
 
@@ -487,12 +565,45 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{UnixListener, UnixStream},
-        sync::Semaphore,
+        sync::{Semaphore, mpsc},
     };
 
-    use crate::secrets::SecretStore;
+    use hudsucker::rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
+
+    use crate::{ca::ManagedCa, config::CaConfig, secrets::SecretStore};
 
     use super::{ControlState, SessionManager, handle_connection};
+
+    fn session_manager(directory: &std::path::Path, max_sessions: usize) -> SessionManager {
+        let key_pair = KeyPair::generate().expect("CA key should be generated");
+        let mut parameters = CertificateParams::default();
+        parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let certificate = parameters
+            .self_signed(&key_pair)
+            .expect("CA certificate should be generated");
+        let certificate_path = directory.join("control-test-ca.pem");
+        let private_key_path = directory.join("control-test-ca-key.pem");
+        fs::write(&certificate_path, certificate.pem()).expect("CA certificate should be saved");
+        fs::write(&private_key_path, key_pair.serialize_pem()).expect("CA key should be saved");
+        fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o600))
+            .expect("CA key permissions should be restricted");
+        let ca = Arc::new(
+            ManagedCa::load(&CaConfig {
+                certificate: certificate_path,
+                private_key: private_key_path,
+            })
+            .expect("test CA should load"),
+        );
+        let (runtime_events, _receiver) = mpsc::unbounded_channel();
+        SessionManager::new(
+            directory.to_path_buf(),
+            max_sessions,
+            Duration::from_secs(1),
+            ca,
+            runtime_events,
+        )
+    }
 
     fn state(directory: &std::path::Path, uid: u32, allowed: &[&str]) -> ControlState {
         ControlState {
@@ -503,7 +614,7 @@ mod tests {
                 uid,
                 allowed.iter().map(|name| (*name).to_owned()).collect(),
             ),
-            sessions: SessionManager::new(directory.to_path_buf(), 1),
+            sessions: session_manager(directory, 1),
             provisioning_slots: Arc::new(Semaphore::new(1)),
         }
     }
@@ -575,7 +686,7 @@ mod tests {
                 peer_uid.wrapping_add(1),
                 Default::default(),
             ),
-            sessions: SessionManager::new(directory.path().to_path_buf(), 1),
+            sessions: session_manager(directory.path(), 1),
             provisioning_slots: Arc::new(Semaphore::new(1)),
         });
         let task = tokio::spawn(async move {

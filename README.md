@@ -43,6 +43,6 @@ Start the daemon with a configuration path:
 
 The daemon loads and validates the TOML configuration before it starts. It binds the private Unix control socket and serves the versioned control protocol until it receives Ctrl-C.
 
-Session creation currently uses an in-memory placeholder registry. Proxy data sockets will be added with session lifecycle support.
+Session creation starts a deny-all Hudsucker instance on a pre-bound, per-session loopback TCP listener. Runtime failures are isolated to that session. The Unix data socket bridge will connect to these listeners in a later milestone.
 
 Read the [control protocol](docs/control-protocol.md) for the wire format and the [Baffle proposal](docs/baffle-proposal.md) for the full architecture, security requirements, and delivery plan.

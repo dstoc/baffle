@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use tracing::info;
@@ -13,19 +13,20 @@ pub async fn run(config_path: &Path) -> Result<()> {
 
 /// Run the daemon with a configuration that has already passed schema validation.
 pub async fn run_with_config(config: DaemonConfig) -> Result<()> {
-    let _ca = ManagedCa::load(&config.ca).context("invalid daemon CA material")?;
-    let mut control = ControlServer::bind(&config)?;
+    let ca = Arc::new(ManagedCa::load(&config.ca).context("invalid daemon CA material")?);
+    let mut control = ControlServer::bind(&config, ca)?;
     info!("daemon started");
 
-    tokio::select! {
-        result = control.run() => result?,
+    let result = tokio::select! {
+        result = control.run() => result,
         signal = tokio::signal::ctrl_c() => {
-            signal.context("failed to listen for shutdown signal")?;
+            signal.context("failed to listen for shutdown signal").map(|_| ())
         }
-    }
+    };
 
     info!("daemon shutting down");
-    Ok(())
+    control.shutdown().await;
+    result
 }
 
 /// Export the configured public CA certificate for client trust stores.
