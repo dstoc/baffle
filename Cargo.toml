@@ -4,11 +4,17 @@ version = "0.1.0"
 edition = "2024"
 description = "A standalone daemon for policy-controlled HTTP and HTTPS proxies"
 
+[workspace]
+members = ["crates/baffle-client"]
+default-members = [".", "crates/baffle-client"]
+resolver = "3"
+
 [[bin]]
 name = "baffle"
 path = "src/main.rs"
 
 [dependencies]
+baffle-client = { path = "crates/baffle-client" }
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 hudsucker = { version = "=0.25.0", features = ["http2"] }

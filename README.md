@@ -50,3 +50,5 @@ The daemon loads and validates the TOML configuration before it starts. It binds
 Session creation starts a deny-all Hudsucker instance on a pre-bound, per-session loopback TCP listener and returns a randomly named, per-session Unix data socket. The in-process bridge streams data between the two listeners and applies the configured per-session connection limit. Runtime failures are isolated to that session.
 
 Read the [control protocol](docs/control-protocol.md) for the wire format and the [Baffle proposal](docs/baffle-proposal.md) for the full architecture, security requirements, and delivery plan.
+
+Orchestrators can use the standalone [`baffle-client` crate](docs/client.md) to create, list, and stop sessions. The client crate has no dependency on Baffle's proxy runtime.
