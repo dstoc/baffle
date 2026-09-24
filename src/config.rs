@@ -20,18 +20,39 @@ pub const PROTOCOL_VERSION: u16 = 1;
 const DEFAULT_MAX_SESSIONS: usize = 64;
 const DEFAULT_MAX_CONNECTIONS_PER_SESSION: usize = 128;
 const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 5;
+const DEFAULT_CONTROL_READ_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_MAX_PROVISIONING_REQUESTS: usize = 8;
 
 /// A safe configuration error. Error text never contains input values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {
     message: String,
+    kind: ConfigErrorKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigErrorKind {
+    Invalid,
+    UnsupportedProtocolVersion,
 }
 
 impl ConfigError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            kind: ConfigErrorKind::Invalid,
         }
+    }
+
+    fn unsupported_protocol_version() -> Self {
+        Self {
+            message: "unsupported control protocol version".into(),
+            kind: ConfigErrorKind::UnsupportedProtocolVersion,
+        }
+    }
+
+    pub(crate) fn is_unsupported_protocol_version(&self) -> bool {
+        self.kind == ConfigErrorKind::UnsupportedProtocolVersion
     }
 }
 
@@ -55,9 +76,12 @@ pub struct DaemonConfig {
 pub struct DaemonSettings {
     pub control_socket: PathBuf,
     pub socket_dir: PathBuf,
+    pub trusted_operator_uid: u32,
     pub max_sessions: usize,
     pub max_connections_per_session: usize,
     pub shutdown_grace_seconds: u64,
+    pub control_read_timeout_ms: u64,
+    pub max_provisioning_requests: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,9 +103,12 @@ impl DaemonConfig {
         let daemon = DaemonSettings {
             control_socket: required_path(raw.daemon.control_socket, "daemon.control_socket")?,
             socket_dir: required_path(raw.daemon.socket_dir, "daemon.socket_dir")?,
+            trusted_operator_uid: raw.daemon.trusted_operator_uid,
             max_sessions: raw.daemon.max_sessions,
             max_connections_per_session: raw.daemon.max_connections_per_session,
             shutdown_grace_seconds: raw.daemon.shutdown_grace_seconds,
+            control_read_timeout_ms: raw.daemon.control_read_timeout_ms,
+            max_provisioning_requests: raw.daemon.max_provisioning_requests,
         };
         if daemon.max_sessions == 0 {
             return Err(ConfigError::new(
@@ -91,6 +118,16 @@ impl DaemonConfig {
         if daemon.max_connections_per_session == 0 {
             return Err(ConfigError::new(
                 "daemon.max_connections_per_session must be greater than zero",
+            ));
+        }
+        if daemon.control_read_timeout_ms == 0 {
+            return Err(ConfigError::new(
+                "daemon.control_read_timeout_ms must be greater than zero",
+            ));
+        }
+        if daemon.max_provisioning_requests == 0 {
+            return Err(ConfigError::new(
+                "daemon.max_provisioning_requests must be greater than zero",
             ));
         }
 
@@ -268,7 +305,7 @@ impl ControlRequest {
 
 fn validate_protocol_version(version: u16) -> Result<(), ConfigError> {
     if version != PROTOCOL_VERSION {
-        return Err(ConfigError::new("unsupported control protocol version"));
+        return Err(ConfigError::unsupported_protocol_version());
     }
     Ok(())
 }
@@ -624,12 +661,17 @@ struct RawDaemonConfig {
 struct RawDaemonSettings {
     control_socket: PathBuf,
     socket_dir: PathBuf,
+    trusted_operator_uid: u32,
     #[serde(default = "default_max_sessions")]
     max_sessions: usize,
     #[serde(default = "default_max_connections_per_session")]
     max_connections_per_session: usize,
     #[serde(default = "default_shutdown_grace_seconds")]
     shutdown_grace_seconds: u64,
+    #[serde(default = "default_control_read_timeout_ms")]
+    control_read_timeout_ms: u64,
+    #[serde(default = "default_max_provisioning_requests")]
+    max_provisioning_requests: usize,
 }
 
 #[derive(Deserialize)]
@@ -657,29 +699,30 @@ fn default_shutdown_grace_seconds() -> u64 {
     DEFAULT_SHUTDOWN_GRACE_SECONDS
 }
 
+fn default_control_read_timeout_ms() -> u64 {
+    DEFAULT_CONTROL_READ_TIMEOUT_MS
+}
+
+fn default_max_provisioning_requests() -> usize {
+    DEFAULT_MAX_PROVISIONING_REQUESTS
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum RawControlRequest {
     Create {
-        #[serde(default = "default_protocol_version")]
         version: u16,
         session: RawSessionSettings,
         #[serde(default)]
         rules: Vec<RawHostRule>,
     },
     Stop {
-        #[serde(default = "default_protocol_version")]
         version: u16,
         session_id: String,
     },
     List {
-        #[serde(default = "default_protocol_version")]
         version: u16,
     },
-}
-
-fn default_protocol_version() -> u16 {
-    PROTOCOL_VERSION
 }
 
 #[derive(Deserialize)]
@@ -736,6 +779,7 @@ mod tests {
 [daemon]
 control_socket = "/run/baffle/control.sock"
 socket_dir = "/run/baffle/proxies"
+trusted_operator_uid = 1000
 max_sessions = 64
 max_connections_per_session = 128
 shutdown_grace_seconds = 5
@@ -749,6 +793,7 @@ directory = "/var/lib/baffle/secrets"
 "#;
 
     const SESSION_EXAMPLE: &str = r#"
+version = 1
 operation = "create"
 
 [session]
@@ -784,6 +829,7 @@ paths = ["/dstoc/cladding.git/**"]
 "#;
 
     const MINIMAL_CREATE: &str = r#"
+version = 1
 operation = "create"
 
 [session]
@@ -794,7 +840,7 @@ mode = "intercept"
 "#;
 
     fn config_with(rule: &str) -> String {
-        format!("operation = \"create\"\n\n[session]\n\n[[rules]]\n{rule}\n")
+        format!("version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\n{rule}\n")
     }
 
     #[test]
@@ -812,6 +858,7 @@ mode = "intercept"
 [daemon]
 control_socket = "/run/baffle/control.sock"
 socket_dir = "/run/baffle/proxies"
+trusted_operator_uid = 1000
 
 [ca]
 certificate = "/var/lib/baffle/ca.pem"
@@ -825,6 +872,9 @@ directory = "/var/lib/baffle/secrets"
         assert_eq!(config.daemon.max_sessions, 64);
         assert_eq!(config.daemon.max_connections_per_session, 128);
         assert_eq!(config.daemon.shutdown_grace_seconds, 5);
+        assert_eq!(config.daemon.trusted_operator_uid, 1000);
+        assert_eq!(config.daemon.control_read_timeout_ms, 5_000);
+        assert_eq!(config.daemon.max_provisioning_requests, 8);
     }
 
     #[test]
@@ -931,7 +981,7 @@ directory = "/var/lib/baffle/secrets"
             ),
             (
                 "injection on tunnel",
-                "operation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"bearer\"\n".to_string(),
+                "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"bearer\"\n".to_string(),
             ),
             (
                 "plaintext interception",
@@ -939,7 +989,7 @@ directory = "/var/lib/baffle/secrets"
             ),
             (
                 "duplicate canonical host",
-                "operation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"EXAMPLE.com\"\nmode = \"tunnel\"\n\n[[rules]]\nhost = \"example.com.\"\nmode = \"tunnel\"\n".into(),
+                "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"EXAMPLE.com\"\nmode = \"tunnel\"\n\n[[rules]]\nhost = \"example.com.\"\nmode = \"tunnel\"\n".into(),
             ),
             (
                 "overlapping paths",
@@ -967,19 +1017,19 @@ directory = "/var/lib/baffle/secrets"
             ),
             (
                 "routing-critical header",
-                "operation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Host\"\nsecret = \"token\"\nformat = \"raw\"\n".to_string(),
+                "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Host\"\nsecret = \"token\"\nformat = \"raw\"\n".to_string(),
             ),
             (
                 "invalid secret identifier",
-                "operation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"../credential\"\nformat = \"bearer\"\n".to_string(),
+                "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"../credential\"\nformat = \"bearer\"\n".to_string(),
             ),
             (
                 "basic password without username",
-                "operation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"basic_password\"\n".to_string(),
+                "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"basic_password\"\n".to_string(),
             ),
             (
                 "literal credential field",
-                "operation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"bearer\"\nvalue = \"do-not-leak-this\"\n".to_string(),
+                "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"bearer\"\nvalue = \"do-not-leak-this\"\n".to_string(),
             ),
         ];
 
@@ -994,6 +1044,7 @@ directory = "/var/lib/baffle/secrets"
     #[test]
     fn rejects_duplicate_injection_headers_without_echoing_secret_values() {
         let input = r#"
+version = 1
 operation = "create"
 
 [session]
@@ -1029,7 +1080,22 @@ format = "raw"
     }
 
     #[test]
+    fn requires_a_trusted_operator_and_rejects_zero_control_limits() {
+        let missing_operator = DAEMON_EXAMPLE.replace("trusted_operator_uid = 1000\n", "");
+        assert!(DaemonConfig::from_toml(&missing_operator).is_err());
+
+        for field in ["control_read_timeout_ms", "max_provisioning_requests"] {
+            let input = DAEMON_EXAMPLE.replace(
+                "shutdown_grace_seconds = 5",
+                &format!("shutdown_grace_seconds = 5\n{field} = 0"),
+            );
+            assert!(DaemonConfig::from_toml(&input).is_err(), "{field}");
+        }
+    }
+
+    #[test]
     fn validates_protocol_versions_and_session_ids() {
+        assert!(ControlRequest::from_toml("operation = \"list\"\n").is_err());
         assert!(ControlRequest::from_toml("version = 2\noperation = \"list\"\n").is_err());
         assert!(
             ControlRequest::from_toml(
@@ -1043,7 +1109,7 @@ format = "raw"
     fn validates_all_three_injection_formats() {
         for format in ["raw", "bearer"] {
             let request = ControlRequest::from_toml(&format!(
-                "operation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"X-Token\"\nsecret = \"api-token\"\nformat = \"{format}\"\n"
+                "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"X-Token\"\nsecret = \"api-token\"\nformat = \"{format}\"\n"
             ))
             .expect("raw and bearer formats should parse");
             let ControlRequest::Create {
@@ -1057,7 +1123,7 @@ format = "raw"
         }
 
         let basic = ControlRequest::from_toml(
-            "operation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"git-token\"\nformat = \"basic_password\"\nusername = \"git\"\n",
+            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"git-token\"\nformat = \"basic_password\"\nusername = \"git\"\n",
         )
         .expect("basic_password should parse");
         let ControlRequest::Create { session, .. } = basic else {

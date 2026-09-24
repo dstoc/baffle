@@ -16,18 +16,27 @@ fn binary_help_lists_daemon_command() {
 #[test]
 fn daemon_starts_and_stops_on_interrupt() {
     use std::{
-        fs, thread,
+        fs,
+        os::unix::fs::MetadataExt,
+        thread,
         time::{Duration, Instant},
     };
 
     let config_dir = tempfile::tempdir().expect("temporary config directory should be created");
     let config_path = config_dir.path().join("daemon.toml");
+    let control_socket = config_dir.path().join("run/control.sock");
+    let socket_dir = config_dir.path().join("proxies");
+    let trusted_uid = fs::metadata(config_dir.path())
+        .expect("temporary directory should have metadata")
+        .uid();
     fs::write(
         &config_path,
-        r#"
+        format!(
+            r#"
 [daemon]
-control_socket = "/tmp/baffle-test/control.sock"
-socket_dir = "/tmp/baffle-test/proxies"
+control_socket = "{}"
+socket_dir = "{}"
+trusted_operator_uid = {trusted_uid}
 
 [ca]
 certificate = "/tmp/baffle-test/ca.pem"
@@ -36,6 +45,9 @@ private_key = "/tmp/baffle-test/ca-key.pem"
 [secrets]
 directory = "/tmp/baffle-test/secrets"
 "#,
+            control_socket.display(),
+            socket_dir.display(),
+        ),
     )
     .expect("temporary config should be written");
 
@@ -56,6 +68,7 @@ directory = "/tmp/baffle-test/secrets"
             .is_none(),
         "daemon should remain alive after startup"
     );
+    assert!(control_socket.exists(), "daemon should bind control socket");
 
     let signal = Command::new("kill")
         .arg("-INT")
@@ -79,5 +92,9 @@ directory = "/tmp/baffle-test/secrets"
     assert!(
         exit_status.success(),
         "daemon should exit cleanly after SIGINT: {exit_status}"
+    );
+    assert!(
+        !control_socket.exists(),
+        "daemon should remove the control socket during shutdown"
     );
 }

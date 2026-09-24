@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tracing::info;
 
-use crate::config::DaemonConfig;
+use crate::{config::DaemonConfig, control::ControlServer};
 
 pub async fn run(config_path: &Path) -> Result<()> {
     let config = DaemonConfig::load(config_path)
@@ -12,12 +12,16 @@ pub async fn run(config_path: &Path) -> Result<()> {
 }
 
 /// Run the daemon with a configuration that has already passed schema validation.
-pub async fn run_with_config(_config: DaemonConfig) -> Result<()> {
+pub async fn run_with_config(config: DaemonConfig) -> Result<()> {
+    let mut control = ControlServer::bind(&config)?;
     info!("daemon started");
 
-    tokio::signal::ctrl_c()
-        .await
-        .context("failed to listen for shutdown signal")?;
+    tokio::select! {
+        result = control.run() => result?,
+        signal = tokio::signal::ctrl_c() => {
+            signal.context("failed to listen for shutdown signal")?;
+        }
+    }
 
     info!("daemon shutting down");
     Ok(())

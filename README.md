@@ -31,6 +31,8 @@ Start the daemon with a configuration path:
 
     cargo run -- daemon --config ./daemon.toml
 
-The daemon loads and validates the TOML configuration before it starts. It still waits for Ctrl-C to exit; Unix sockets and proxy sessions will be added in later implementation work.
+The daemon loads and validates the TOML configuration before it starts. It binds the private Unix control socket and serves the versioned control protocol until it receives Ctrl-C.
 
-Read the [Baffle proposal](docs/baffle-proposal.md) for the full architecture, security requirements, and delivery plan.
+Session creation currently uses an in-memory placeholder registry. Proxy data sockets will be added with session lifecycle support.
+
+Read the [control protocol](docs/control-protocol.md) for the wire format and the [Baffle proposal](docs/baffle-proposal.md) for the full architecture, security requirements, and delivery plan.
