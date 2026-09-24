@@ -227,6 +227,21 @@ impl PathRule {
         &self.path
     }
 
+    /// Check a request path against this validated exact or recursive pattern.
+    ///
+    /// Request paths use the same canonicalization rules as configured paths.
+    /// Invalid or ambiguous request paths never match.
+    pub(crate) fn matches_path(&self, path: &str) -> bool {
+        let Ok(path) = canonicalize_path(path) else {
+            return false;
+        };
+        if self.recursive {
+            path.starts_with(&self.path)
+        } else {
+            path == self.path
+        }
+    }
+
     fn overlaps(&self, other: &Self) -> bool {
         match (self.recursive, other.recursive) {
             (false, false) => self.path == other.path,
@@ -521,6 +536,19 @@ fn validate_path(input: &str) -> Result<PathRule, &'static str> {
         return Err("may use ** only as the final recursive path segment");
     }
 
+    let canonical = canonicalize_path(path)?;
+
+    Ok(PathRule {
+        path: canonical,
+        recursive,
+    })
+}
+
+fn canonicalize_path(path: &str) -> Result<String, &'static str> {
+    if !path.starts_with('/') || path.contains(['?', '#', '\\']) {
+        return Err("must be an absolute URL path without query, fragment, or backslash");
+    }
+
     let mut canonical = String::with_capacity(path.len());
     let bytes = path.as_bytes();
     let mut index = 0;
@@ -564,10 +592,7 @@ fn validate_path(input: &str) -> Result<PathRule, &'static str> {
         return Err("contains an unsafe dot segment");
     }
 
-    Ok(PathRule {
-        path: canonical,
-        recursive,
-    })
+    Ok(canonical)
 }
 
 fn hex_value(byte: u8) -> Option<u8> {

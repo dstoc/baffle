@@ -9,7 +9,7 @@ use hudsucker::hyper::{
 };
 use url::Host;
 
-use crate::config::{RuleMode, SessionConfig};
+use crate::config::{PathRule, RuleMode, SessionConfig};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthorizationError {
@@ -21,6 +21,7 @@ pub(crate) enum AuthorizationError {
 struct CompiledRule {
     mode: RuleMode,
     ports: HashSet<u16>,
+    paths: Vec<PathRule>,
 }
 
 /// A read-only set of host and port rules for one proxy session.
@@ -42,6 +43,7 @@ impl SessionPolicy {
                     CompiledRule {
                         mode: rule.mode,
                         ports: rule.ports.iter().copied().collect(),
+                        paths: rule.paths.clone(),
                     },
                 )
             })
@@ -60,11 +62,23 @@ impl SessionPolicy {
             http_destination(request)?
         };
 
-        self.rules
+        let rule = self
+            .rules
             .get(&host)
             .filter(|rule| rule.ports.contains(&port))
-            .map(|rule| rule.mode)
-            .ok_or(AuthorizationError::Denied)
+            .ok_or(AuthorizationError::Denied)?;
+
+        if request.method() != Method::CONNECT
+            && !rule.paths.is_empty()
+            && !rule
+                .paths
+                .iter()
+                .any(|path| path.matches_path(request.uri().path()))
+        {
+            return Err(AuthorizationError::Denied);
+        }
+
+        Ok(rule.mode)
     }
 }
 
@@ -223,6 +237,12 @@ mod tests {
         ))
     }
 
+    fn path_policy(paths: &str) -> SessionPolicy {
+        policy(&format!(
+            "version = 1\noperation = \"create\"\n[session]\n\n[[rules]]\nhost = \"github.com\"\nmode = \"intercept\"\nports = [443]\npaths = {paths}\n"
+        ))
+    }
+
     #[test]
     fn ordinary_http_matches_normalized_exact_hosts_and_ports() {
         let policy = policy_with("github.com", "tunnel", "ports = [80, 443]");
@@ -266,6 +286,61 @@ mod tests {
         assert_eq!(
             policy.authorize(&request("GET", "http://github.com/path", None)),
             Err(AuthorizationError::Denied)
+        );
+    }
+
+    #[test]
+    fn ordinary_http_enforces_exact_and_recursive_intercept_paths() {
+        let exact = path_policy("[\"/allowed\"]");
+        let exact_cases = [
+            ("https://github.com/allowed", true),
+            ("https://github.com/%61llowed?ref=main", true),
+            ("https://github.com/allowed?ref=main", true),
+            ("https://github.com/allowed/", false),
+            ("https://github.com/allowed/child", false),
+            ("https://github.com/allowedness", false),
+            ("https://github.com/private", false),
+            ("https://github.com/allowed%2fprivate", false),
+            ("https://github.com/allowed%252fprivate", false),
+            ("https://github.com/%2e%2e/private", false),
+        ];
+
+        for (uri, expected) in exact_cases {
+            assert_eq!(
+                exact.authorize(&request("GET", uri, None)).is_ok(),
+                expected,
+                "exact path authorization for {uri}"
+            );
+        }
+
+        let recursive = path_policy("[\"/allowed/**\"]");
+        let recursive_cases = [
+            ("https://github.com/allowed/", true),
+            ("https://github.com/allowed/child", true),
+            ("https://github.com/allowed/child/grandchild", true),
+            ("https://github.com/allowed", false),
+            ("https://github.com/allowedness/child", false),
+            ("https://github.com/private", false),
+        ];
+
+        for (uri, expected) in recursive_cases {
+            assert_eq!(
+                recursive.authorize(&request("GET", uri, None)).is_ok(),
+                expected,
+                "recursive path authorization for {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_restricted_connect_is_authorized_only_for_interception() {
+        let policy = path_policy("[\"/allowed\"]");
+        let connect = request("CONNECT", "github.com:443", None);
+
+        assert_eq!(policy.authorize(&connect), Ok(RuleMode::Intercept));
+        assert!(
+            PolicyHandler::new(RuntimeId::new("test"), Arc::new(policy))
+                .connect_should_intercept(&connect)
         );
     }
 
@@ -344,18 +419,21 @@ mod tests {
     }
 
     #[test]
-    fn handler_rejects_unauthorized_request_before_returning_it_upstream() {
+    fn handler_rejects_unauthorized_host_or_path_before_returning_it_upstream() {
         let handler = PolicyHandler::new(
             RuntimeId::new("test"),
-            Arc::new(policy_with("github.com", "intercept", "ports = [443]")),
+            Arc::new(path_policy("[\"/allowed\"]")),
         );
-        let response = handler.handle_policy_request(request(
-            "GET",
-            "http://example.net:8080/",
-            Some("example.net:8080"),
-        ));
-        assert!(
-            matches!(response, RequestOrResponse::Response(response) if response.status() == 403)
-        );
+
+        for (uri, host) in [
+            ("http://example.net:8080/", Some("example.net:8080")),
+            ("https://github.com/private", None),
+        ] {
+            let response = handler.handle_policy_request(request("GET", uri, host));
+            assert!(
+                matches!(response, RequestOrResponse::Response(response) if response.status() == 403),
+                "handler must reject {uri} before returning it upstream"
+            );
+        }
     }
 }
