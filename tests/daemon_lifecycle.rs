@@ -40,7 +40,9 @@ fn binary_help_lists_daemon_command() {
 fn daemon_starts_and_stops_on_interrupt() {
     use std::{
         fs,
-        os::unix::fs::MetadataExt,
+        io::{Read, Write},
+        os::unix::{fs::MetadataExt, net::UnixStream},
+        path::PathBuf,
         thread,
         time::{Duration, Instant},
     };
@@ -94,6 +96,33 @@ directory = "{secrets}"
     );
     assert!(control_socket.exists(), "daemon should bind control socket");
 
+    let request = b"version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"shutdown.example.test\"\nmode = \"tunnel\"\n";
+    let mut control = UnixStream::connect(&control_socket).expect("control client should connect");
+    control
+        .write_all(&(request.len() as u32).to_be_bytes())
+        .expect("control frame header should be written");
+    control
+        .write_all(request)
+        .expect("control request should be written");
+    let mut response_header = [0; 4];
+    control
+        .read_exact(&mut response_header)
+        .expect("control response header should be read");
+    let mut response_body = vec![0; u32::from_be_bytes(response_header) as usize];
+    control
+        .read_exact(&mut response_body)
+        .expect("control response should be read");
+    let response: serde_json::Value =
+        serde_json::from_slice(&response_body).expect("control response should be JSON");
+    assert_eq!(response["ok"], true);
+    let proxy_socket = PathBuf::from(
+        response["result"]["socket"]
+            .as_str()
+            .expect("create response should include the proxy socket"),
+    );
+    drop(control);
+    assert!(proxy_socket.exists(), "persistent session should be active");
+
     let signal = Command::new("kill")
         .arg("-INT")
         .arg(child.id().to_string())
@@ -120,6 +149,10 @@ directory = "{secrets}"
     assert!(
         !control_socket.exists(),
         "daemon should remove the control socket during shutdown"
+    );
+    assert!(
+        !proxy_socket.exists(),
+        "daemon should remove every session socket during shutdown"
     );
 }
 

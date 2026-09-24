@@ -48,10 +48,11 @@ const ERR_SECRET_UNAVAILABLE: (&str, &str) = (
     "one or more requested secrets are unavailable",
 );
 const ERR_INTERNAL: (&str, &str) = ("internal_error", "request could not be completed");
+const ERR_SHUTTING_DOWN: (&str, &str) = ("shutting_down", "daemon is shutting down");
 
 pub struct ControlServer {
-    listener: UnixListener,
-    _socket_guard: SocketGuard,
+    listener: Option<UnixListener>,
+    socket_guard: Option<SocketGuard>,
     state: Arc<ControlState>,
     connections: JoinSet<()>,
     runtime_events: tokio::sync::mpsc::UnboundedReceiver<ProxyRuntimeEvent>,
@@ -67,14 +68,34 @@ struct ControlState {
 
 struct SocketGuard {
     path: PathBuf,
+    device: u64,
+    inode: u64,
 }
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        if let Err(error) = fs::remove_file(&self.path)
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            warn!(path = %self.path.display(), %error, "failed to remove control socket");
+        match fs::symlink_metadata(&self.path) {
+            Ok(metadata)
+                if metadata.file_type().is_socket()
+                    && metadata.dev() == self.device
+                    && metadata.ino() == self.inode =>
+            {
+                if let Err(error) = fs::remove_file(&self.path)
+                    && error.kind() != io::ErrorKind::NotFound
+                {
+                    warn!(path = %self.path.display(), %error, "failed to remove control socket");
+                }
+            }
+            Ok(_) => warn!(
+                path = %self.path.display(),
+                "control socket path changed; leaving replacement untouched"
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => warn!(
+                path = %self.path.display(),
+                %error,
+                "could not inspect control socket during cleanup"
+            ),
         }
     }
 }
@@ -101,8 +122,15 @@ impl ControlServer {
         let listener = UnixListener::bind(control_socket).with_context(|| {
             format!("could not bind control socket {}", control_socket.display())
         })?;
+        let metadata = fs::symlink_metadata(control_socket)
+            .context("could not inspect bound control socket")?;
+        if !metadata.file_type().is_socket() {
+            bail!("bound control socket has unexpected file type");
+        }
         let socket_guard = SocketGuard {
             path: control_socket.clone(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
         };
         fs::set_permissions(control_socket, fs::Permissions::from_mode(0o600))
             .context("could not restrict control socket permissions")?;
@@ -125,8 +153,8 @@ impl ControlServer {
         let (runtime_event_sender, runtime_events) = tokio::sync::mpsc::unbounded_channel();
 
         Ok(Self {
-            listener,
-            _socket_guard: socket_guard,
+            listener: Some(listener),
+            socket_guard: Some(socket_guard),
             state: Arc::new(ControlState {
                 trusted_operator_uid: trusted_uid,
                 read_timeout: Duration::from_millis(config.daemon.control_read_timeout_ms),
@@ -154,8 +182,12 @@ impl ControlServer {
 
     pub async fn run(&mut self) -> Result<()> {
         loop {
+            let listener = self
+                .listener
+                .as_ref()
+                .context("control server is shutting down")?;
             tokio::select! {
-                accepted = self.listener.accept() => {
+                accepted = listener.accept() => {
                     let (stream, _) = accepted.context("control socket accept failed")?;
                     let state = Arc::clone(&self.state);
                     self.connections.spawn(async move {
@@ -180,8 +212,15 @@ impl ControlServer {
     }
 
     /// Stop all owned proxy instances, allowing each Hudsucker task to drain.
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&mut self) {
+        // Close the listening socket before stopping sessions. Existing
+        // handlers are cancelled below so no request can outlive shutdown.
+        self.listener.take();
+        self.state.sessions.reject_new_sessions().await;
+        self.connections.abort_all();
+        while self.connections.join_next().await.is_some() {}
         self.state.sessions.shutdown_all().await;
+        self.socket_guard.take();
     }
 }
 
@@ -286,7 +325,7 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
                 }
             };
             let result = {
-                let result = state.sessions.create(session, secrets).await;
+                let result = state.sessions.create(client_uid, session, secrets).await;
                 drop(permit);
                 result
             };
@@ -306,18 +345,19 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
                     warn!(%error, "failed to start proxy runtime");
                     error_value(ERR_INTERNAL)
                 }
+                Err(SessionError::ShuttingDown) => error_value(ERR_SHUTTING_DOWN),
                 Err(SessionError::Internal) => error_value(ERR_INTERNAL),
             }
         }
         ControlRequest::Stop { session_id, .. } => {
-            if state.sessions.stop(&session_id).await {
+            if state.sessions.stop(&session_id, client_uid).await {
                 success(json!({ "stopped": true }))
             } else {
                 error_value(ERR_SESSION_NOT_FOUND)
             }
         }
         ControlRequest::List { .. } => success(json!({
-            "sessions": state.sessions.list().await,
+            "sessions": state.sessions.list(client_uid).await,
         })),
     };
 
@@ -415,7 +455,13 @@ struct SessionManager {
     shutdown_grace: Duration,
     ca: Arc<ManagedCa>,
     runtime_events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
-    sessions: Arc<Mutex<HashMap<String, ManagedSession>>>,
+    registry: Arc<Mutex<SessionRegistry>>,
+    lifecycle_lock: Arc<Mutex<()>>,
+}
+
+struct SessionRegistry {
+    accepting_sessions: bool,
+    sessions: HashMap<String, ManagedSession>,
 }
 
 impl SessionManager {
@@ -434,29 +480,37 @@ impl SessionManager {
             shutdown_grace,
             ca,
             runtime_events,
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            registry: Arc::new(Mutex::new(SessionRegistry {
+                accepting_sessions: true,
+                sessions: HashMap::new(),
+            })),
+            lifecycle_lock: Arc::new(Mutex::new(())),
         }
     }
 
     async fn create(
         &self,
+        owner_uid: u32,
         session: SessionConfig,
         secrets: ResolvedSecrets,
     ) -> std::result::Result<SessionInfo, SessionError> {
         let id = new_session_id().map_err(|_| SessionError::Internal)?;
         let persistent = session.persistent;
-        let mut sessions = self.sessions.lock().await;
-        if sessions.len() >= self.max_sessions {
+        let mut registry = self.registry.lock().await;
+        if !registry.accepting_sessions {
+            return Err(SessionError::ShuttingDown);
+        }
+        if registry.sessions.len() >= self.max_sessions {
             return Err(SessionError::AtCapacity);
         }
-        if sessions.contains_key(&id) {
+        if registry.sessions.contains_key(&id) {
             return Err(SessionError::Internal);
         }
 
         let socket_path = self.socket_dir.join(format!("{id}.sock"));
         let runtime = ProxyRuntime::start(
             RuntimeId::new(id.clone()),
-            session,
+            session.clone(),
             Arc::clone(&self.ca),
             socket_path,
             self.max_connections_per_session,
@@ -468,53 +522,97 @@ impl SessionManager {
             socket: runtime.socket_path().to_string_lossy().into_owned(),
             id: id.clone(),
             persistent,
+            state: SessionLifecycle::Running,
         };
-        sessions.insert(
+        registry.sessions.insert(
             id,
             ManagedSession {
                 info: info.clone(),
+                owner_uid,
+                _configuration: session,
                 _secrets: secrets,
-                runtime,
+                runtime: Some(runtime),
             },
         );
         Ok(info)
     }
 
-    async fn stop(&self, id: &str) -> bool {
-        let session = self.sessions.lock().await.remove(id);
-        if let Some(session) = session {
-            session.runtime.shutdown(self.shutdown_grace).await;
-            true
-        } else {
-            false
+    async fn reject_new_sessions(&self) {
+        self.registry.lock().await.accepting_sessions = false;
+    }
+
+    async fn stop(&self, id: &str, owner_uid: u32) -> bool {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        let runtime = {
+            let mut registry = self.registry.lock().await;
+            let Some(session) = registry.sessions.get_mut(id) else {
+                return false;
+            };
+            if session.owner_uid != owner_uid {
+                return false;
+            }
+            if session.info.state == SessionLifecycle::Stopping {
+                return true;
+            }
+            session.info.state = SessionLifecycle::Stopping;
+            session.runtime.take()
+        };
+        if let Some(runtime) = runtime {
+            runtime.shutdown(self.shutdown_grace).await;
         }
+        self.registry.lock().await.sessions.remove(id);
+        true
     }
 
     async fn remove(&self, id: &str) {
-        let session = self.sessions.lock().await.remove(id);
-        if let Some(session) = session {
-            session.runtime.shutdown(self.shutdown_grace).await;
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        let runtime = {
+            let mut registry = self.registry.lock().await;
+            let Some(session) = registry.sessions.get_mut(id) else {
+                return;
+            };
+            session.info.state = SessionLifecycle::Stopping;
+            session.runtime.take()
+        };
+        if let Some(runtime) = runtime {
+            runtime.shutdown(self.shutdown_grace).await;
         }
+        self.registry.lock().await.sessions.remove(id);
     }
 
     async fn shutdown_all(&self) {
-        let sessions = std::mem::take(&mut *self.sessions.lock().await);
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        let runtimes = {
+            let mut registry = self.registry.lock().await;
+            registry.accepting_sessions = false;
+            registry
+                .sessions
+                .values_mut()
+                .filter_map(|session| {
+                    session.info.state = SessionLifecycle::Stopping;
+                    session.runtime.take()
+                })
+                .collect::<Vec<_>>()
+        };
         let mut shutdowns = JoinSet::new();
-        for session in sessions.into_values() {
+        for runtime in runtimes {
             let grace = self.shutdown_grace;
             shutdowns.spawn(async move {
-                session.runtime.shutdown(grace).await;
+                runtime.shutdown(grace).await;
             });
         }
         while shutdowns.join_next().await.is_some() {}
+        self.registry.lock().await.sessions.clear();
     }
 
-    async fn list(&self) -> Vec<SessionInfo> {
+    async fn list(&self, owner_uid: u32) -> Vec<SessionInfo> {
         let mut sessions = self
-            .sessions
+            .registry
             .lock()
             .await
+            .sessions
             .values()
+            .filter(|session| session.owner_uid == owner_uid)
             .map(|session| session.info.clone())
             .collect::<Vec<_>>();
         sessions.sort_by(|left, right| left.id.cmp(&right.id));
@@ -524,15 +622,20 @@ impl SessionManager {
 
 struct ManagedSession {
     info: SessionInfo,
+    owner_uid: u32,
+    // Keep the validated configuration with its runtime. Secret values are
+    // held separately and neither value is included in list responses.
+    _configuration: SessionConfig,
     // Secret values remain scoped to this session and are never serialized.
     _secrets: ResolvedSecrets,
-    runtime: ProxyRuntime,
+    runtime: Option<ProxyRuntime>,
 }
 
 #[derive(Debug)]
 enum SessionError {
     AtCapacity,
     Runtime(ProxyRuntimeError),
+    ShuttingDown,
     Internal,
 }
 
@@ -541,6 +644,14 @@ struct SessionInfo {
     id: String,
     socket: String,
     persistent: bool,
+    state: SessionLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SessionLifecycle {
+    Running,
+    Stopping,
 }
 
 fn new_session_id() -> io::Result<String> {
@@ -746,7 +857,7 @@ mod tests {
         assert!(!String::from_utf8_lossy(&body).contains("credential-must-not-leak"));
         task.await.expect("control handler should finish");
         assert!(
-            control_state.sessions.list().await.is_empty(),
+            control_state.sessions.list(uid).await.is_empty(),
             "unauthorized references must fail before session creation"
         );
     }
@@ -777,8 +888,15 @@ mod tests {
         let id = response["result"]["id"]
             .as_str()
             .expect("created session should have an id");
-        let sessions = state.sessions.sessions.lock().await;
-        let created = sessions.get(id).expect("session should be retained");
+        assert!(state.sessions.list(uid.wrapping_add(1)).await.is_empty());
+        assert!(!state.sessions.stop(id, uid.wrapping_add(1)).await);
+        let registry = state.sessions.registry.lock().await;
+        let created = registry
+            .sessions
+            .get(id)
+            .expect("session should be retained");
+        assert_eq!(created.owner_uid, uid);
+        assert_eq!(created._configuration.rules[0].host, "example.com");
         assert_eq!(
             created
                 ._secrets
