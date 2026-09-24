@@ -1,14 +1,18 @@
 # Baffle
 
-Baffle is a standalone Rust daemon for creating policy-controlled HTTP and HTTPS proxies on demand. It is intended to host multiple isolated proxy sessions inside one process. Each session will have its own policy, Unix socket, and lifecycle.
+Baffle is a standalone Rust daemon for creating policy-controlled HTTP and HTTPS proxies on demand. It hosts multiple isolated proxy sessions inside one process. Each session has its own policy, Unix socket, and lifecycle.
 
-The repository begins with one Rust crate. The binary is named baffle; its Cargo package is named baffle-proxy.
+The repository contains one Rust crate. The binary is named baffle; its Cargo package is named baffle-proxy.
 
 ## Architecture
 
 The proposal describes a Tokio daemon with a private Unix control socket and one Unix data socket per proxy session. Hudsucker handles HTTP and HTTPS proxying. A small in-process bridge connects each Unix data socket to a pre-bound loopback TCP listener used by Hudsucker.
 
-Hudsucker is pinned to version 0.25.0 in Cargo.toml. The proposal records the security review required before Baffle can serve as a containment boundary. This initial project scaffold does not yet accept proxy traffic or enforce policies.
+Hudsucker is pinned to version 0.25.0 in Cargo.toml. Each session has a distinct Unix data socket and a streaming bridge to its private loopback TCP listener. The current handler denies outbound requests while policy enforcement is under development.
+
+## Deployment security requirement
+
+Run Baffle in a network namespace that sandboxed proxy clients cannot access. The session TCP ports bind to loopback inside Baffle's namespace, but loopback does not isolate processes that share that namespace. Expose only the control socket to the trusted operator and each session's Unix data socket to its assigned client. Do not treat the per-session socket as a security boundary if clients can connect to Baffle's internal TCP ports directly.
 
 ## Relationship to Cladding
 
@@ -43,6 +47,6 @@ Start the daemon with a configuration path:
 
 The daemon loads and validates the TOML configuration before it starts. It binds the private Unix control socket and serves the versioned control protocol until it receives Ctrl-C.
 
-Session creation starts a deny-all Hudsucker instance on a pre-bound, per-session loopback TCP listener. Runtime failures are isolated to that session. The Unix data socket bridge will connect to these listeners in a later milestone.
+Session creation starts a deny-all Hudsucker instance on a pre-bound, per-session loopback TCP listener and returns a randomly named, per-session Unix data socket. The in-process bridge streams data between the two listeners and applies the configured per-session connection limit. Runtime failures are isolated to that session.
 
 Read the [control protocol](docs/control-protocol.md) for the wire format and the [Baffle proposal](docs/baffle-proposal.md) for the full architecture, security requirements, and delivery plan.
