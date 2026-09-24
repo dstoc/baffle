@@ -186,10 +186,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "baffle-client"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "baffle-proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "baffle-client",
  "clap",
  "hudsucker",
  "serde",
