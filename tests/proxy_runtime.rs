@@ -248,9 +248,16 @@ async fn unauthorized_ip_literal_is_rejected_before_an_upstream_connection() {
         .local_addr()
         .expect("probe address should be available");
     let runtime_id = RuntimeId::new("runtime-ip-deny");
-    let runtime = ProxyRuntime::start(runtime_id.clone(), session_config(), ca, event_sender)
-        .await
-        .expect("proxy runtime should start");
+    let runtime = ProxyRuntime::start(
+        runtime_id.clone(),
+        session_config(),
+        ca,
+        directory.path().join("ip-deny.sock"),
+        8,
+        event_sender,
+    )
+    .await
+    .expect("proxy runtime should start");
 
     let mut stream = TcpStream::connect(runtime.local_addr())
         .await
