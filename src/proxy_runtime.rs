@@ -80,6 +80,8 @@ pub struct ProxyRuntime {
     local_addr: SocketAddr,
     socket_path: PathBuf,
     cancellation: CancellationToken,
+    bridge_ingress_shutdown: CancellationToken,
+    bridge_force_cancellation: CancellationToken,
     runtime_abort: AbortHandle,
     bridge_abort: AbortHandle,
     task: JoinHandle<()>,
@@ -107,6 +109,8 @@ impl ProxyRuntime {
             bind_unix_listener(&socket_path).map_err(ProxyRuntimeError::BindSocket)?;
         let cancellation = CancellationToken::new();
         let shutdown = cancellation.clone();
+        let bridge_ingress_shutdown = CancellationToken::new();
+        let bridge_force_cancellation = CancellationToken::new();
 
         let proxy = Proxy::builder()
             .with_listener(listener)
@@ -131,7 +135,8 @@ impl ProxyRuntime {
             socket_guard,
             local_addr,
             Arc::new(Semaphore::new(max_connections)),
-            cancellation.clone(),
+            bridge_ingress_shutdown.clone(),
+            bridge_force_cancellation.clone(),
         ));
         let bridge_abort = bridge_task.abort_handle();
 
@@ -140,15 +145,26 @@ impl ProxyRuntime {
         let runtime_abort = runtime_task.abort_handle();
         let event_id = runtime_id.clone();
         let supervisor_cancellation = cancellation.clone();
+        let supervisor_ingress_shutdown = bridge_ingress_shutdown.clone();
+        let supervisor_force_cancellation = bridge_force_cancellation.clone();
         let task = tokio::spawn(async move {
             let (runtime_result, bridge_result) = tokio::select! {
                 runtime_result = &mut runtime_task => {
+                    let runtime_result = map_runtime_result(runtime_result);
+                    supervisor_ingress_shutdown.cancel();
+                    if runtime_result.is_err() {
+                        supervisor_force_cancellation.cancel();
+                    }
                     supervisor_cancellation.cancel();
-                    (map_runtime_result(runtime_result), map_bridge_result(bridge_task.await))
+                    (runtime_result, map_bridge_result(bridge_task.await))
                 }
                 bridge_result = &mut bridge_task => {
+                    let bridge_result = map_bridge_result(bridge_result);
+                    if bridge_result.is_err() {
+                        supervisor_force_cancellation.cancel();
+                    }
                     supervisor_cancellation.cancel();
-                    (map_runtime_result(runtime_task.await), map_bridge_result(bridge_result))
+                    (map_runtime_result(runtime_task.await), bridge_result)
                 }
             };
             let result = runtime_result.and(bridge_result);
@@ -163,6 +179,8 @@ impl ProxyRuntime {
             local_addr,
             socket_path,
             cancellation,
+            bridge_ingress_shutdown,
+            bridge_force_cancellation,
             runtime_abort,
             bridge_abort,
             task,
@@ -185,6 +203,7 @@ impl ProxyRuntime {
 
     /// Ask Hudsucker to drain active connections, then bound the wait.
     pub async fn shutdown(mut self, grace: Duration) {
+        self.bridge_ingress_shutdown.cancel();
         self.cancellation.cancel();
         if tokio::time::timeout(grace, &mut self.task).await.is_err() {
             self.runtime_abort.abort();
@@ -292,16 +311,18 @@ fn bind_unix_listener(path: &Path) -> io::Result<(UnixListener, UnixSocketGuard)
 
 async fn run_bridge(
     listener: UnixListener,
-    _socket_guard: UnixSocketGuard,
+    socket_guard: UnixSocketGuard,
     upstream: SocketAddr,
     permits: Arc<Semaphore>,
-    cancellation: CancellationToken,
+    ingress_shutdown: CancellationToken,
+    force_cancellation: CancellationToken,
 ) -> io::Result<()> {
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
             biased;
-            _ = cancellation.cancelled() => break,
+            _ = ingress_shutdown.cancelled() => break,
+            _ = force_cancellation.cancelled() => break,
             Some(result) = connections.join_next(), if !connections.is_empty() => {
                 if let Err(error) = result {
                     tracing::debug!(%error, "proxy bridge connection task failed");
@@ -316,7 +337,7 @@ async fn run_bridge(
                         continue;
                     }
                 };
-                let connection_cancellation = cancellation.clone();
+                let connection_cancellation = force_cancellation.clone();
                 connections.spawn(async move {
                     tokio::select! {
                         biased;
@@ -337,6 +358,11 @@ async fn run_bridge(
         }
     }
 
+    // Stop new clients and make the socket path unavailable before draining
+    // streams that were already accepted.
+    drop(listener);
+    drop(socket_guard);
+
     while let Some(result) = connections.join_next().await {
         if let Err(error) = result {
             tracing::debug!(%error, "proxy bridge connection task failed during shutdown");
@@ -350,7 +376,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use tokio::{
-        io::AsyncReadExt,
+        io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, UnixStream},
         sync::Semaphore,
         time::timeout,
@@ -372,12 +398,14 @@ mod tests {
             .local_addr()
             .expect("test upstream address should be available");
         let cancellation = CancellationToken::new();
+        let force_cancellation = CancellationToken::new();
         let bridge = tokio::spawn(run_bridge(
             unix_listener,
             socket_guard,
             upstream_address,
             Arc::new(Semaphore::new(1)),
             cancellation.clone(),
+            force_cancellation.clone(),
         ));
 
         let _first_client = UnixStream::connect(&socket_path)
@@ -405,6 +433,7 @@ mod tests {
         );
 
         cancellation.cancel();
+        force_cancellation.cancel();
         timeout(Duration::from_secs(2), bridge)
             .await
             .expect("bridge should stop when its session is cancelled")
@@ -415,10 +444,90 @@ mod tests {
             "session cancellation removes its socket"
         );
     }
+
+    #[tokio::test]
+    async fn ingress_shutdown_removes_socket_and_drains_accepted_streams() {
+        let directory = tempfile::tempdir().expect("test directory should be created");
+        let socket_path = directory.path().join("draining.sock");
+        let (unix_listener, socket_guard) =
+            UnixSocketGuard::bind(&socket_path).expect("Unix bridge should bind");
+        let upstream = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test upstream should bind");
+        let upstream_address = upstream
+            .local_addr()
+            .expect("test upstream address should be available");
+        let ingress_shutdown = CancellationToken::new();
+        let force_cancellation = CancellationToken::new();
+        let bridge = tokio::spawn(run_bridge(
+            unix_listener,
+            socket_guard,
+            upstream_address,
+            Arc::new(Semaphore::new(1)),
+            ingress_shutdown.clone(),
+            force_cancellation,
+        ));
+
+        let mut client = UnixStream::connect(&socket_path)
+            .await
+            .expect("Unix client should connect before shutdown");
+        let (mut upstream_stream, _) = timeout(Duration::from_secs(2), upstream.accept())
+            .await
+            .expect("bridge should open an upstream connection")
+            .expect("upstream connection should succeed");
+
+        ingress_shutdown.cancel();
+        timeout(Duration::from_secs(2), async {
+            while socket_path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ingress shutdown should unlink the socket promptly");
+        assert!(!bridge.is_finished(), "accepted streams should drain");
+        assert!(
+            UnixStream::connect(&socket_path).await.is_err(),
+            "new clients should not connect after ingress shutdown"
+        );
+
+        client
+            .write_all(b"drain request")
+            .await
+            .expect("accepted client stream should remain writable");
+        let mut request = [0; 13];
+        timeout(
+            Duration::from_secs(2),
+            upstream_stream.read_exact(&mut request),
+        )
+        .await
+        .expect("upstream should receive the in-flight request")
+        .expect("in-flight request should be readable");
+        assert_eq!(&request, b"drain request");
+        upstream_stream
+            .write_all(b"drain response")
+            .await
+            .expect("upstream response should be writable");
+        let mut response = [0; 14];
+        timeout(Duration::from_secs(2), client.read_exact(&mut response))
+            .await
+            .expect("client should receive the in-flight response")
+            .expect("in-flight response should be readable");
+        assert_eq!(&response, b"drain response");
+
+        drop(client);
+        drop(upstream_stream);
+        timeout(Duration::from_secs(2), bridge)
+            .await
+            .expect("bridge should finish after accepted streams close")
+            .expect("bridge task should join")
+            .expect("bridge should shut down cleanly");
+    }
 }
 
 impl Drop for ProxyRuntime {
     fn drop(&mut self) {
+        self.bridge_ingress_shutdown.cancel();
+        self.bridge_force_cancellation.cancel();
         self.cancellation.cancel();
         // A caller can be cancelled while awaiting graceful shutdown. Abort
         // owned tasks on drop so that cancellation cannot detach a live proxy
