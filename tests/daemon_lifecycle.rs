@@ -22,7 +22,22 @@ fn daemon_starts_and_stops_on_interrupt() {
 
     let config_dir = tempfile::tempdir().expect("temporary config directory should be created");
     let config_path = config_dir.path().join("daemon.toml");
-    fs::write(&config_path, "[daemon]\n").expect("temporary config should be written");
+    fs::write(
+        &config_path,
+        r#"
+[daemon]
+control_socket = "/tmp/baffle-test/control.sock"
+socket_dir = "/tmp/baffle-test/proxies"
+
+[ca]
+certificate = "/tmp/baffle-test/ca.pem"
+private_key = "/tmp/baffle-test/ca-key.pem"
+
+[secrets]
+directory = "/tmp/baffle-test/secrets"
+"#,
+    )
+    .expect("temporary config should be written");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_baffle"))
         .arg("daemon")
