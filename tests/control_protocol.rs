@@ -207,6 +207,92 @@ fn failed_session_creation_leaves_no_socket_or_registry_entry() {
     );
 }
 
+#[test]
+fn daemon_reclaims_stale_control_and_session_sockets_after_crash() {
+    let mut daemon = start_daemon(250);
+    let (_creator, created) = create_session(&daemon.socket, true, "crash.example.test");
+    let stale_proxy_path = PathBuf::from(
+        created["result"]["socket"]
+            .as_str()
+            .expect("persistent session should return its socket path"),
+    );
+    let competing_start = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("daemon")
+        .arg("--config")
+        .arg(daemon._directory.path().join("daemon.toml"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("a competing daemon process should start");
+    assert!(
+        !competing_start.success(),
+        "a second daemon must not remove an active control socket"
+    );
+    assert_eq!(
+        request(&daemon.socket, "version = 1\noperation = \"list\"\n")["ok"],
+        true,
+        "the active daemon should remain available"
+    );
+    daemon.child.kill().expect("daemon should be killable");
+    daemon
+        .child
+        .wait()
+        .expect("crashed daemon should be reaped");
+    assert!(
+        daemon.socket.exists(),
+        "SIGKILL should leave the control socket"
+    );
+    assert!(
+        stale_proxy_path.exists(),
+        "SIGKILL should leave the session socket"
+    );
+
+    let config_path = daemon._directory.path().join("daemon.toml");
+    daemon.child = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("daemon")
+        .arg("--config")
+        .arg(config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("daemon should restart with the same paths");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = daemon
+            .child
+            .try_wait()
+            .expect("restarted daemon status should be readable")
+        {
+            panic!("daemon failed to reclaim stale sockets: {status}");
+        }
+        if UnixStream::connect(&daemon.socket).is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon should bind its control socket"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(
+        !stale_proxy_path.exists(),
+        "restart should remove the stale session socket"
+    );
+    assert_eq!(
+        fs::read_dir(&daemon.socket_dir)
+            .expect("session socket directory should remain available")
+            .count(),
+        0,
+        "restart should leave no stale session socket entries"
+    );
+    assert_eq!(
+        request(&daemon.socket, "version = 1\noperation = \"list\"\n")["ok"],
+        true
+    );
+}
+
 fn start_daemon(read_timeout_ms: u64) -> DaemonProcess {
     start_daemon_with_socket_dir(read_timeout_ms, "proxies")
 }

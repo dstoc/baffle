@@ -5,6 +5,7 @@ use std::{
     fs::{self, File},
     io::{self, Read},
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    os::unix::net::UnixStream as StdUnixStream,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -117,10 +118,17 @@ impl ControlServer {
         ensure_private_directory(socket_dir, trusted_uid)?;
 
         match fs::symlink_metadata(control_socket) {
+            Ok(metadata) if metadata.file_type().is_socket() => {
+                if !remove_stale_socket(control_socket, trusted_uid)? {
+                    bail!("control socket path already exists");
+                }
+            }
             Ok(_) => bail!("control socket path already exists"),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error).context("could not inspect control socket path"),
         }
+
+        remove_stale_session_sockets(socket_dir, trusted_uid)?;
 
         let listener = UnixListener::bind(control_socket).with_context(|| {
             format!("could not bind control socket {}", control_socket.display())
@@ -295,6 +303,83 @@ fn ensure_private_directory(path: &Path, expected_uid: u32) -> Result<()> {
     }
     if metadata.permissions().mode() & 0o077 != 0 {
         bail!("control socket directory permissions must be 0700 or more restrictive");
+    }
+    Ok(())
+}
+
+/// Remove a disconnected Unix socket without deleting an active listener or a
+/// path that changed while it was being checked. Returns true only when this
+/// call removed a stale socket.
+fn remove_stale_socket(path: &Path, expected_uid: u32) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not inspect {}", path.display()));
+        }
+    };
+    if !metadata.file_type().is_socket() || metadata.uid() != expected_uid {
+        return Ok(false);
+    }
+
+    match StdUnixStream::connect(path) {
+        Ok(stream) => {
+            drop(stream);
+            Ok(false)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) =>
+        {
+            let current = match fs::symlink_metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("could not recheck {}", path.display()));
+                }
+            };
+            if !current.file_type().is_socket()
+                || current.uid() != expected_uid
+                || current.dev() != metadata.dev()
+                || current.ino() != metadata.ino()
+            {
+                bail!("socket path changed during stale socket cleanup");
+            }
+            fs::remove_file(path)
+                .with_context(|| format!("could not remove stale socket {}", path.display()))?;
+            Ok(true)
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "could not check whether socket {} is active",
+                path.display()
+            )
+        }),
+    }
+}
+
+fn remove_stale_session_sockets(directory: &Path, expected_uid: u32) -> Result<()> {
+    for entry in fs::read_dir(directory).with_context(|| {
+        format!(
+            "could not read session socket directory {}",
+            directory.display()
+        )
+    })? {
+        let entry = entry.context("could not inspect session socket directory entry")?;
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("could not inspect {}", path.display()));
+            }
+        };
+        if metadata.file_type().is_socket() {
+            remove_stale_socket(&path, expected_uid)?;
+        }
     }
     Ok(())
 }
