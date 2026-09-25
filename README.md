@@ -1,56 +1,129 @@
 # Baffle
 
-Baffle is a standalone Rust daemon for creating policy-controlled HTTP and HTTPS proxies on demand. It hosts multiple isolated proxy sessions inside one process. Each session has its own policy, Unix socket, and lifecycle.
+Baffle is a Linux daemon that creates independent, policy-controlled HTTP and
+HTTPS proxies on demand. One daemon can manage multiple sessions. Each session
+has its own policy, Unix data socket, and lifecycle.
 
-The repository contains one Rust crate. The binary is named baffle; its Cargo package is named baffle-proxy.
+Baffle allows traffic only to exact host and port rules. A rule can tunnel
+HTTPS without decrypting it or intercept HTTPS so Baffle can check paths and
+add daemon-managed credentials. Baffle denies destinations and requests that
+do not match a session policy.
 
-## Architecture
+The executable is named `baffle`. The Cargo package is named `baffle-proxy`.
+The client library is the separate workspace package `baffle-client`.
 
-The proposal describes a Tokio daemon with a private Unix control socket and one Unix data socket per proxy session. Hudsucker handles HTTP and HTTPS proxying. A small in-process bridge connects each Unix data socket to a pre-bound loopback TCP listener used by Hudsucker.
+## Install
 
-Hudsucker is pinned to version 0.25.0 in Cargo.toml. Each session has a distinct Unix data socket and a streaming bridge to its private loopback TCP listener. The runtime checks each request against that session's exact host, port, and optional canonical path rules, then filters and pins resolved destinations before dialing. A rule can permit an exact non-public DNS answer with `private_addresses`.
+The release workflow builds the Linux x86-64 GNU binary when a `v<version>`
+tag matches the version in `Cargo.toml`. Download and unpack the
+`baffle-proxy-v<version>-x86_64-unknown-linux-gnu.tar.gz` asset from the
+[GitHub releases](https://github.com/dstoc/baffle/releases), then install the
+binary in a directory on `PATH`:
 
-## Deployment security requirement
+```sh
+tar -xzf baffle-proxy-v<version>-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m 0755 baffle /usr/local/bin/baffle
+baffle --help
+```
 
-Run Baffle in a network namespace that sandboxed proxy clients cannot access. The session TCP ports bind to loopback inside Baffle's namespace, but loopback does not isolate processes that share that namespace. Expose only the control socket to the trusted operator and each session's Unix data socket to its assigned client. Do not treat the per-session socket as a security boundary if clients can connect to Baffle's internal TCP ports directly.
+The binary targets Linux x86-64 and links to the system GNU C library. To build
+from a checkout with Rust installed, run:
 
-## Relationship to Cladding
+```sh
+cargo install --path . --locked --bin baffle
+```
 
-Baffle is an independent project and has no Cladding dependency. Cladding is an intended consumer: it can submit a session policy and map the returned Unix socket into its existing proxy wiring. Baffle owns proxy sessions and policy enforcement; Cladding owns command integration and sandbox setup.
+## Quick start
+
+Create the daemon user, runtime directories, CA, and daemon configuration as
+described in the [security and deployment guide](docs/security-deployment.md).
+Edit [`examples/daemon.toml`](examples/daemon.toml) for the daemon UID and your
+installation paths. Then start Baffle:
+
+```sh
+baffle daemon --config /etc/baffle/daemon.toml
+```
+
+In another terminal, build and run the Rust example. It creates an ephemeral
+session, sends one HTTP request through its Unix data socket, then closes the
+lease and removes the session:
+
+```sh
+cargo run --locked --example client
+```
+
+The example expects the control socket at `/run/baffle/control.sock` and allows
+`example.com` on port 80. The daemon's session socket directory defaults to
+`/run/baffle/proxies` in the example configuration. See
+[`examples/session.toml`](examples/session.toml) for a direct-protocol policy.
+
+For an HTTPS CONNECT session exposed through a local TCP bridge, use the
+[Cladding integration example](docs/cladding-integration.md). It uses
+`socat`; the Baffle daemon and sandboxed client must have the network and socket
+isolation described in the [deployment guide](docs/security-deployment.md).
+
+## How it works
+
+The daemon owns a private Unix control socket and a managed certificate
+authority. A trusted client creates a session over the control socket and gets
+the path to that session's Unix data socket. Hudsucker handles HTTP and HTTPS
+traffic. A bounded in-process bridge connects the data socket to a private,
+pre-bound loopback TCP listener used by Hudsucker.
+
+Every session has a separate immutable policy, Hudsucker runtime, DNS-aware
+outbound connector, credential state, and resource counters. The session
+manager shares the Tokio runtime and CA material. See the
+[architecture guide](docs/architecture.md) for component details and data
+flows.
+
+**Deployment requirement:** sandboxed clients must not be able to reach
+Baffle's internal loopback TCP listeners. Run the daemon in a network
+namespace that clients cannot access, or enforce equivalent isolation. Expose
+the control socket only to the trusted operator. Expose only an assigned
+session socket to its client.
 
 ## Development
 
-Run these checks before submitting changes:
+Build the workspace and run its checks:
 
-    cargo build
-    cargo test --all-features
-    cargo fmt --check
-    cargo clippy --all-targets --all-features -- -D warnings
+```sh
+cargo build --locked
+cargo test --locked --all-features
+cargo test --locked --release --all-features
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo check --locked --examples
+```
 
-GitHub Actions runs the formatting, Clippy, and test checks on pushes and pull requests. The workflow caches Cargo dependencies.
+GitHub Actions runs these checks, parses the checked-in TOML examples, and runs
+the privileged Linux network-namespace integration job. See
+[integration testing](docs/integration-testing.md) for test coverage and the
+manual namespace test command.
 
-The privileged network namespace integration job runs separately from local Cargo checks. See [integration testing](docs/integration-testing.md) for its GitHub Actions and manual commands, its opt-in local command, and its prerequisites.
+## Documentation
 
-## Certificate authority
+- [Configuration reference](docs/configuration.md): daemon and session TOML,
+  defaults, validation, path matching, secrets, and examples.
+- [Control protocol](docs/control-protocol.md): version 1 framing, request and
+  response schemas, error codes, and session leases.
+- [Security and deployment](docs/security-deployment.md): threat model, CA
+  provisioning, secret storage, socket access, and network isolation.
+- [Architecture](docs/architecture.md): components, request flow, session
+  lifecycle, policy boundaries, failure behavior, and Hudsucker patches.
+- [Rust client](docs/client.md): typed client API and direct protocol use.
+- [Cladding integration](docs/cladding-integration.md): a standalone
+  `socat` bridge example and integration steps for other consumers.
+- [Integration testing](docs/integration-testing.md): automated coverage and
+  the privileged namespace test.
+- [Release review](docs/release-review.md): package, dependency, logging,
+  error-handling, and credential-protection review.
+- [Authoritative proposal](docs/baffle-proposal.md): product goals, security
+  requirements, and the v1 specification.
 
-The daemon loads the CA certificate and private key from the paths in `[ca]`. The certificate must be current and marked for certificate signing. The private key must match the certificate, be a regular file, and allow read access only to its owner. Use mode `0400` or `0600` for the key file.
+## Current release scope
 
-Export the public certificate for clients that need to trust intercepted HTTPS:
-
-    cargo run -- ca export --config ./daemon.toml --output ./baffle-ca.pem
-
-The command writes a new public certificate file with mode `0644`. It fails if the output path already exists. It does not read or export the private key.
-
-## Run
-
-Start the daemon with a configuration path:
-
-    cargo run -- daemon --config ./daemon.toml
-
-The daemon loads and validates the TOML configuration before it starts. It binds the private Unix control socket and serves the versioned control protocol until it receives Ctrl-C.
-
-Session creation starts a deny-all Hudsucker instance on a pre-bound, per-session loopback TCP listener and returns a randomly named, per-session Unix data socket. The in-process bridge streams data between the two listeners and applies the configured per-session connection limit. Runtime failures are isolated to that session.
-
-Read the [control protocol](docs/control-protocol.md) for the wire format and the [Baffle proposal](docs/baffle-proposal.md) for the full architecture, security requirements, and delivery plan.
-
-Orchestrators can use the standalone [`baffle-client` crate](docs/client.md) to create, list, and stop sessions. The client crate has no dependency on Baffle's proxy runtime.
+Baffle runs on Linux. It is a forward HTTP/HTTPS proxy. It does not install its
+CA into system trust stores, configure client proxy settings, or create the
+network sandbox that isolates its internal TCP listeners. The deployment must
+provide that isolation. Baffle does not change Cladding; a consumer integrates
+through the public control protocol or `baffle-client` crate.

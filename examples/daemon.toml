@@ -1,0 +1,20 @@
+# Change the UID and paths for the account that runs Baffle.
+[daemon]
+control_socket = "/run/baffle/control.sock"
+socket_dir = "/run/baffle/proxies"
+trusted_operator_uid = 1000
+max_sessions = 64
+max_connections_per_session = 128
+shutdown_grace_seconds = 5
+control_read_timeout_ms = 5000
+max_provisioning_requests = 8
+connection_timeout_ms = 5000
+io_timeout_ms = 30000
+
+[ca]
+certificate = "/var/lib/baffle/ca.pem"
+private_key = "/var/lib/baffle/ca-key.pem"
+
+[secrets]
+directory = "/var/lib/baffle/secrets"
+allowed = ["example-api"]

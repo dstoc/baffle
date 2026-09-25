@@ -1,17 +1,107 @@
-# Cladding integration example
+# Cladding and other consumers
 
-Cladding can use Baffle without adding a Cladding dependency to this repository. The example creates one ephemeral session, then runs `socat` as Cladding's local TCP-to-Unix-socket bridge.
+Baffle is an independent daemon. It has no Cladding dependency and this
+repository makes no Cladding changes. A trusted consumer creates a session
+over the Unix control socket, gives its workload access to the returned data
+socket, and owns the session lease for the workload's lifetime.
 
-Start the Baffle daemon with a control socket that the Cladding task can access. Then run this example in the Cladding network and mount namespace:
+## Consumer integration steps
+
+1. Run Baffle as a dedicated Linux service account and make the control socket
+   available only to the trusted orchestrator.
+2. Create a policy for one workload. Use the `baffle-client` crate from Rust,
+   or implement the [control protocol](control-protocol.md) in another
+   language.
+3. Keep the returned `Session` handle alive while an ephemeral workload runs.
+   Its control connection is the lease. Close or drop the handle after normal
+   completion, cancellation, or failure.
+4. Expose only that session's data socket to the assigned workload. Use a
+   trusted bridge or controlled mount and preserve mode `0600`; do not expose
+   the control socket or the full socket directory.
+5. Ensure the sandbox cannot reach Baffle's internal loopback TCP listeners
+   and cannot bypass the proxy for external network access. See the
+   [security and deployment guide](security-deployment.md).
+
+For a persistent session, close the create connection after the response and
+send an explicit `stop` operation during cleanup. Use `list` to inspect
+sessions owned by the same trusted UID.
+
+## Rust client example
+
+`examples/client.rs` creates an ephemeral policy, sends a plaintext HTTP
+request to `example.com` through the session's Unix data socket, prints the
+response, and closes the lease. The example allows only port 80 for that
+request.
+
+Start Baffle with a valid daemon configuration, then run:
+
+```sh
+BAFFLE_CONTROL_SOCKET=/run/baffle/control.sock cargo run --locked --example client
+```
+
+The example defaults to `/run/baffle/control.sock`, host `example.com`, and
+port 80. Set `BAFFLE_CONTROL_SOCKET` to use another control path. You can
+verify proxy use without an external upstream by running a local server in one
+terminal:
+
+```sh
+python3 -m http.server 8000 --bind 127.0.0.1
+```
+
+Then run the client example in another terminal. Its exact-address exception
+allows this local test server only for the configured hostname and port:
+
+```sh
+BAFFLE_CONTROL_SOCKET=/run/baffle/control.sock \
+BAFFLE_EXAMPLE_HOST=localhost \
+BAFFLE_EXAMPLE_PORT=8000 \
+BAFFLE_EXAMPLE_PRIVATE_ADDRESS=127.0.0.1 \
+cargo run --locked --example client
+```
+
+The environment variables set the example's session policy and request target.
+CI compiles this example and parses the TOML files in `examples/`; it does not
+start a daemon or a live upstream server.
+
+## Cladding `socat` example
+
+The standalone [`examples/cladding_socat.rs`](../examples/cladding_socat.rs)
+creates an HTTPS tunnel session and starts `socat` as a TCP-to-Unix bridge.
+Run it as the trusted UID that Baffle expects on the control socket:
 
 ```sh
 BAFFLE_CONTROL_SOCKET=/run/baffle/control.sock \
 BAFFLE_BRIDGE_PORT=18080 \
-cargo run --example cladding_socat -- github.com
+cargo run --locked --example cladding_socat -- github.com
 ```
 
-The final argument is the exact hostname allowed by the session. The example prints the local proxy URL. Configure Cladding's existing HTTP proxy setting to use `http://127.0.0.1:18080`. For a standalone check, run `curl --proxy http://127.0.0.1:18080 https://github.com/` in another terminal. Press Ctrl-C to stop `socat` and release the ephemeral session.
+The final argument is the one exact hostname allowed by the session. Configure
+the existing Cladding proxy setting to use
+`http://127.0.0.1:18080`. To check it manually, run this in another terminal
+that can reach the bridge:
 
-The bridge uses `TCP-LISTEN` bound to loopback in Cladding's network namespace and `UNIX-CONNECT` to reach the session socket. Keep Baffle's own loopback TCP listeners in a network namespace that Cladding cannot access. The Unix control socket must remain available only to the trusted operator, and the session socket must be mounted only into its assigned task.
+```sh
+curl --proxy http://127.0.0.1:18080 https://github.com/
+```
 
-This example needs `socat` on `PATH`, a running Baffle daemon, and the Baffle source checkout. It does not import or link Cladding code.
+Press Ctrl-C to stop `socat` and close the ephemeral session. The example
+requires `socat` on `PATH`, a running Baffle daemon, and access to the Baffle
+source checkout. The TCP listener is bound to loopback in the namespace where
+the example runs. Keep that namespace isolated from untrusted clients and keep
+Baffle's own loopback listeners in a separate, inaccessible network
+namespace.
+
+The example illustrates the consumer boundary. A production Cladding
+integration should create one Baffle session per independently configured
+workload, hold each lease for the workload's full lifetime, and expose only
+the assigned data socket or its local bridge. Cladding should retain
+responsibility for sandbox setup, proxy environment variables, cancellation,
+and ensuring the workload has no alternate egress path.
+
+## Non-Rust consumers
+
+Consumers that do not use Rust can send the same length-prefixed UTF-8 TOML
+and JSON frames as `baffle-client`. They must authenticate as the configured
+trusted UID and retain the create connection for ephemeral sessions. See
+[control protocol](control-protocol.md) for framing, request examples, errors,
+and lease cleanup.

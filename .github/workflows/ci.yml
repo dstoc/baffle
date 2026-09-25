@@ -31,7 +31,13 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
+
+      - name: Compile Rust examples
+        run: cargo check --locked --examples
+
+      - name: Run release tests
+        run: cargo test --locked --release --all-features
