@@ -6,10 +6,18 @@ isolation that deployment must provide around it.
 ## Approved target model (not yet implemented)
 
 Baffle's target policy is HTTPS-only. Clients establish permitted destinations
-with HTTP `CONNECT`; Baffle rejects ordinary plaintext HTTP proxy requests and
-plaintext `http://` destinations. After successful TLS interception, Baffle
-continues to process HTTP/1.1 or HTTP/2 for path checks and credential
-injection. A rule that requires interception remains fail-closed.
+with HTTP `CONNECT`. Baffle rejects ordinary forward-proxy requests outside
+intercepted TLS, including absolute-form `http://` and `https://` requests. It
+rejects plaintext `http://` destinations on every port. Port 443 is the
+default. A configured TLS service on port 80 is valid; Baffle decides from the
+request form and scheme, not the port number. After successful TLS
+interception, Baffle continues to process HTTP/1.1 or HTTP/2 for path checks
+and credential injection. A rule that requires interception remains
+fail-closed.
+
+Proxy clients are untrusted and may deliberately try to evade policy. Baffle
+assumes that sites on the hostname allowlist behave legitimately. That site
+trust does not extend to the client.
 
 An explicit tunnel rule permits opaque traffic. Baffle cannot prove that the
 bytes in that tunnel are TLS, inspect its HTTP paths, or verify the upstream
@@ -19,7 +27,12 @@ own credentials there. Use opaque tunnel rules only when hostname and port
 authorization is sufficient without Baffle-level path or credential checks.
 A fallback to an opaque tunnel on a rule that requires interception would
 bypass its path checks, so Baffle closes those connections when interception
-fails or the payload is unsupported.
+fails or the payload is unsupported. This includes malformed or fragmented
+ClientHello data and TLS handshake failures. Unsupported data after CONNECT
+must not turn into an opaque tunnel. The CONNECT authority, TLS SNI, and each
+inner HTTP authority must remain bound on reused HTTP/1.1 and HTTP/2
+connections. Baffle checks each request before it forwards the request or adds
+a daemon-managed credential.
 
 The target policy authorizes exact configured hostnames and ports. It defers
 DNS and destination-IP restrictions to deployment controls. An allowlisted
@@ -31,9 +44,11 @@ rules when the threat model requires address containment. Ensure sandboxed
 clients cannot bypass Baffle or reach its internal listeners.
 
 These target changes are not runtime behavior yet. The current implementation
-still accepts explicitly configured plaintext HTTP, filters resolved
-destination IP addresses, and fails closed for unsupported or failed
-interception. baffle/24 tracks plaintext HTTP rejection; baffle/25 tracks
+still accepts explicitly configured plaintext HTTP on tunnel rules, filters
+resolved destination IP addresses, and fails closed for unsupported or failed
+interception. It currently rejects port 80 for interception and
+credential-injection rules. baffle/24 tracks plaintext HTTP rejection by
+request form or scheme and permits TLS on configured port 80. baffle/25 tracks
 removal of IP filtering. Keep the current protections and their tests until
 those issues are reviewed and implemented.
 
@@ -44,11 +59,15 @@ prove that every established opaque tunnel carries TLS.
 
 Baffle trusts the daemon process, the Unix UID configured as
 `trusted_operator_uid`, and any process that can use the private control
-socket. It treats proxy clients, upstream servers, and network responses as
-untrusted. In the current runtime, Baffle validates each proxied request
-against the session's immutable policy and filters resolved destination
-addresses before it dials. The approved target policy removes the
-application-level address filter and relies on deployment egress controls.
+socket. It treats proxy clients as untrusted, even when their configured
+destinations are trusted sites. The policy assumes that allowlisted sites
+behave legitimately. It does not assume that a client will send valid CONNECT
+or TLS data. Session policy is trusted only after validation and must be
+intersected with immutable daemon-wide secret entitlements. In the current
+runtime, Baffle validates each proxied request against the session's immutable
+policy and filters resolved destination addresses before it dials. The
+approved target policy removes the application-level address filter and
+relies on deployment egress controls.
 
 Baffle can enforce exact host, port, and supported path rules for traffic that
 passes through its data socket. It can tunnel authorized HTTPS without

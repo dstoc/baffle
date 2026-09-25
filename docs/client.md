@@ -52,16 +52,18 @@ TLS fails. An `http://` proxy URL is still valid for the local proxy endpoint;
 the origin URL must use `https://`. CONNECT authority must include a port; map
 an `https://` origin with no explicit port to `:443`. Rules default to
 destination port 443, but that default does not remove the port from CONNECT
-authority.
+authority. A configured TLS service on port 80 is also valid and must use
+CONNECT.
 
 Set `HostRule.paths` to allow exact URL paths or recursive patterns such as
 `/repos/example/project/**`. Exact rules match only the listed path. Recursive
 rules match the slash after the listed path and all descendant segments.
 Matching is case-sensitive and ignores the query string. Baffle rejects
 ambiguous encodings and forwards the same canonical path that it authorized.
-These checks apply to each plaintext HTTP request and to each request on an
-intercepted HTTPS connection. A path-restricted rule cannot accept an opaque
-HTTPS CONNECT tunnel.
+The current runtime applies path checks to plaintext HTTP and to each request
+on an intercepted HTTPS connection. The target policy applies path checks
+inside successfully intercepted TLS only. A path-restricted rule cannot
+accept an opaque HTTPS CONNECT tunnel.
 
 Use `with_private_address` to allow one exact non-public DNS answer for a host.
 The exception applies only to that rule's ports. Other non-public DNS answers

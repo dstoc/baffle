@@ -7,12 +7,18 @@ coverage. baffle/25 will reassess the destination-IP filtering tests. Keep
 both groups until those follow-ups are implemented; the current tests do not
 define the approved target guarantee.
 
+baffle/24 must add a deliberate fragmented-ClientHello attempt and prove that
+it cannot obtain an opaque tunnel on an interception-required rule. It must
+also retain checks for unsupported CONNECT data, malformed TLS, authority
+binding, credential isolation, and per-request path checks on reused
+HTTP/1.1 and HTTP/2 connections.
+
 The Rust and Python tests run in `.github/workflows/ci.yml` on `ubuntu-latest`. CI also compiles all Rust examples, parses the checked-in daemon and session TOML examples, and runs the Rust suite in debug and release profiles. The tagged release workflow builds and packages the optimized Linux binary.
 
 | Area | Coverage |
 | --- | --- |
 | Control protocol and session lifecycle | `tests/control_protocol.rs`, `tests/client.rs`, `tests/daemon_lifecycle.rs`: framing errors, failed provisioning rollback, leases, persistent sessions, independent sessions, capacity, graceful shutdown, and crash recovery. |
-| Proxy policy and TLS | `tests/proxy_runtime.rs`: unauthorized destinations, IP literals, private-address exceptions, suffix and port checks, path normalization, redirects, CONNECT payloads, SNI mismatch, HTTP/2 authority and scheme checks, and established connections after revocation. |
+| Proxy policy and TLS | `tests/proxy_runtime.rs`: unauthorized destinations, IP literals, private-address exceptions, suffix and port checks, path normalization, redirects, unsupported CONNECT payloads, malformed TLS, SNI mismatch, HTTP/2 authority and scheme checks, and established connections after revocation. |
 | DNS and egress | `src/egress.rs`: mixed and rebinding answers, failed lookups, private address exceptions, and validated address dialing. |
 | Secret handling | `src/secrets.rs`, `src/proxy_runtime.rs`, and `src/control.rs`: entitlement checks, redaction, supported authorization formats, host/path/port/scheme/authority boundaries, and WebSocket rejection. |
 | Runtime resilience | `src/proxy_runtime.rs`, `src/control.rs`, `tests/daemon_lifecycle.rs`: connection and provisioning limits, I/O timeouts, task failures, bounded shutdown, and socket cleanup. |

@@ -7,21 +7,27 @@
 - **Initial platform:** Linux; macOS is a possible follow-up
 
 **Decision update (2026-09-25):** Baffle supports HTTPS destinations only.
-Clients establish destination connections with HTTP `CONNECT`. Ordinary
-plaintext HTTP proxy requests and `http://` destinations are rejected. HTTP
-processing inside successfully intercepted TLS remains available for path
-authorization and credential injection. Destination-IP filtering is deferred
-to deployment egress controls. Fail-closed interception remains required when
-a rule requires path or credential checks. An explicit opaque tunnel cannot
-prove that its payload is TLS or let Baffle verify the upstream certificate;
-the client owns TLS verification for that tunnel.
+Clients establish destination connections with HTTP `CONNECT`. Baffle rejects
+ordinary forward-proxy requests outside intercepted TLS, including absolute-
+form `http://` and `https://` requests. It rejects plaintext `http://`
+destinations on every port. HTTP processing inside successfully intercepted
+TLS remains available for path authorization and credential injection. A
+configured TLS service on port 80 is valid; the policy uses request form and
+scheme, not the port number.
+
+Destination-IP filtering is deferred to deployment egress controls. Fail-closed
+interception remains required when a rule requires path or credential checks.
+An explicit opaque tunnel cannot prove that its payload is TLS or let Baffle
+verify the upstream certificate; the client owns TLS verification for that
+tunnel.
 
 This document specifies the target policy, not current runtime behavior.
 Until baffle/24 and baffle/25 land, the current implementation still accepts
-explicitly configured plaintext HTTP, filters resolved destination addresses,
-and rejects opaque fallback for rules that require interception. Those
-protections and their regression tests remain intact until the follow-ups are
-reviewed and implemented.
+explicitly configured plaintext HTTP on tunnel rules, filters resolved
+destination addresses, and rejects opaque fallback for rules that require
+interception. The current configuration also rejects port 80 for interception
+and credential-injection rules. Those protections and their regression tests
+remain intact until the follow-ups are reviewed and implemented.
 
 “HTTPS-only” describes the supported request model. It is not a byte-level
 guarantee for an opaque tunnel: Baffle cannot prove that each established
@@ -159,7 +165,9 @@ In this example, `crates.io` is permitted as an opaque HTTPS tunnel; the GitHub 
 - No rule matches: deny. Hosts match exactly by default; any later wildcard support must be explicit (`*.example.com`), segment-aware and forbidden for credential injection unless separately authorized. Normalize DNS names, ports and case before matching.
 - Each rule specifies permitted destination ports; if omitted, the rule uses HTTPS port 443. A CONNECT authority must include an explicit port, including `:443` for the default HTTPS port. Port 80 is not reserved: any configured port may carry TLS if the destination service supports it. Reject plaintext HTTP based on its request form or scheme, regardless of port. A non-default TLS port must be listed explicitly. A port number does not prove that an opaque tunnel carries TLS.
 - Remove `private_addresses` from the target session schema. A request that includes it must fail strict configuration validation after baffle/25; deployments must apply address restrictions outside Baffle.
-- `mode = "tunnel"` permits an opaque CONNECT tunnel without decryption and cannot carry path or injection rules. It does not prove that the tunneled bytes are TLS and does not let Baffle verify the upstream certificate; the client must do that. `mode = "intercept"` requires HTTPS MITM. A rule with path checks or credential injection requires successful interception. If interception fails or the payload is unsupported, close the connection; do not fall back to a tunnel. An opaque fallback for such a rule would bypass its path restrictions and prevent Baffle from enforcing its credential-injection boundary.
+- `mode = "tunnel"` permits an opaque CONNECT tunnel without decryption. It cannot carry path or injection rules. It does not prove that the tunneled bytes are TLS or let Baffle verify the upstream certificate. The client must verify the certificate.
+- `mode = "intercept"` requires HTTPS MITM. A rule with path checks or credential injection requires successful interception. If interception fails or the payload is unsupported, close the connection. Do not fall back to a tunnel.
+- A malformed or fragmented ClientHello, unsupported post-CONNECT data, or failed TLS handshake must close the connection when inspection is required. A client must not cause opaque fallback by splitting ClientHello data. Such a fallback would bypass path restrictions and the credential-injection boundary.
 - Baffle authorizes the configured hostname and port. It does not filter DNS answers or pin destination IPs in the target model. DNS rebinding and access to private, loopback, link-local, metadata, or other sensitive addresses are deployment risks. Apply DNS controls and network egress restrictions outside Baffle when needed.
 - An exact path matches only itself. `/x/**` matches `/x/` and descendants; `/x` must be separately listed to match the root. No naive string-prefix matching. Path matching is case-sensitive, and query strings are ignored unless a later explicit query constraint is introduced.
 - For restricted paths, reject ambiguous or malformed encodings, encoded path separators and unsafe dot-segment forms rather than relying on a normalization that differs from the origin server's interpretation. Evaluate and forward the same canonical path, while preserving the query string unchanged.
@@ -170,7 +178,9 @@ In this example, `crates.io` is permitted as an opaque HTTPS tunnel; the GitHub 
 
 Each injection rule names a concrete HTTP header, secret identifier and formatting strategy. Initial formats: `raw`, `bearer` and `basic_password` with an explicit username. This covers GitHub REST (`Bearer`) and Git-over-HTTPS (HTTP Basic). The daemon checks authorization to use each secret **before** creating a proxy, and retrieves values internally. It must reject direct literal secret values in session policy, avoid revealing resolved values in errors or logs, and override or reject a client-supplied header with the same name so the final result is deterministic.
 
-Injection happens only after successful interception and checks of CONNECT authority, TLS SNI, inner HTTP authority, destination port and URL path. Never inject into a CONNECT request, an opaque tunnel, a denied request, a different host after a redirect, plaintext HTTP, or an HTTP upgrade unless expressly supported by policy. Do not allow injection of hop-by-hop or routing-critical headers such as `Host`, `Connection` or `Content-Length`. Baffle returns redirects without following them; the client's next request is evaluated from scratch. A downgrade redirect to `http://` is rejected.
+Injection happens only after successful interception and policy checks. Check the CONNECT authority, TLS SNI, upstream TLS certificate and hostname, inner HTTP authority, destination port, and URL path first. Repeat the inner authority and path checks for every request on reused HTTP/1.1 and HTTP/2 connections.
+
+Never inject into a CONNECT request, an opaque tunnel, a denied request, a different host after a redirect, plaintext HTTP, or an unsupported HTTP upgrade. Do not allow injection of hop-by-hop or routing-critical headers such as `Host`, `Connection` or `Content-Length`. Baffle returns redirects without following them. The client's next request is evaluated from scratch. Reject a downgrade redirect to `http://` when the client sends the resulting request.
 
 ## 6. Control protocol
 
@@ -228,7 +238,7 @@ The current Hudsucker patch and the stronger current IP checks remain in place u
 
 ## 9. Security model
 
-**Trusted:** the Baffle daemon and trusted orchestrator holding its control socket. **Untrusted:** proxy clients within sandboxes, DNS answers, network responses, and remote servers. Session policy is trusted only after validation and must be intersected with immutable daemon-wide secret entitlements. The initial deployment assumes a trusted single owner; this does not isolate mutually malicious programs that already share that owner's unrestricted host account.
+**Trusted:** the Baffle daemon, the trusted orchestrator holding its control socket, and the sites named by the hostname allowlist, which are assumed to behave legitimately. **Untrusted:** proxy clients, including clients that deliberately manipulate CONNECT or TLS to evade policy. Trusting an allowlisted site does not make its client trusted. Destination IP address containment is outside Baffle's target policy; DNS answers and network routes require deployment controls when the deployment needs that boundary. Session policy is trusted only after validation and must be intersected with immutable daemon-wide secret entitlements. The initial deployment assumes a trusted single owner; this does not isolate mutually malicious programs that already share that owner's unrestricted host account.
 
 Keep the control socket, private CA key and secret files outside sandbox mounts. Mount only the specific session's data socket and, for intercepted HTTPS, the public CA certificate. An agent must not read another session's socket or use its internal TCP port. Store runtime sockets in a private directory, use restrictive modes/ownership, and provision paths atomically. Never log plaintext secrets, `Authorization`, `Proxy-Authorization`, cookies, URL query strings or sensitive body content by default; emit session-scoped structured decision metadata (request method, normalized host, matched rule, allowed/denied status, timing), with optional carefully redacted diagnostic logging.
 
@@ -272,7 +282,7 @@ This split is illustrative. Begin with one crate if separate crates would slow d
 
 **Milestone A — Daemon and leases.** Implement the Unix control protocol, daemon TOML, multi-session registry, per-session Unix/TCP bridge, Hudsucker task lifecycle, unique socket names and graceful cleanup. A test creates two concurrent proxies with different configurations, verifies separate sockets, closes only one lease and observes only its proxy terminate; a persistent proxy survives its creator disconnect and is explicitly stopped.
 
-**Milestone B — Enforced policy.** Implement HTTPS-only admission, exact-domain/port allowlists, CONNECT authorization, selective MITM, restricted path patterns, HTTP/2 authority handling, and fail-closed handling for rules that require inspection. Run table-driven positive/negative tests covering plaintext HTTP rejection, hostname suffix attacks, alternate ports, IP literals, redirect downgrades, path normalization, encoded separators, TLS/SNI mismatches, unexpected CONNECT payloads, and interception failures. Do not route a path-restricted destination through an opaque fallback tunnel.
+**Milestone B — Enforced policy.** Implement HTTPS-only admission, exact-domain/port allowlists, CONNECT authorization, selective MITM, restricted path patterns, HTTP/1.1 and HTTP/2 authority handling, and fail-closed handling for rules that require inspection. Run table-driven positive/negative tests covering plaintext HTTP rejection on every port, TLS over configured port 80, hostname suffix attacks, alternate ports, IP literals, redirect downgrades, path normalization, encoded separators, TLS/SNI mismatches, unsupported CONNECT data, malformed and deliberately fragmented ClientHello data, and interception failures. Verify authority and path checks on reused HTTP/1.1 and HTTP/2 connections. Do not route a path-restricted destination through an opaque fallback tunnel.
 
 **Milestone C — Secret injection.** Add daemon-only secret resolution and per-session entitlements, bearer/Basic/custom header formats, header overwrite/reject semantics and redacted logging. Test that a credential cannot reach an unauthorized host, path, port, scheme, redirected origin or WebSocket upgrade. Test GitHub's REST and Git smart-HTTP flows against representative fixtures without relying on live secrets.
 

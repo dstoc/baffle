@@ -35,7 +35,9 @@ port. It does not send a TLS request or verify a server certificate. The
 `examples/client.rs` creates an ephemeral policy, sends CONNECT to
 `example.com:443` through the session's Unix data socket, prints the tunnel
 status, and closes the lease. Set `BAFFLE_EXAMPLE_HOST` and
-`BAFFLE_EXAMPLE_PORT` to select another host and TLS port. Port 80 is rejected.
+`BAFFLE_EXAMPLE_PORT` to select another host and TLS port. Port 80 is valid
+when the destination speaks TLS. This example opens an opaque tunnel and does
+not verify the protocol or certificate inside it.
 
 Start Baffle with a valid daemon configuration, then run:
 
