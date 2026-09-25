@@ -1,10 +1,11 @@
 # Configuration reference
 
-**Current runtime reference.** This page describes configuration accepted by
-the current code. The approved target policy changes are not implemented yet.
-The HTTPS-only request change is tracked in baffle/24. The destination-IP
-filter removal is tracked in baffle/25. Until those changes land, port-80
-rules and `private_addresses` still work as described below.
+**Current runtime reference.** The strict session schema no longer accepts
+`private_addresses`. Existing policies that contain that field fail
+validation; remove it and move any intended address restrictions to deployment
+DNS and network egress policy before upgrading. The HTTPS-only request change
+is tracked separately in baffle/24. Until baffle/24 lands, port-80 behavior is
+as described below.
 
 Baffle reads one daemon TOML file at startup. A client sends a separate session
 TOML document in each `create` request. Both schemas reject unknown fields.
@@ -97,32 +98,32 @@ rule per exact host; duplicate normalized hosts are invalid.
 | `host` | string | required | Exact ASCII DNS hostname. Baffle lowercases it and removes one final dot. Wildcards and IP literals are rejected. |
 | `mode` | string | required | `tunnel` or `intercept`. A tunnel passes authorized HTTPS CONNECT traffic without TLS decryption. Intercept mode requires TLS inspection for HTTPS CONNECT. |
 | `ports` | array of integers | `[443]` | Non-empty, unique destination ports from 1 through 65535. The current runtime does not allow port 80 with `intercept`; the target policy permits TLS on any configured port, including port 80, and does not reserve a port based on its number. |
-| `private_addresses` | array of IP strings | `[]` | Exact IPv4 or IPv6 addresses that this host rule may use if DNS resolves to a non-public address. No CIDR ranges or duplicate addresses. |
 | `paths` | array of strings | `[]` | Exact URL paths or recursive path patterns. When present, Baffle checks paths on plaintext HTTP and on intercepted HTTPS requests. A path-restricted rule cannot tunnel HTTPS CONNECT. |
 | `inject` | array of tables | `[]` | Daemon-managed HTTP header injections. Only intercept rules can inject credentials. |
 
 `tunnel` rules cannot inject headers. In the current runtime, a rule that
 injects headers or uses `intercept` cannot include port 80. A tunnel rule may
 use port 80 for plaintext HTTP, with host, port, and configured path checks.
-Under the target policy, a configured TLS service on port 80 can use either
-mode when the rule's other checks permit it. Port alone does not identify the
-protocol.
+baffle/24 will reject plaintext by request form or scheme on every port. A
+configured TLS service on port 80 will remain valid when the rule's other
+checks permit it. Port alone does not identify the protocol.
 
 ## Host, port, and path rules
 
 In the current runtime, a rule may explicitly allow plaintext HTTP on port 80
 when it uses `mode = "tunnel"`. The current runtime also forbids port 80 on
-`intercept` and injection rules. A rule may list exact non-public DNS answers
-in `private_addresses`. These are current implementation options.
+`intercept` and injection rules. baffle/24 will reject plaintext HTTP based on
+the request form or scheme, regardless of port. A configured TLS service on
+port 80 will remain valid when the rule's other checks permit it.
 
-Under the approved target policy, Baffle will reject plaintext HTTP based on
-the request form or scheme, regardless of port. Port 80 is not reserved; a
-configured port may carry TLS if the service supports it. The target policy
-will remove `private_addresses`; see the [authoritative
-proposal](baffle-proposal.md) for the target behavior and migration boundary.
+Baffle authorizes the exact hostname and port before outbound dialing. It does
+not classify DNS answers, filter destination addresses, or pin an address.
+An allowlisted name may resolve to private, loopback, link-local, metadata, or
+another sensitive address. A valid certificate for that name does not make
+the address safe. Use deployment DNS policy and default-deny network egress
+rules when the deployment requires address containment.
 
-The target session configuration uses HTTPS destination ports and has no
-address exceptions:
+This session shape has no address exceptions:
 
 ```toml
 version = 1
@@ -138,16 +139,16 @@ ports = [443]
 paths = ["/v1/**"]
 ```
 
-This example shows the approved target shape. The current strict TOML parser
-still accepts `private_addresses` according to the current schema described
-below; baffle/25 removes that field.
+This is the current session schema. A policy from an earlier Baffle version
+that contains `private_addresses` fails strict validation. Remove the field
+before upgrading and apply any required DNS or address restrictions through
+deployment controls.
 
 Host matching is exact after lowercasing and removal of one trailing dot.
 `example.com` does not match `api.example.com`. Wildcards are not supported.
-Each request must use a permitted destination port. Baffle also resolves the
-destination and filters its IP addresses before the outbound connection. It
-allows public destination addresses. A non-public address is allowed only when
-the rule lists that exact address in `private_addresses`.
+Each request must use a permitted destination port. Hudsucker's default
+connectors resolve and dial the authorized hostname. Baffle does not limit the
+DNS answer set or the resulting destination IP address.
 
 Paths are case-sensitive and match the URL path without its query string.
 Queries are forwarded unchanged. A path entry must start with `/` and cannot
@@ -223,8 +224,9 @@ same safe protocol error.
 
 ## Validation examples
 
-The following create request permits a private service only at one exact
-address and port:
+This rule authorizes one exact hostname and port. It does not restrict the
+address returned by DNS. Apply any required restriction through deployment
+DNS and network egress policy:
 
 ```toml
 version = 1
@@ -236,8 +238,12 @@ operation = "create"
 host = "internal.example"
 mode = "tunnel"
 ports = [8443]
-private_addresses = ["10.20.30.40"]
 ```
+
+For migration, remove `private_addresses` from every session rule before
+upgrading. The strict schema rejects that field. Move intended internal-service
+restrictions to deployment DNS and network egress policy. Use default-deny
+egress rules when the threat model requires address containment.
 
 For all protocol operations and response schemas, see the
 [control protocol reference](control-protocol.md).

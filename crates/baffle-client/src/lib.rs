@@ -154,9 +154,6 @@ pub struct HostRule {
     /// Permitted destination ports. Defaults to HTTPS port 443 in `tunnel` and
     /// `intercept` constructors.
     pub ports: Vec<u16>,
-    /// Exact non-public destination addresses permitted for this hostname.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub private_addresses: Vec<String>,
     /// Optional exact paths or recursive patterns such as `/v1/**`. Paths
     /// match case-sensitively, ignore query strings, and are canonicalized
     /// before forwarding. Unsafe or ambiguous encodings are denied.
@@ -184,16 +181,9 @@ impl HostRule {
             host: host.into(),
             mode,
             ports: vec![443],
-            private_addresses: Vec::new(),
             paths: Vec::new(),
             inject: Vec::new(),
         }
-    }
-
-    /// Permit an exact non-public DNS answer for this hostname.
-    pub fn with_private_address(mut self, address: impl Into<String>) -> Self {
-        self.private_addresses.push(address.into());
-        self
     }
 }
 
@@ -525,7 +515,7 @@ mod tests {
     fn serializes_create_requests_with_the_v1_wire_shape() {
         let policy = SessionConfig::new()
             .persistent(true)
-            .with_rule(HostRule::intercept("api.example.com").with_private_address("10.0.0.8"));
+            .with_rule(HostRule::intercept("api.example.com"));
         let encoded = toml::to_string(&CreateRequest {
             version: 1,
             operation: "create",
@@ -539,7 +529,7 @@ mod tests {
         assert!(encoded.contains("[[rules]]"));
         assert!(encoded.contains("mode = \"intercept\""));
         assert!(encoded.contains("ports = [443]"));
-        assert!(encoded.contains("private_addresses = [\"10.0.0.8\"]"));
+        assert!(!encoded.contains("private_addresses"));
     }
 
     #[test]

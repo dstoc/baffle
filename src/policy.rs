@@ -1,9 +1,6 @@
 //! Immutable authorization policy compiled for one proxy session.
 
-use std::{
-    collections::{HashMap, HashSet},
-    net::IpAddr,
-};
+use std::collections::{HashMap, HashSet};
 
 use hudsucker::hyper::{
     Method, Request, Uri, Version,
@@ -26,7 +23,6 @@ pub(crate) enum AuthorizationError {
 struct CompiledRule {
     mode: RuleMode,
     ports: HashSet<u16>,
-    private_addresses: HashSet<IpAddr>,
     paths: Vec<PathRule>,
     injections: Vec<HeaderInjection>,
 }
@@ -50,7 +46,6 @@ impl SessionPolicy {
                     CompiledRule {
                         mode: rule.mode,
                         ports: rule.ports.iter().copied().collect(),
-                        private_addresses: rule.private_addresses.iter().copied().collect(),
                         paths: rule.paths.clone(),
                         injections: rule.inject.clone(),
                     },
@@ -176,23 +171,6 @@ impl SessionPolicy {
         self.rules
             .get(&connect_host)
             .is_some_and(|rule| rule.mode == RuleMode::Intercept && rule.ports.contains(&port))
-    }
-
-    /// Return whether a non-public DNS answer is explicitly permitted by this
-    /// session's exact hostname, address, and (when known) destination port.
-    pub(crate) fn permits_private_address(
-        &self,
-        hostname: &str,
-        port: Option<u16>,
-        address: IpAddr,
-    ) -> bool {
-        let Some(hostname) = normalize_dns_name(hostname) else {
-            return false;
-        };
-        self.rules.get(&hostname).is_some_and(|rule| {
-            port.is_none_or(|port| rule.ports.contains(&port))
-                && rule.private_addresses.contains(&address)
-        })
     }
 
     fn rule_for_request<B>(
@@ -665,30 +643,6 @@ mod tests {
         assert_eq!(second.authorize(&github), Err(AuthorizationError::Denied));
         assert_eq!(second.authorize(&example), Ok(RuleMode::Tunnel));
         assert_eq!(first.authorize(&example), Err(AuthorizationError::Denied));
-    }
-
-    #[test]
-    fn private_destination_exceptions_match_session_host_address_and_port() {
-        let first = policy(
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"Internal.Example.\"\nmode = \"tunnel\"\nports = [8443]\nprivate_addresses = [\"10.20.30.40\"]\n",
-        );
-        let second = policy(
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"internal.example\"\nmode = \"tunnel\"\nports = [8443]\nprivate_addresses = [\"10.20.30.41\"]\n",
-        );
-        let private_address = "10.20.30.40".parse().unwrap();
-
-        for request in [
-            request("GET", "https://internal.example:8443/", None),
-            request("CONNECT", "internal.example:8443", None),
-        ] {
-            assert_eq!(first.authorize(&request), Ok(RuleMode::Tunnel));
-            assert_eq!(second.authorize(&request), Ok(RuleMode::Tunnel));
-        }
-
-        assert!(first.permits_private_address("INTERNAL.EXAMPLE.", Some(8443), private_address,));
-        assert!(!first.permits_private_address("internal.example", Some(443), private_address,));
-        assert!(!first.permits_private_address("other.example", Some(8443), private_address,));
-        assert!(!second.permits_private_address("internal.example", Some(8443), private_address,));
     }
 
     #[test]

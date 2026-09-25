@@ -3,7 +3,7 @@
 This guide describes the security boundary that Baffle provides and the
 isolation that deployment must provide around it.
 
-## Approved target model (not yet implemented)
+## HTTPS destination model
 
 Baffle's target policy is HTTPS-only. Clients establish permitted destinations
 with HTTP `CONNECT`. Baffle rejects ordinary forward-proxy requests outside
@@ -43,14 +43,14 @@ destination address safe. Apply DNS policy and default-deny network egress
 rules when the threat model requires address containment. Ensure sandboxed
 clients cannot bypass Baffle or reach its internal listeners.
 
-These target changes are not runtime behavior yet. The current implementation
-still accepts explicitly configured plaintext HTTP on tunnel rules, filters
-resolved destination IP addresses, and fails closed for unsupported or failed
-interception. It currently rejects port 80 for interception and
-credential-injection rules. baffle/24 tracks plaintext HTTP rejection by
-request form or scheme and permits TLS on configured port 80. baffle/25 tracks
-removal of IP filtering. Keep the current protections and their tests until
-those issues are reviewed and implemented.
+The HTTPS-only request changes are tracked in baffle/24 and are not yet runtime
+behavior. The current implementation can still accept explicitly configured
+plaintext HTTP on tunnel rules and rejects port 80 for interception and
+credential-injection rules. It fails closed for unsupported or failed
+interception. baffle/25 removes Baffle's DNS-answer filtering. Existing
+policies that contain `private_addresses` now fail validation. Operators must
+remove that field and move any required address restrictions to deployment DNS
+and network egress policy before upgrading.
 
 “HTTPS-only” describes the supported destination request model. It does not
 prove that every established opaque tunnel carries TLS.
@@ -63,11 +63,12 @@ socket. It treats proxy clients as untrusted, even when their configured
 destinations are trusted sites. The policy assumes that allowlisted sites
 behave legitimately. It does not assume that a client will send valid CONNECT
 or TLS data. Session policy is trusted only after validation and must be
-intersected with immutable daemon-wide secret entitlements. In the current
-runtime, Baffle validates each proxied request against the session's immutable
-policy and filters resolved destination addresses before it dials. The
-approved target policy removes the application-level address filter and
-relies on deployment egress controls.
+intersected with immutable daemon-wide secret entitlements. Baffle validates
+each proxied request against the session's immutable policy and authorizes the
+exact hostname and port before it dials. It does not classify, filter, or pin
+resolved destination addresses. The deployment must use DNS policy and
+default-deny network egress rules when its threat model requires address
+containment.
 
 Baffle can enforce exact host, port, and supported path rules for traffic that
 passes through its data socket. It can tunnel authorized HTTPS without
@@ -219,13 +220,13 @@ the intended workload can reach it. Do not expose a local bridge port to
 other clients unless those clients should share that session's full policy.
 The [Cladding guide](cladding-integration.md) provides a working example.
 
-In the current runtime, a host rule that needs an internal service can list
-one exact non-public IP in `private_addresses` and allow only the required
-port. Do not add broad address ranges. Baffle filters DNS answers and dials
-only an allowed address, but deployment firewalls should still restrict
-network egress as defense in depth. baffle/25 removes this application-level
-exception. After that change, restrict internal destinations with deployment
-DNS and network egress policy.
+Older policies may contain `private_addresses` exceptions for internal
+services. Remove those entries before upgrading; the strict session schema
+rejects the removed field. Apply any intended restriction through deployment
+DNS policy and network egress rules. Use default-deny egress where the threat
+model requires address containment. A valid certificate for an allowlisted
+hostname does not make a private, loopback, link-local, metadata, or other
+sensitive address safe.
 
 ## Logging, errors, and credential handling
 
@@ -259,7 +260,6 @@ before any credential can be added.
 - Do not treat a path allowlist as authorization for data in an allowed
   request body.
 - Give upstream credentials the narrowest practical privileges.
-- Until baffle/25 lands, review every `private_addresses` exception and secret
-  entitlement. After that change, review deployment DNS and network egress
-  rules instead.
+- Review deployment DNS and network egress rules for every workload that needs
+  destination-address containment.
 - Recheck the Hudsucker patch and its tests before changing its pinned version.

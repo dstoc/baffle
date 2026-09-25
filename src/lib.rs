@@ -4,7 +4,6 @@ pub use baffle_client as client;
 pub mod config;
 pub mod control;
 pub mod daemon;
-mod egress;
 mod policy;
 pub mod proxy_runtime;
 mod secrets;

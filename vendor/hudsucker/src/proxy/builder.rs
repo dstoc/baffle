@@ -5,18 +5,13 @@ use crate::{
     WebSocketHandler,
     certificate_authority::CertificateAuthority,
 };
-use super::tcp::{DirectTcpConnector, TcpConnector};
 use hyper_util::{
-    client::legacy::{
-        Builder as ClientBuilder,
-        connect::{Connect, HttpConnector, dns::Name},
-    },
+    client::legacy::{Builder as ClientBuilder, connect::Connect},
     rt::TokioExecutor,
     server::conn::auto::Builder as ServerBuilder,
 };
 use std::{
-    error::Error as StdError,
-    future::{Future, Pending, pending},
+    future::{Pending, pending},
     net::SocketAddr,
     sync::Arc,
 };
@@ -24,7 +19,6 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio_rustls::rustls::{ClientConfig, crypto::CryptoProvider};
 use tokio_tungstenite::Connector;
-use tower_service::Service;
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -152,7 +146,6 @@ impl<CA> ProxyBuilder<WantsClient<CA>> {
                     http_handler: NoopHandler::new(),
                     websocket_handler: NoopHandler::new(),
                     websocket_connector: None,
-                    tcp_connector: Arc::new(DirectTcpConnector),
                     server: None,
                     graceful_shutdown: pending(),
                 });
@@ -177,72 +170,6 @@ impl<CA> ProxyBuilder<WantsClient<CA>> {
             http_handler: NoopHandler::new(),
             websocket_handler: NoopHandler::new(),
             websocket_connector: Some(Connector::Rustls(Arc::new(rustls_config))),
-            tcp_connector: Arc::new(DirectTcpConnector),
-            server: None,
-            graceful_shutdown: pending(),
-        })
-    }
-
-    /// Use hyper-rustls with a caller-supplied HTTP resolver and TCP connector.
-    ///
-    /// The same connector handles CONNECT tunnels and WebSocket connections.
-    /// Resolved socket addresses are used directly while TLS verifies the
-    /// hostname in the request URI.
-    #[cfg(feature = "rustls-client")]
-    pub fn with_rustls_connector_and_tcp_connector<R>(
-        self,
-        provider: CryptoProvider,
-        connector: R,
-    ) -> ProxyBuilder<WantsHandlers<CA, impl Connect + Clone, NoopHandler, NoopHandler, Pending<()>>>
-    where
-        R: Service<Name> + TcpConnector + Clone + Send + Sync + 'static,
-        R::Response: Iterator<Item = SocketAddr> + Send + 'static,
-        R::Error: Into<Box<dyn StdError + Send + Sync>> + Send + 'static,
-        R::Future: Future<Output = Result<R::Response, R::Error>> + Send + 'static,
-    {
-        use hyper_rustls::ConfigBuilderExt;
-
-        let rustls_config = match ClientConfig::builder_with_provider(Arc::new(provider))
-            .with_safe_default_protocol_versions()
-        {
-            Ok(config) => config.with_webpki_roots().with_no_client_auth(),
-            Err(e) => {
-                return ProxyBuilder(WantsHandlers {
-                    al: self.0.al,
-                    ca: self.0.ca,
-                    http_connector: Err(Error::from(e)),
-                    client: None,
-                    http_handler: NoopHandler::new(),
-                    websocket_handler: NoopHandler::new(),
-                    websocket_connector: None,
-                    tcp_connector: Arc::new(DirectTcpConnector),
-                    server: None,
-                    graceful_shutdown: pending(),
-                });
-            }
-        };
-
-        let mut http = HttpConnector::new_with_resolver(connector.clone());
-        http.enforce_http(false);
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(rustls_config.clone())
-            .https_or_http()
-            .enable_http1();
-
-        #[cfg(feature = "http2")]
-        let https = https.enable_http2();
-
-        let https = https.wrap_connector(http);
-
-        ProxyBuilder(WantsHandlers {
-            al: self.0.al,
-            ca: self.0.ca,
-            http_connector: Ok(https),
-            client: None,
-            http_handler: NoopHandler::new(),
-            websocket_handler: NoopHandler::new(),
-            websocket_connector: Some(Connector::Rustls(Arc::new(rustls_config))),
-            tcp_connector: Arc::new(connector),
             server: None,
             graceful_shutdown: pending(),
         })
@@ -267,7 +194,6 @@ impl<CA> ProxyBuilder<WantsClient<CA>> {
                     http_handler: NoopHandler::new(),
                     websocket_handler: NoopHandler::new(),
                     websocket_connector: None,
-                    tcp_connector: Arc::new(DirectTcpConnector),
                     server: None,
                     graceful_shutdown: pending(),
                 });
@@ -285,7 +211,6 @@ impl<CA> ProxyBuilder<WantsClient<CA>> {
             http_handler: NoopHandler::new(),
             websocket_handler: NoopHandler::new(),
             websocket_connector: Some(Connector::NativeTls(tls_connector)),
-            tcp_connector: Arc::new(DirectTcpConnector),
             server: None,
             graceful_shutdown: pending(),
         })
@@ -307,7 +232,6 @@ impl<CA> ProxyBuilder<WantsClient<CA>> {
             http_handler: NoopHandler::new(),
             websocket_handler: NoopHandler::new(),
             websocket_connector: None,
-            tcp_connector: Arc::new(DirectTcpConnector),
             server: None,
             graceful_shutdown: pending(),
         })
@@ -323,7 +247,6 @@ pub struct WantsHandlers<CA, C, H, W, F> {
     http_handler: H,
     websocket_handler: W,
     websocket_connector: Option<Connector>,
-    tcp_connector: Arc<dyn TcpConnector>,
     server: Option<ServerBuilder<TokioExecutor>>,
     graceful_shutdown: F,
 }
@@ -342,7 +265,6 @@ impl<CA, C, H, W, F> ProxyBuilder<WantsHandlers<CA, C, H, W, F>> {
             http_handler,
             websocket_handler: self.0.websocket_handler,
             websocket_connector: self.0.websocket_connector,
-            tcp_connector: self.0.tcp_connector,
             server: self.0.server,
             graceful_shutdown: self.0.graceful_shutdown,
         })
@@ -361,7 +283,6 @@ impl<CA, C, H, W, F> ProxyBuilder<WantsHandlers<CA, C, H, W, F>> {
             http_handler: self.0.http_handler,
             websocket_handler,
             websocket_connector: self.0.websocket_connector,
-            tcp_connector: self.0.tcp_connector,
             server: self.0.server,
             graceful_shutdown: self.0.graceful_shutdown,
         })
@@ -371,14 +292,6 @@ impl<CA, C, H, W, F> ProxyBuilder<WantsHandlers<CA, C, H, W, F>> {
     pub fn with_websocket_connector(self, connector: Connector) -> Self {
         ProxyBuilder(WantsHandlers {
             websocket_connector: Some(connector),
-            ..self.0
-        })
-    }
-
-    /// Set the checked TCP connector for CONNECT tunnels and WebSocket traffic.
-    pub fn with_tcp_connector<T: TcpConnector>(self, connector: T) -> Self {
-        ProxyBuilder(WantsHandlers {
-            tcp_connector: Arc::new(connector),
             ..self.0
         })
     }
@@ -412,7 +325,6 @@ impl<CA, C, H, W, F> ProxyBuilder<WantsHandlers<CA, C, H, W, F>> {
             http_handler: self.0.http_handler,
             websocket_handler: self.0.websocket_handler,
             websocket_connector: self.0.websocket_connector,
-            tcp_connector: self.0.tcp_connector,
             server: self.0.server,
             graceful_shutdown,
         })
@@ -431,7 +343,6 @@ impl<CA, C, H, W, F> ProxyBuilder<WantsHandlers<CA, C, H, W, F>> {
             http_handler: self.0.http_handler,
             websocket_handler: self.0.websocket_handler,
             websocket_connector: self.0.websocket_connector,
-            tcp_connector: self.0.tcp_connector,
             server: self.0.server,
             graceful_shutdown: self.0.graceful_shutdown,
         })

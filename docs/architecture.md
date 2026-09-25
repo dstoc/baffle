@@ -1,15 +1,14 @@
 # Architecture
 
-**Current runtime architecture.** This page describes protections that remain
-in the implementation until baffle/24 and baffle/25 land. In the target model,
-ordinary plaintext HTTP is rejected and DNS/IP filtering moves to deployment
-egress controls. The fail-closed interception behavior described below stays
-in the target model.
+**Current runtime architecture.** baffle/25 removed Baffle's DNS and
+destination-IP filtering. Deployment egress controls own address restrictions.
+The HTTPS-only request change remains tracked separately in baffle/24. The
+fail-closed interception behavior described below remains required.
 
 Baffle runs one Tokio daemon process. The daemon owns the control listener,
 session registry, CA signing key, secret store, shared CA handle, and runtime.
-Each proxy session has an independent policy, Hudsucker instance, outbound
-connector, data socket, and counters.
+Each proxy session has an independent policy, Hudsucker instance, data socket,
+and counters.
 
 ## Components
 
@@ -20,7 +19,6 @@ connector, data socket, and counters.
 | Control server and session manager | `src/control.rs` | Authenticate Unix peers, frame requests and responses, create/list/stop sessions, track leases, enforce limits, and remove sockets. |
 | Proxy runtime and bridge | `src/proxy_runtime.rs` | Start one Hudsucker proxy, bind a private loopback TCP listener and Unix data socket, bridge streams with limits and timeouts, and supervise failures. |
 | Policy handler | `src/policy.rs`, `src/proxy_runtime.rs` | Check destination authority, port, mode, canonical path, TLS identity, and header-injection conditions. |
-| Egress connector | `src/egress.rs` | Resolve permitted names, filter non-public addresses, and connect only to validated destination IPs. |
 | CA manager | `src/ca.rs` | Validate CA files, share signing state with proxy instances, and export only the public certificate. |
 | Secret store | `src/secrets.rs` | Authorize symbolic secret names, validate private files, and keep values inside the owning session. |
 | Rust client | `crates/baffle-client` | Provide typed asynchronous `create`, `list`, and `stop` operations for consumers. |
@@ -67,12 +65,14 @@ must not force an opaque tunnel for a rule that needs inspection. The target
 policy treats proxy clients as untrusted and assumes allowlisted sites behave
 legitimately.
 
-The outbound connector resolves the requested host and filters the complete
-answer set before dialing. Public addresses are eligible. A non-public answer
-is eligible only if the exact host rule lists that IP address. Hudsucker uses
-the validated address connector for HTTP, CONNECT tunnels, and its supported
-upgrade paths. Redirects return to the client; a new request is evaluated
-against policy again.
+The policy authorizes the exact hostname and port before Hudsucker's default
+connectors dial the destination. Baffle does not classify DNS answers, filter
+addresses, or pin a resolved address. An allowed hostname can resolve to a
+private, loopback, link-local, metadata, or other sensitive address. A valid
+certificate verifies the hostname's TLS identity; it does not make the address
+safe. Deployment DNS policy and default-deny network egress rules must restrict
+reachable addresses when the threat model requires it. Redirects return to the
+client; a new request is evaluated against policy again.
 
 These rules protect traffic that reaches Baffle. They do not stop a sandboxed
 process from making a direct network connection. Deployment must force client
@@ -92,11 +92,11 @@ form or scheme on every port; a configured TLS service on port 80 is valid.
 
 An explicit tunnel rule remains opaque. Baffle authorizes its configured host
 and port, but cannot prove that tunneled bytes are TLS, inspect paths, or
-verify the upstream certificate. The client must verify TLS identity. The
-target policy also removes Baffle's DNS-answer restrictions; deployment DNS
-and network egress controls must block sensitive addresses where the threat
-model requires it. Until baffle/24 and baffle/25 are implemented, the current
-runtime behavior described above still applies.
+verify the upstream certificate. The client must verify TLS identity.
+
+The current runtime has no DNS-answer restrictions; deployment DNS and network
+egress controls must block sensitive addresses where the threat model requires
+it. The separate baffle/24 plaintext-request changes are not yet implemented.
 
 ## Session lifecycle
 
@@ -129,18 +129,16 @@ protocol upgrades.
 
 The local patch adds policy hooks for CONNECT and TLS decisions, validates
 CONNECT/TLS host identity, makes unsupported requested interception fail
-closed, and adds outbound connector and resolver hooks. The connector hooks
-cover HTTP, CONNECT tunnels, and WebSocket connections. The resolver hook
-supplies the addresses that the outbound HTTP client dials. baffle/25 may make
-the address-filtering hooks unnecessary. It must retain strict interception
-and CONNECT/SNI/HTTP authority binding unless an upstream replacement proves
-equivalent behavior.
+closed, and binds each intercepted HTTP authority to its CONNECT authority.
+The address-filtering TCP connector and resolver hooks were removed in
+baffle/25. Hudsucker's default outbound connectors resolve and dial the
+authorized hostname. The current Rustls client continues to validate upstream
+certificates and hostnames.
 
-The security rationale, patch inventory, and upstreaming plan are recorded in
+The security rationale, exact upstream gaps, and patch inventory are recorded in
 [`vendor/hudsucker/PATCHES.md`](../vendor/hudsucker/PATCHES.md). Keep the
-vendor diff limited to those checks and hooks. Review the diff and rerun
-egress, CONNECT, SNI, HTTP/2, and WebSocket tests before changing Hudsucker.
-Reassess the connector and resolver hooks after baffle/25. Keep the
+vendor diff limited to those checks. Review the diff and rerun CONNECT, SNI,
+HTTP/2, and WebSocket tests before changing Hudsucker. Keep the
 fail-closed-interception and authority-binding changes until an upstream
 release provides those guarantees and Baffle tests verify them. See the patch
 inventory for the per-change replacement criteria.

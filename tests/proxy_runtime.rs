@@ -37,18 +37,6 @@ fn session_config() -> SessionConfig {
 
 fn intercept_session_config(port: u16) -> SessionConfig {
     let toml = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [{port}]\nprivate_addresses = [\"127.0.0.1\", \"::1\"]\npaths = [\"/allowed\"]\n"
-    );
-    let ControlRequest::Create { session, .. } =
-        ControlRequest::from_toml(&toml).expect("intercept session should be valid")
-    else {
-        panic!("test request should create a session");
-    };
-    session
-}
-
-fn intercept_session_without_private_addresses_config(port: u16) -> SessionConfig {
-    let toml = format!(
         "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]\n"
     );
     let ControlRequest::Create { session, .. } =
@@ -59,12 +47,12 @@ fn intercept_session_without_private_addresses_config(port: u16) -> SessionConfi
     session
 }
 
-fn private_destination_session_config(port: u16) -> SessionConfig {
+fn loopback_session_config(port: u16) -> SessionConfig {
     let toml = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{port}]\nprivate_addresses = [\"127.0.0.1\"]\n"
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{port}]\n"
     );
     let ControlRequest::Create { session, .. } =
-        ControlRequest::from_toml(&toml).expect("private destination session should be valid")
+        ControlRequest::from_toml(&toml).expect("loopback session should be valid")
     else {
         panic!("test request should create a session");
     };
@@ -338,7 +326,7 @@ async fn intercept_connect_with_unknown_payload_does_not_open_an_opaque_tunnel()
 }
 
 #[tokio::test]
-async fn intercepted_https_rejects_private_upstream_addresses() {
+async fn intercepted_https_dials_loopback_and_rejects_untrusted_upstream_certificate() {
     let directory = tempfile::tempdir().expect("test directory should be created");
     let ca = write_test_ca(directory.path());
     let upstream = TcpListener::bind("127.0.0.1:0")
@@ -348,13 +336,45 @@ async fn intercepted_https_rejects_private_upstream_addresses() {
         .local_addr()
         .expect("test upstream address should be available")
         .port();
+    let upstream_key = KeyPair::generate().expect("upstream key should be generated");
+    let upstream_parameters = CertificateParams::new(vec!["localhost".into()])
+        .expect("upstream certificate parameters should be valid");
+    let upstream_certificate = upstream_parameters
+        .self_signed(&upstream_key)
+        .expect("upstream certificate should be generated");
+    let upstream_config = hudsucker::rustls::ServerConfig::builder_with_provider(Arc::new(
+        aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("supported TLS versions should be available")
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![CertificateDer::from(upstream_certificate.der().to_vec())],
+        hudsucker::rustls::pki_types::PrivateKeyDer::Pkcs8(
+            hudsucker::rustls::pki_types::PrivatePkcs8KeyDer::from(upstream_key.serialize_der()),
+        ),
+    )
+    .expect("upstream TLS server should accept its certificate");
+    let upstream_task = tokio::spawn(async move {
+        let (stream, _) = upstream
+            .accept()
+            .await
+            .expect("default connector should dial the authorized loopback address");
+        let result = tokio_rustls::TlsAcceptor::from(Arc::new(upstream_config))
+            .accept(stream)
+            .await;
+        assert!(
+            result.is_err(),
+            "the default upstream TLS client must reject an untrusted certificate"
+        );
+    });
     let (event_sender, mut events) = mpsc::unbounded_channel();
-    let id = RuntimeId::new("runtime-intercept-private-upstream");
+    let id = RuntimeId::new("runtime-intercept-loopback-untrusted-cert");
     let runtime = ProxyRuntime::start(
         id.clone(),
-        intercept_session_without_private_addresses_config(upstream_port),
+        intercept_session_config(upstream_port),
         Arc::clone(&ca),
-        directory.path().join("intercept-private.sock"),
+        directory.path().join("intercept-loopback.sock"),
         4,
         event_sender,
     )
@@ -430,14 +450,11 @@ async fn intercepted_https_rejects_private_upstream_addresses() {
         .expect("intercepted HTTPS response should be readable");
     assert!(
         response.starts_with(b"HTTP/1.1 502") || response.starts_with(b"HTTP/1.0 502"),
-        "private upstream resolution should fail as a gateway error: {response:?}"
+        "an untrusted upstream certificate should fail as a gateway error: {response:?}"
     );
-    assert!(
-        timeout(Duration::from_millis(100), upstream.accept())
-            .await
-            .is_err(),
-        "intercepted HTTPS must validate the upstream IP before dialing"
-    );
+    upstream_task
+        .await
+        .expect("upstream certificate check should complete successfully");
 
     runtime.shutdown(Duration::from_secs(2)).await;
     assert_exit(&mut events, &id).await;
@@ -1106,7 +1123,7 @@ async fn unauthorized_ip_literal_is_rejected_before_an_upstream_connection() {
 }
 
 #[tokio::test]
-async fn http_and_connect_can_use_an_explicit_private_destination() {
+async fn http_and_connect_use_default_connectors_for_an_authorized_loopback_host() {
     let directory = tempfile::tempdir().expect("test directory should be created");
     let ca = write_test_ca(directory.path());
     let upstream = TcpListener::bind("127.0.0.1:0")
@@ -1117,12 +1134,12 @@ async fn http_and_connect_can_use_an_explicit_private_destination() {
         .expect("test upstream address should be available")
         .port();
     let (event_sender, mut events) = mpsc::unbounded_channel();
-    let id = RuntimeId::new("runtime-private-destination");
+    let id = RuntimeId::new("runtime-authorized-loopback");
     let runtime = ProxyRuntime::start(
         id.clone(),
-        private_destination_session_config(upstream_port),
+        loopback_session_config(upstream_port),
         ca,
-        directory.path().join("private-destination.sock"),
+        directory.path().join("authorized-loopback.sock"),
         4,
         event_sender,
     )

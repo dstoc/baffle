@@ -1,9 +1,9 @@
 # Rust client and direct protocol use
 
-**Current runtime behavior:** this guide includes plaintext HTTP and
-`private_addresses` examples that remain accepted until the follow-up changes
-in baffle/24 and baffle/25. The approved target policy rejects plaintext HTTP
-destinations and removes `private_addresses`.
+**Current runtime behavior:** plaintext HTTP remains accepted by configured
+tunnel rules until baffle/24 lands. Baffle no longer supports
+`private_addresses`; old policies with that field fail validation and must
+move intended address restrictions to deployment DNS and network egress rules.
 
 The `baffle-client` package provides a typed asynchronous client for the v1
 Unix control protocol. It depends on Tokio, Serde, JSON, and TOML. It does not
@@ -65,17 +65,10 @@ on an intercepted HTTPS connection. The target policy applies path checks
 inside successfully intercepted TLS only. A path-restricted rule cannot
 accept an opaque HTTPS CONNECT tunnel.
 
-Use `with_private_address` to allow one exact non-public DNS answer for a host.
-The exception applies only to that rule's ports. Other non-public DNS answers
-remain denied in the current runtime. baffle/25 removes this API. After that
-change, move address restrictions to deployment DNS and network egress policy.
-
-```rust
-let policy = SessionConfig::new().with_rule(
-    HostRule::tunnel("internal.example")
-        .with_private_address("10.20.30.40"),
-);
-```
+The client API does not contain an address exception. An allowlisted hostname
+can resolve to a private, loopback, link-local, metadata, or other sensitive
+address, even if its certificate is valid. Apply DNS policy and network egress
+rules when the deployment requires address containment.
 
 Cladding or another orchestrator should own the `Client` and ephemeral session
 outside the sandbox. It can expose the returned data socket to that workload
@@ -126,8 +119,11 @@ ports = [443]
 host = "internal.example"
 mode = "tunnel"
 ports = [8443]
-private_addresses = ["10.20.30.40"]
 ```
+
+The rule authorizes the exact hostname and port. It does not restrict the IP
+address returned by DNS. Move any intended address restriction to deployment
+DNS and network egress policy.
 
 The response contains `result.id`, `result.socket`, and `result.persistent`.
 Keep the create connection open while an ephemeral session is in use. Closing
