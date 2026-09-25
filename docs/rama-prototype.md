@@ -25,7 +25,7 @@ without a custom verified egress connector. The Rama adapter does not yet
 implement that connector, the CONNECT/SNI/HTTP authority binding, or
 fail-closed handling for fragmented ClientHello messages and unsupported
 CONNECT payloads. See the [Rama MITM documentation](https://docs.rs/crate/rama/0.4.0/source/docs/book/src/proxies/mitm.md)
-and [Rama Boring TLS documentation](https://docs.rs/crate/rama-tls-boring/0.4.0).
+and the [Rama Boring TLS README](https://docs.rs/crate/rama-tls-boring/0.4.0/source/README.md).
 
 The current `SessionPolicy` also uses Hudsucker's Hyper HTTP types. A shared
 request-policy contract and a Rama adapter for that contract are still
@@ -43,15 +43,16 @@ that bridge safely.
 Measurements below were taken in the `baffle` repository with Rust 1.98.1 and
 Cargo 1.98.1 on the `ld-cladding` runner. Clean build means `cargo clean`
 followed by the listed build. Incremental build means an immediate repeat.
+Binary sizes are for the release executable.
 
 | Check | Hudsucker | Rama |
 | --- | ---: | ---: |
-| `cargo test --locked --no-default-features --features backend-*` | Passed: 98 tests | Blocked before Baffle compilation: `rama-dns` bindgen could not find `libclang.so` |
-| Clean debug build | 22.97 s | No result; native build prerequisite missing |
-| Incremental debug build | 0.17 s | No result |
-| Clean release build | 40.87 s | No result |
-| Debug / release binary | 171,948,416 / 14,505,656 bytes | No binary |
-| Normal dependency graph entries | 253 | 358 |
+| `cargo test --locked --no-default-features --features backend-*` | Passed: 98 tests | Passed: 32 tests; no proxy traffic exercised |
+| Clean debug build | 22.97 s | 58.49 s |
+| Incremental debug build | 0.17 s | 0.19 s |
+| Clean release build | 40.87 s | 73.14 s |
+| Debug / release binary | 171,948,416 / 14,505,656 bytes | 87,161,472 / 6,083,296 bytes |
+| Normal dependency graph entries | 253 | 359 |
 
 Count dependency entries with:
 
@@ -60,28 +61,45 @@ cargo tree --locked --no-default-features --features backend-hudsucker -e normal
 cargo tree --locked --no-default-features --features backend-rama -e normal --prefix none | sort -u | wc -l
 ```
 
-The Hudsucker test, Clippy, formatting, and example commands passed:
+The Hudsucker test, Clippy, formatting, examples, and release test commands
+passed. The Rama test, Clippy, and release test commands also passed:
 
 ```sh
 cargo test --locked --no-default-features --features backend-hudsucker
 cargo clippy --locked --all-targets --no-default-features --features backend-hudsucker -- -D warnings
 cargo fmt --all -- --check
 cargo check --locked --examples --no-default-features --features backend-hudsucker
+cargo test --locked --release --no-default-features --features backend-hudsucker
+cargo test --locked --no-default-features --features backend-rama
+cargo clippy --locked --all-targets --no-default-features --features backend-rama -- -D warnings
+cargo test --locked --release --no-default-features --features backend-rama
 ```
 
-The Rama test command was attempted but stopped in Rama's `rama-dns` build
-script because this runner has no libclang library. Rama 0.4.0 declares Rust
-1.96 as its minimum version. Its selected DNS feature uses bindgen, and its
-BoringSSL binding builds native code. CI installs `libclang-dev`, CMake, and a
-C++ toolchain for the Rama matrix entry. Hudsucker-only developers do not need
-those packages when they use the default feature.
+The runner now has `build-essential` 12.12, CMake 3.31.6, and `libclang-dev`
+1:19.0-63. Rama 0.4.0 declares Rust 1.96 as its minimum version. Its selected
+DNS feature uses bindgen, and its BoringSSL binding builds native code. CI
+installs `libclang-dev`, CMake, and a C++ toolchain for the Rama matrix entry.
+Hudsucker-only developers do not need those packages when they use the default
+feature. The first Rama-only compile also exposed that `rcgen::Issuer::from_ca_cert_pem`
+requires rcgen's `x509-parser` feature. Cargo enables that feature explicitly
+so the CA module compiles without Hudsucker's transitive feature selection.
+
+The 32 passing Rama tests exercise shared daemon/configuration code and the
+scaffold. They do not send proxy traffic. `ProxyRuntime::start` returns
+`backend_unavailable` before it binds a listener, so this result verifies the
+fail-closed placeholder only; it does not verify Rama request handling, TLS,
+path enforcement, credentials, or lifecycle behavior.
 
 The dependency graph count includes each unique crate name and version in the
-normal dependency tree. The Rama graph adds 105 entries and includes
+normal dependency tree. The Rama graph adds 106 entries and includes
 `rama-dns`, `rama-tls-boring`, `rama-boring`, and `rama-boring-sys`. The Boring
 bindings include BoringSSL native sources and use CMake. Rama's HTTP feature
-set therefore costs more than adding a single proxy crate. No comparable Rama
-binary size or clean build time is available from this runner.
+set therefore costs more than adding a single proxy crate. In this run, the
+Rama clean debug and release builds took about 2.5 and 1.8 times as long as the
+Hudsucker builds. Its release binary was smaller, but the build-time and size
+results do not offset the missing runtime and security integration.
+The Rama tree contains `rama` without `hudsucker`; the Hudsucker tree contains
+the vendored `hudsucker` without `rama`.
 
 ## Comparison and maintenance cost
 
@@ -104,5 +122,5 @@ connector that verifies certificates and hostnames. Before enabling any
 request path, add tests for CONNECT/SNI/HTTP authority mismatches, invalid and
 expired certificates, fragmented ClientHello input, and unsupported CONNECT
 payloads. Add the second independently configured session only after those
-checks pass. Measure clean and incremental builds and release binary size on a
-runner with the native tools installed.
+checks pass. The native-tool measurements are now available; repeat them after
+the adapter can build and exercise real proxy traffic.

@@ -25,7 +25,7 @@ base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 hudsucker = { version = "=0.25.0", features = ["http2"], optional = true }
 libc = "0.2"
-rcgen = { version = "=0.14.10", optional = true }
+rcgen = { version = "=0.14.10", features = ["x509-parser"], optional = true }
 rama = {
     version = "=0.4.0",
     default-features = false,
@@ -45,6 +45,11 @@ x509-parser = "0.18.1"
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio-rustls = "0.26.5"
+
+[[test]]
+name = "client"
+path = "tests/client.rs"
+required-features = ["backend-hudsucker"]
 
 [[test]]
 name = "daemon_lifecycle"
