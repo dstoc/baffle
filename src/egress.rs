@@ -309,10 +309,12 @@ mod tests {
             .connect("allowed.example:80".parse().unwrap())
             .await;
 
+        let error = result.expect_err("Azure WireServer resolution must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(
-            result.unwrap_err().kind(),
-            io::ErrorKind::PermissionDenied,
-            "Azure WireServer must be denied before the connector attempts a TCP dial"
+            error.to_string(),
+            "DNS returned no permitted destination addresses",
+            "the connector must reject the resolved address before it attempts a TCP dial"
         );
     }
 
