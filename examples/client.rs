@@ -18,9 +18,6 @@ async fn main() -> Result<()> {
     if port == 0 {
         anyhow::bail!("BAFFLE_EXAMPLE_PORT must be greater than zero");
     }
-    if port == 80 {
-        anyhow::bail!("port 80 is reserved for unsupported plaintext HTTP");
-    }
     let mut https_rule = HostRule::tunnel(host.clone());
     https_rule.ports = vec![port];
     let policy = SessionConfig::new().with_rule(https_rule);
@@ -45,8 +42,8 @@ async fn main() -> Result<()> {
             break;
         }
     }
-    println!("Established an opaque HTTPS tunnel to {authority}.");
-    println!("Use a TLS-capable client to verify the upstream certificate.");
+    println!("Established an opaque CONNECT tunnel to {authority}.");
+    println!("If the destination uses TLS, the client must verify its certificate.");
 
     drop(proxy);
     // Closing the handle drops the ephemeral control connection and releases

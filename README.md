@@ -20,7 +20,10 @@ itself.
 
 Rules default to destination port 443. A CONNECT request must use an authority
 with an explicit port, such as `api.example.com:443`; the client should map
-the default port from an `https://` origin to `:443`.
+the default port from an `https://` origin to `:443`. Port 80 is not reserved:
+a configured port can carry TLS if the destination service supports it. Baffle
+rejects plaintext HTTP based on the request form or scheme, regardless of the
+destination port.
 
 The HTTP request used for `CONNECT` is the proxy protocol. After Baffle
 intercepts TLS, it continues to process HTTP/1.1 or HTTP/2 inside that TLS
