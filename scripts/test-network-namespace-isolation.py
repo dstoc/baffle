@@ -556,6 +556,16 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+    except Exception as error:
+        message = str(error)[:3000]
+        annotation = (
+            message.replace("%", "%25")
+            .replace("\r", "%0D")
+            .replace("\n", "%0A")
+        )
+        print(
+            f"::error title=Privileged namespace integration failure::{annotation}",
+            flush=True,
+        )
         print(f"FAIL: {error}", file=sys.stderr)
         raise SystemExit(1)
