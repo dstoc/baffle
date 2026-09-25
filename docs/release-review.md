@@ -11,7 +11,10 @@ Reviewed on 2026-09-25 for the initial Linux release work.
 - The release workflow accepts a `v<version>` tag only when it matches the
   `baffle-proxy` package version. It builds the release binary for
   `x86_64-unknown-linux-gnu`, packages the binary and documentation, and
-  publishes a SHA-256 checksum with the GitHub release.
+  publishes a SHA-256 checksum with the GitHub release. Before packaging, it
+  requires a non-empty top-level `LICENSE` file and Cargo license metadata.
+  It includes `LICENSE` in the release archive. The project owner must approve
+  the terms recorded in both places.
 - The package targets Linux x86-64 with the GNU C library. Other Linux
   architectures and static linking are not included in this release job.
 
@@ -61,6 +64,6 @@ Reviewed on 2026-09-25 for the initial Linux release work.
 ## Maintainer follow-up
 
 The repository has no top-level `LICENSE` file and the Cargo package metadata
-does not declare a license. The project owner must select and record the
-distribution terms before treating GitHub release binaries as an open-source
-release. No license has been inferred from the vendored Hudsucker crate.
+does not declare a license. The release workflow stops until the project owner
+selects and records the distribution terms in both places. No license has been
+inferred from the vendored Hudsucker crate.

@@ -18,6 +18,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Require distribution terms metadata
+        shell: bash
+        run: |
+          test -s LICENSE
+          declared_license="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "baffle-proxy") | .license // empty')"
+          test -n "$declared_license"
+
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
@@ -43,6 +50,7 @@ jobs:
           stage="$(mktemp -d)"
           mkdir -p "$stage/share/doc/baffle"
           install -m 0755 target/release/baffle "$stage/baffle"
+          install -m 0644 LICENSE "$stage/LICENSE"
           install -m 0644 README.md "$stage/share/doc/baffle/README.md"
           cp -R docs "$stage/share/doc/baffle/docs"
           cp -R examples "$stage/share/doc/baffle/examples"
