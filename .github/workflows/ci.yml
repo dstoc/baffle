@@ -10,11 +10,24 @@ permissions:
 
 jobs:
   checks:
-    name: Format, lint, and test
+    name: Format, lint, and test (${{ matrix.backend }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - backend: Hudsucker
+            feature: backend-hudsucker
+          - backend: Rama
+            feature: backend-rama
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Install Rama native build tools
+        if: matrix.backend == 'Rama'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential cmake libclang-dev
 
       - name: Install Rust components
         uses: dtolnay/rust-toolchain@stable
@@ -31,13 +44,14 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --no-default-features --features ${{ matrix.feature }} -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked --all-features
+        run: cargo test --locked --no-default-features --features ${{ matrix.feature }}
 
       - name: Compile Rust examples
-        run: cargo check --locked --examples
+        if: matrix.backend == 'Hudsucker'
+        run: cargo check --locked --examples --no-default-features --features ${{ matrix.feature }}
 
       - name: Run release tests
-        run: cargo test --locked --release --all-features
+        run: cargo test --locked --release --no-default-features --features ${{ matrix.feature }}

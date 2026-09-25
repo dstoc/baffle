@@ -8,28 +8,33 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "backend-hudsucker")]
 use hudsucker::{
     certificate_authority::{CertificateAuthority, RcgenAuthority},
     hyper::http::uri::Authority,
-    rcgen::{CertificateParams, Issuer, KeyPair},
     rustls::{ServerConfig, crypto::aws_lc_rs},
 };
+use rcgen::{CertificateParams, Issuer, KeyPair};
 use x509_parser::{parse_x509_certificate, pem::parse_x509_pem};
 
 use crate::config::CaConfig;
 
+#[cfg(feature = "backend-hudsucker")]
 const CERTIFICATE_CACHE_CAPACITY: u64 = 4096;
 
 /// A CA whose signing key is held by Hudsucker and never returned to a session.
 pub struct ManagedCa {
+    #[cfg(feature = "backend-hudsucker")]
     authority: Arc<RcgenAuthority>,
     public_certificate_pem: Arc<[u8]>,
 }
 
 /// A cloneable Hudsucker CA handle with shared signing state and certificate cache.
 #[derive(Clone)]
+#[cfg(feature = "backend-hudsucker")]
 pub struct SharedCaAuthority(Arc<RcgenAuthority>);
 
+#[cfg(feature = "backend-hudsucker")]
 impl CertificateAuthority for SharedCaAuthority {
     async fn gen_server_config(&self, authority: &Authority) -> Arc<ServerConfig> {
         self.0.gen_server_config(authority).await
@@ -66,6 +71,7 @@ impl ManagedCa {
             .signed_by(issuer.key(), &issuer)
             .context("CA private key cannot sign certificates")?;
 
+        #[cfg(feature = "backend-hudsucker")]
         let authority = RcgenAuthority::new(
             issuer,
             CERTIFICATE_CACHE_CAPACITY,
@@ -73,12 +79,14 @@ impl ManagedCa {
         );
 
         Ok(Self {
+            #[cfg(feature = "backend-hudsucker")]
             authority: Arc::new(authority),
             public_certificate_pem: certificate.pem.into(),
         })
     }
 
     /// Return a Hudsucker CA handle for a proxy builder.
+    #[cfg(feature = "backend-hudsucker")]
     pub fn for_proxy(&self) -> SharedCaAuthority {
         SharedCaAuthority(Arc::clone(&self.authority))
     }
@@ -185,7 +193,7 @@ fn validate_private_key_permissions(_metadata: &fs::Metadata) -> Result<()> {
     bail!("CA private key permissions cannot be validated on this platform")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-hudsucker"))]
 mod tests {
     use std::{fs, path::Path, sync::Arc};
 
