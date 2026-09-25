@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(feature = "backend-hudsucker")]
 use hudsucker::hyper::{
     Method, Request, Uri, Version,
     header::{HOST, HeaderMap},
@@ -17,6 +18,24 @@ use crate::config::{
 pub(crate) enum AuthorizationError {
     InvalidAuthority,
     Denied,
+}
+
+/// A canonical destination accepted by the shared session policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Destination {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+}
+
+/// Backend-neutral view of one decrypted HTTP request.
+#[cfg(feature = "backend-rama")]
+pub(crate) struct RequestFacts<'a> {
+    pub(crate) method: &'a str,
+    pub(crate) scheme: Option<&'a str>,
+    pub(crate) uri_authority: Option<&'a str>,
+    pub(crate) path: &'a str,
+    pub(crate) host_headers: &'a [&'a str],
+    pub(crate) secure_transport: bool,
 }
 
 #[derive(Clone)]
@@ -55,7 +74,99 @@ impl SessionPolicy {
         Self { rules }
     }
 
+    /// Authorize a CONNECT target using the same exact host and port rules for
+    /// every backend. A CONNECT authority without a port uses HTTPS port 443.
+    pub(crate) fn authorize_connect_authority(
+        &self,
+        authority: &str,
+        host_headers: &[&str],
+    ) -> Result<(RuleMode, Destination), AuthorizationError> {
+        let destination = parse_authority_text(authority, Some(443))?;
+        validate_host_header_text(host_headers, &destination)?;
+        let rule = self
+            .rules
+            .get(&destination.host)
+            .filter(|rule| rule.ports.contains(&destination.port))
+            .ok_or(AuthorizationError::Denied)?;
+        if rule.mode == RuleMode::Tunnel && !rule.paths.is_empty() {
+            return Err(AuthorizationError::Denied);
+        }
+        Ok((rule.mode, destination))
+    }
+
+    /// Confirm that CONNECT authority and TLS SNI identify one intercept rule.
+    pub(crate) fn permits_tls_interception_authority(
+        &self,
+        authority: &str,
+        server_name: Option<&str>,
+    ) -> bool {
+        let Ok((mode, destination)) = self.authorize_connect_authority(authority, &[]) else {
+            return false;
+        };
+        let Some(server_name) = server_name.and_then(normalize_dns_name) else {
+            return false;
+        };
+        mode == RuleMode::Intercept && server_name == destination.host
+    }
+
+    /// Apply the canonical policy to one decrypted request. The CONNECT target
+    /// remains the trusted identity; an absolute URI or Host header must agree.
+    #[cfg(feature = "backend-rama")]
+    pub(crate) fn authorize_intercepted_request<'a>(
+        &'a self,
+        facts: &RequestFacts<'_>,
+        connect_authority: &str,
+    ) -> Result<(&'a [HeaderInjection], Option<String>), AuthorizationError> {
+        if facts.method.eq_ignore_ascii_case("CONNECT")
+            || (!facts.secure_transport
+                && !facts
+                    .scheme
+                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https")))
+            || facts
+                .scheme
+                .is_some_and(|scheme| !scheme.eq_ignore_ascii_case("https"))
+        {
+            return Err(AuthorizationError::InvalidAuthority);
+        }
+
+        let connect = parse_authority_text(connect_authority, Some(443))?;
+        let uri_destination = facts
+            .uri_authority
+            .map(|authority| parse_authority_text(authority, Some(443)))
+            .transpose()?;
+        let host_destination = if facts.host_headers.is_empty() {
+            None
+        } else {
+            if facts.host_headers.len() != 1 {
+                return Err(AuthorizationError::InvalidAuthority);
+            }
+            Some(parse_authority_text(facts.host_headers[0], Some(443))?)
+        };
+        if uri_destination
+            .as_ref()
+            .is_some_and(|destination| destination != &connect)
+            || host_destination
+                .as_ref()
+                .is_some_and(|destination| destination != &connect)
+            || (uri_destination.is_none() && host_destination.is_none())
+        {
+            return Err(AuthorizationError::InvalidAuthority);
+        }
+
+        let rule = self
+            .rules
+            .get(&connect.host)
+            .filter(|rule| rule.ports.contains(&connect.port))
+            .ok_or(AuthorizationError::Denied)?;
+        if let Some(path) = canonical_authorized_path(rule, facts.path)? {
+            Ok((&rule.injections, Some(path)))
+        } else {
+            Ok((&rule.injections, None))
+        }
+    }
+
     /// Authorize an outer proxy request. Destinations must use CONNECT.
+    #[cfg(feature = "backend-hudsucker")]
     pub(crate) fn authorize<B>(
         &self,
         request: &Request<B>,
@@ -70,6 +181,7 @@ impl SessionPolicy {
     /// Authorize an intercepted HTTPS request and replace its path with the
     /// canonical path that was checked. This keeps the upstream request target
     /// identical to the path used for the policy decision.
+    #[cfg(feature = "backend-hudsucker")]
     pub(crate) fn authorize_request<B>(
         &self,
         request: &mut Request<B>,
@@ -87,7 +199,7 @@ impl SessionPolicy {
 
     /// Authorize an intercepted HTTPS request and canonicalize its path before
     /// forwarding it to the origin.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "backend-hudsucker"))]
     pub(crate) fn authorize_inner_request<B>(
         &self,
         request: &mut Request<B>,
@@ -99,6 +211,7 @@ impl SessionPolicy {
 
     /// Authorize an intercepted HTTPS request and return the matching rule's
     /// injection declarations only after authority and canonical path checks.
+    #[cfg(feature = "backend-hudsucker")]
     pub(crate) fn authorize_inner_request_with_injections<'a, B>(
         &'a self,
         request: &mut Request<B>,
@@ -133,6 +246,7 @@ impl SessionPolicy {
     /// Authorize a proxy request for the handler. Only inner requests carried
     /// by an intercepted CONNECT may receive credentials. The outer CONNECT
     /// itself is authorized so Hudsucker can establish the inspected stream.
+    #[cfg(feature = "backend-hudsucker")]
     pub(crate) fn authorize_proxy_request<'a, B>(
         &'a self,
         request: &mut Request<B>,
@@ -151,25 +265,16 @@ impl SessionPolicy {
 
     /// Check that an intercepted CONNECT uses a policy-authorized SNI name
     /// that identifies the same host as the CONNECT authority.
+    #[cfg(feature = "backend-hudsucker")]
     pub(crate) fn permits_tls_interception(
         &self,
         connect_authority: &Authority,
         server_name: Option<&str>,
     ) -> bool {
-        let Ok((connect_host, port)) = parse_authority(connect_authority, None) else {
-            return false;
-        };
-        let Some(server_name) = server_name.and_then(normalize_dns_name) else {
-            return false;
-        };
-        if server_name != connect_host {
-            return false;
-        }
-        self.rules
-            .get(&connect_host)
-            .is_some_and(|rule| rule.mode == RuleMode::Intercept && rule.ports.contains(&port))
+        self.permits_tls_interception_authority(connect_authority.as_str(), server_name)
     }
 
+    #[cfg(feature = "backend-hudsucker")]
     fn rule_for_request<B>(
         &self,
         request: &Request<B>,
@@ -195,6 +300,52 @@ impl SessionPolicy {
     }
 }
 
+fn validate_host_header_text(
+    host_headers: &[&str],
+    destination: &Destination,
+) -> Result<(), AuthorizationError> {
+    if host_headers.len() > 1 {
+        return Err(AuthorizationError::InvalidAuthority);
+    }
+    if let Some(host) = host_headers.first()
+        && parse_authority_text(host, Some(443))? != *destination
+    {
+        return Err(AuthorizationError::InvalidAuthority);
+    }
+    Ok(())
+}
+
+fn parse_authority_text(
+    authority: &str,
+    default_port: Option<u16>,
+) -> Result<Destination, AuthorizationError> {
+    if authority.is_empty()
+        || !authority.is_ascii()
+        || authority
+            .chars()
+            .any(|character| matches!(character, '@' | '%'))
+    {
+        return Err(AuthorizationError::InvalidAuthority);
+    }
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) if !host.contains(':') => (
+            host,
+            port.parse::<u16>()
+                .map_err(|_| AuthorizationError::InvalidAuthority)?,
+        ),
+        Some(_) => return Err(AuthorizationError::InvalidAuthority),
+        None => (
+            authority,
+            default_port.ok_or(AuthorizationError::InvalidAuthority)?,
+        ),
+    };
+    if port == 0 {
+        return Err(AuthorizationError::InvalidAuthority);
+    }
+    let host = normalize_dns_name(host).ok_or(AuthorizationError::InvalidAuthority)?;
+    Ok(Destination { host, port })
+}
+
 fn canonical_authorized_path(
     rule: &CompiledRule,
     path: &str,
@@ -214,6 +365,7 @@ fn canonical_authorized_path(
     Ok(Some(canonical))
 }
 
+#[cfg(feature = "backend-hudsucker")]
 fn rewrite_request_path<B>(request: &mut Request<B>, path: &str) -> Result<(), AuthorizationError> {
     let mut path_and_query = path.to_string();
     if let Some(query) = request.uri().query() {
@@ -230,6 +382,7 @@ fn rewrite_request_path<B>(request: &mut Request<B>, path: &str) -> Result<(), A
     Ok(())
 }
 
+#[cfg(feature = "backend-hudsucker")]
 fn connect_destination<B>(request: &Request<B>) -> Result<(String, u16), AuthorizationError> {
     let uri = request.uri();
     if uri.scheme().is_some() || uri.path_and_query().is_some() {
@@ -238,11 +391,12 @@ fn connect_destination<B>(request: &Request<B>) -> Result<(String, u16), Authori
     let authority = uri
         .authority()
         .ok_or(AuthorizationError::InvalidAuthority)?;
-    let destination = parse_authority(authority, None)?;
+    let destination = parse_authority(authority, Some(443))?;
     validate_host_header(request.headers(), &destination, Some(443))?;
     Ok(destination)
 }
 
+#[cfg(feature = "backend-hudsucker")]
 fn http_destination<B>(request: &Request<B>) -> Result<(String, u16), AuthorizationError> {
     let uri = request.uri();
     let default_port = match uri.scheme_str() {
@@ -257,6 +411,7 @@ fn http_destination<B>(request: &Request<B>) -> Result<(String, u16), Authorizat
     Ok(destination)
 }
 
+#[cfg(feature = "backend-hudsucker")]
 fn validate_host_header(
     headers: &HeaderMap,
     destination: &(String, u16),
@@ -284,6 +439,7 @@ fn validate_host_header(
     }
 }
 
+#[cfg(feature = "backend-hudsucker")]
 fn parse_authority(
     authority: &Authority,
     default_port: Option<u16>,
@@ -335,7 +491,7 @@ fn normalize_dns_name(input: &str) -> Option<String> {
     Some(host)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-hudsucker"))]
 mod tests {
     use std::sync::Arc;
 
@@ -412,8 +568,12 @@ mod tests {
     }
 
     #[test]
-    fn omitted_rule_ports_default_to_443_and_connect_requires_a_configured_port() {
+    fn omitted_rule_ports_and_connect_authorities_default_to_443() {
         let policy = policy_with("github.com", "tunnel", "");
+        assert_eq!(
+            policy.authorize(&request("CONNECT", "github.com", None)),
+            Ok(RuleMode::Tunnel)
+        );
         assert_eq!(
             policy.authorize(&request("CONNECT", "github.com:443", None)),
             Ok(RuleMode::Tunnel)
@@ -621,7 +781,6 @@ mod tests {
             "evilgithub.com:443",
             "github.com.evil.example:443",
             "github.com:444",
-            "github.com",
             "user@github.com:443",
             "127.0.0.1:443",
             "[::1]:443",

@@ -13,8 +13,10 @@ use crate::config::SessionConfig;
 const MAX_SECRET_BYTES: u64 = 64 * 1024;
 
 /// Secret material intentionally has a redacted debug representation.
+#[cfg_attr(feature = "backend-rama", allow(dead_code))]
 pub(crate) struct SecretValue(String);
 
+#[cfg_attr(feature = "backend-rama", allow(dead_code))]
 impl SecretValue {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
@@ -29,8 +31,10 @@ impl fmt::Debug for SecretValue {
 
 /// Resolved values belong to one session and are not serializable.
 #[derive(Default)]
+#[cfg_attr(feature = "backend-rama", allow(dead_code))]
 pub(crate) struct ResolvedSecrets(HashMap<String, SecretValue>);
 
+#[cfg_attr(feature = "backend-rama", allow(dead_code))]
 impl ResolvedSecrets {
     pub(crate) fn get(&self, name: &str) -> Option<&SecretValue> {
         self.0.get(name)

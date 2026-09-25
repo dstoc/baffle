@@ -8,28 +8,40 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "backend-hudsucker")]
 use hudsucker::{
     certificate_authority::{CertificateAuthority, RcgenAuthority},
     hyper::http::uri::Authority,
-    rcgen::{CertificateParams, Issuer, KeyPair},
     rustls::{ServerConfig, crypto::aws_lc_rs},
 };
+use rcgen::{CertificateParams, Issuer, KeyPair};
 use x509_parser::{parse_x509_certificate, pem::parse_x509_pem};
 
 use crate::config::CaConfig;
 
+#[cfg(feature = "backend-rama")]
+use rama::tls::boring::core::{pkey::PKey, pkey::Private, x509::X509};
+
+#[cfg(feature = "backend-hudsucker")]
 const CERTIFICATE_CACHE_CAPACITY: u64 = 4096;
 
 /// A CA whose signing key is held by Hudsucker and never returned to a session.
 pub struct ManagedCa {
+    #[cfg(feature = "backend-hudsucker")]
     authority: Arc<RcgenAuthority>,
+    #[cfg(feature = "backend-rama")]
+    rama_certificate: X509,
+    #[cfg(feature = "backend-rama")]
+    rama_private_key: PKey<Private>,
     public_certificate_pem: Arc<[u8]>,
 }
 
 /// A cloneable Hudsucker CA handle with shared signing state and certificate cache.
 #[derive(Clone)]
+#[cfg(feature = "backend-hudsucker")]
 pub struct SharedCaAuthority(Arc<RcgenAuthority>);
 
+#[cfg(feature = "backend-hudsucker")]
 impl CertificateAuthority for SharedCaAuthority {
     async fn gen_server_config(&self, authority: &Authority) -> Arc<ServerConfig> {
         self.0.gen_server_config(authority).await
@@ -60,12 +72,20 @@ impl ManagedCa {
         let issuer = Issuer::from_ca_cert_pem(certificate_pem, key_pair)
             .context("CA certificate cannot be used as an issuer")?;
 
+        #[cfg(feature = "backend-rama")]
+        let (rama_certificate, rama_private_key) = (
+            X509::from_pem(&certificate.pem).context("could not load CA certificate for Rama")?,
+            PKey::private_key_from_pem(&key_bytes)
+                .context("could not load CA private key for Rama")?,
+        );
+
         // Hudsucker generates leaves lazily. Sign a probe now so unsupported or
         // unusable signing keys fail daemon startup instead of the first request.
         CertificateParams::default()
             .signed_by(issuer.key(), &issuer)
             .context("CA private key cannot sign certificates")?;
 
+        #[cfg(feature = "backend-hudsucker")]
         let authority = RcgenAuthority::new(
             issuer,
             CERTIFICATE_CACHE_CAPACITY,
@@ -73,14 +93,29 @@ impl ManagedCa {
         );
 
         Ok(Self {
+            #[cfg(feature = "backend-hudsucker")]
             authority: Arc::new(authority),
+            #[cfg(feature = "backend-rama")]
+            rama_certificate,
+            #[cfg(feature = "backend-rama")]
+            rama_private_key,
             public_certificate_pem: certificate.pem.into(),
         })
     }
 
     /// Return a Hudsucker CA handle for a proxy builder.
+    #[cfg(feature = "backend-hudsucker")]
     pub fn for_proxy(&self) -> SharedCaAuthority {
         SharedCaAuthority(Arc::clone(&self.authority))
+    }
+
+    /// Return Rama's BoringSSL issuer material to the backend runtime.
+    ///
+    /// The managed CA remains the daemon-owned source of truth. The Rama
+    /// backend only clones the in-memory key handle needed to sign leaves.
+    #[cfg(feature = "backend-rama")]
+    pub(crate) fn for_rama_proxy(&self) -> (X509, PKey<Private>) {
+        (self.rama_certificate.clone(), self.rama_private_key.clone())
     }
 
     /// Return the public certificate PEM. The private signing key is not exposed.
@@ -185,7 +220,7 @@ fn validate_private_key_permissions(_metadata: &fs::Metadata) -> Result<()> {
     bail!("CA private key permissions cannot be validated on this platform")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-hudsucker"))]
 mod tests {
     use std::{fs, path::Path, sync::Arc};
 

@@ -895,7 +895,7 @@ fn new_session_id() -> io::Result<String> {
     Ok(id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-hudsucker"))]
 mod tests {
     use std::{
         fs,

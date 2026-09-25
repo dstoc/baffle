@@ -9,6 +9,11 @@ members = ["crates/baffle-client"]
 default-members = [".", "crates/baffle-client"]
 resolver = "3"
 
+[features]
+default = ["backend-hudsucker"]
+backend-hudsucker = ["dep:hudsucker", "dep:rcgen"]
+backend-rama = ["dep:rama", "dep:rcgen"]
+
 [[bin]]
 name = "baffle"
 path = "src/main.rs"
@@ -18,8 +23,15 @@ baffle-client = { path = "crates/baffle-client" }
 anyhow = "1.0.104"
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
-hudsucker = { version = "=0.25.0", features = ["http2"] }
+hudsucker = { version = "=0.25.0", features = ["http2"], optional = true }
 libc = "0.2"
+rcgen = { version = "=0.14.10", features = ["x509-parser"], optional = true }
+rama = {
+    version = "=0.4.0",
+    default-features = false,
+    features = ["http-full", "boring"],
+    optional = true,
+}
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
@@ -33,6 +45,41 @@ x509-parser = "0.18.1"
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio-rustls = "0.26.5"
+
+[[test]]
+name = "client"
+path = "tests/client.rs"
+required-features = ["backend-hudsucker"]
+
+[[test]]
+name = "daemon_lifecycle"
+path = "tests/daemon_lifecycle.rs"
+required-features = ["backend-hudsucker"]
+
+[[test]]
+name = "control_protocol"
+path = "tests/control_protocol.rs"
+required-features = ["backend-hudsucker"]
+
+[[test]]
+name = "proxy_runtime"
+path = "tests/proxy_runtime.rs"
+required-features = ["backend-hudsucker"]
+
+[[example]]
+name = "cladding_socat"
+path = "examples/cladding_socat.rs"
+required-features = ["backend-hudsucker"]
+
+[[example]]
+name = "client"
+path = "examples/client.rs"
+required-features = ["backend-hudsucker"]
+
+[[example]]
+name = "measure_sessions"
+path = "examples/measure_sessions.rs"
+required-features = ["backend-hudsucker"]
 
 [patch.crates-io]
 hudsucker = { path = "vendor/hudsucker" }
