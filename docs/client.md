@@ -1,5 +1,10 @@
 # Rust client and direct protocol use
 
+**Current runtime behavior:** this guide includes plaintext HTTP and
+`private_addresses` examples that remain accepted until the follow-up changes
+in baffle/24 and baffle/25. The approved target policy rejects plaintext HTTP
+destinations and removes `private_addresses`.
+
 The `baffle-client` package provides a typed asynchronous client for the v1
 Unix control protocol. It depends on Tokio, Serde, JSON, and TOML. It does not
 depend on Baffle's proxy runtime. The daemon package also re-exports it as
@@ -29,9 +34,25 @@ Ok(())
 }
 ```
 
-The [client example](../examples/client.rs) sends an HTTP proxy request through
-the returned Unix socket, reads the response, and closes the lease. The request
-is forwarded only when the session policy allows its host and destination port.
+The [client example](../examples/client.rs) sends CONNECT for
+`example.com:443`, reads the tunnel response, and closes the lease. It does not
+send a TLS request. For the approved target, use a client that establishes
+HTTPS with `CONNECT`; an `http://` proxy URL can still describe the local proxy
+endpoint.
+
+## Target client compatibility
+
+`baffle-client` manages the Unix control protocol. It does not send application
+traffic through the data socket or make an HTTP library use CONNECT. The
+consumer must provide an HTTP proxy client that sends CONNECT for HTTPS
+destinations. A request for an `http://` origin, including a request made
+after following a downgrade redirect, will be rejected after baffle/24. The
+client must not fall back to direct egress or plaintext HTTP when CONNECT or
+TLS fails. An `http://` proxy URL is still valid for the local proxy endpoint;
+the origin URL must use `https://`. CONNECT authority must include a port; map
+an `https://` origin with no explicit port to `:443`. Rules default to
+destination port 443, but that default does not remove the port from CONNECT
+authority.
 
 Set `HostRule.paths` to allow exact URL paths or recursive patterns such as
 `/repos/example/project/**`. Exact rules match only the listed path. Recursive
@@ -44,7 +65,8 @@ HTTPS CONNECT tunnel.
 
 Use `with_private_address` to allow one exact non-public DNS answer for a host.
 The exception applies only to that rule's ports. Other non-public DNS answers
-remain denied.
+remain denied in the current runtime. baffle/25 removes this API. After that
+change, move address restrictions to deployment DNS and network egress policy.
 
 ```rust
 let policy = SessionConfig::new().with_rule(

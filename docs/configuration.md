@@ -1,5 +1,11 @@
 # Configuration reference
 
+**Current runtime reference.** This page describes configuration accepted by
+the current code. The approved target policy changes are not implemented yet.
+The HTTPS-only request change is tracked in baffle/24. The destination-IP
+filter removal is tracked in baffle/25. Until those changes land, port-80
+rules and `private_addresses` still work as described below.
+
 Baffle reads one daemon TOML file at startup. A client sends a separate session
 TOML document in each `create` request. Both schemas reject unknown fields.
 TOML values are parsed as written; Baffle does not expand environment
@@ -101,6 +107,34 @@ HTTP, use a `tunnel` rule with port 80; Baffle still checks the host, port, and
 configured paths.
 
 ## Host, port, and path rules
+
+In the current runtime, a rule may explicitly allow plaintext HTTP on port 80
+when it uses `mode = "tunnel"`. A rule may also list exact non-public DNS
+answers in `private_addresses`. These are current implementation options.
+Under the approved target policy, Baffle will reject plaintext HTTP, reserve
+port 80, and remove `private_addresses`; see the [authoritative
+proposal](baffle-proposal.md) for the target behavior and migration boundary.
+
+The target session configuration uses HTTPS destination ports and has no
+address exceptions:
+
+```toml
+version = 1
+operation = "create"
+
+[session]
+persistent = false
+
+[[rules]]
+host = "api.example.com"
+mode = "intercept"
+ports = [443]
+paths = ["/v1/**"]
+```
+
+This example shows the approved target shape. The current strict TOML parser
+still accepts `private_addresses` according to the current schema described
+below; baffle/25 removes that field.
 
 Host matching is exact after lowercasing and removal of one trailing dot.
 `example.com` does not match `api.example.com`. Wildcards are not supported.

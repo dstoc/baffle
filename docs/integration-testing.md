@@ -1,5 +1,12 @@
 # Integration test suite
 
+This table describes the current implementation and its regression tests.
+The approved HTTPS-only and deployment-egress policy is not implemented yet.
+baffle/24 will replace plaintext HTTP acceptance coverage with rejection
+coverage. baffle/25 will reassess the destination-IP filtering tests. Keep
+both groups until those follow-ups are implemented; the current tests do not
+define the approved target guarantee.
+
 The Rust and Python tests run in `.github/workflows/ci.yml` on `ubuntu-latest`. CI also compiles all Rust examples, parses the checked-in daemon and session TOML examples, and runs the Rust suite in debug and release profiles. The tagged release workflow builds and packages the optimized Linux binary.
 
 | Area | Coverage |

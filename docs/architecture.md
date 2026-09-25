@@ -1,5 +1,11 @@
 # Architecture
 
+**Current runtime architecture.** This page describes protections that remain
+in the implementation until baffle/24 and baffle/25 land. In the target model,
+ordinary plaintext HTTP is rejected and DNS/IP filtering moves to deployment
+egress controls. The fail-closed interception behavior described below stays
+in the target model.
+
 Baffle runs one Tokio daemon process. The daemon owns the control listener,
 session registry, CA signing key, secret store, shared CA handle, and runtime.
 Each proxy session has an independent policy, Hudsucker instance, outbound
@@ -68,6 +74,22 @@ These rules protect traffic that reaches Baffle. They do not stop a sandboxed
 process from making a direct network connection. Deployment must force client
 egress through the assigned proxy and must isolate Baffle's internal loopback
 listeners as described in the [security guide](security-deployment.md).
+
+## Approved target boundary
+
+The target policy accepts HTTPS destinations through CONNECT. It rejects
+ordinary forward-proxy requests outside intercepted TLS, including plaintext
+`http://` destinations. HTTP/1.1 and HTTP/2 inside successfully intercepted TLS
+remain available for path checks and credential injection. A rule that
+requires those checks remains fail-closed.
+
+An explicit tunnel rule remains opaque. Baffle authorizes its configured host
+and port, but cannot prove that tunneled bytes are TLS, inspect paths, or
+verify the upstream certificate. The client must verify TLS identity. The
+target policy also removes Baffle's DNS-answer restrictions; deployment DNS
+and network egress controls must block sensitive addresses where the threat
+model requires it. Until baffle/24 and baffle/25 are implemented, the current
+runtime behavior described above still applies.
 
 ## Session lifecycle
 

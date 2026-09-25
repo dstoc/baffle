@@ -28,10 +28,14 @@ sessions owned by the same trusted UID.
 
 ## Rust client example
 
-`examples/client.rs` creates an ephemeral policy, sends a plaintext HTTP
-request to `example.com` through the session's Unix data socket, prints the
-response, and closes the lease. The example allows only port 80 for that
-request.
+`examples/client.rs` opens an HTTPS CONNECT tunnel to the configured host and
+port. It does not send a TLS request or verify a server certificate. The
+`cladding_socat` example below connects a full HTTPS client through CONNECT.
+
+`examples/client.rs` creates an ephemeral policy, sends CONNECT to
+`example.com:443` through the session's Unix data socket, prints the tunnel
+status, and closes the lease. Set `BAFFLE_EXAMPLE_HOST` and
+`BAFFLE_EXAMPLE_PORT` to select another host and TLS port. Port 80 is rejected.
 
 Start Baffle with a valid daemon configuration, then run:
 
@@ -40,28 +44,11 @@ BAFFLE_CONTROL_SOCKET=/run/baffle/control.sock cargo run --locked --example clie
 ```
 
 The example defaults to `/run/baffle/control.sock`, host `example.com`, and
-port 80. Set `BAFFLE_CONTROL_SOCKET` to use another control path. You can
-verify proxy use without an external upstream by running a local server in one
-terminal:
-
-```sh
-python3 -m http.server 8000 --bind 127.0.0.1
-```
-
-Then run the client example in another terminal. Its exact-address exception
-allows this local test server only for the configured hostname and port:
-
-```sh
-BAFFLE_CONTROL_SOCKET=/run/baffle/control.sock \
-BAFFLE_EXAMPLE_HOST=localhost \
-BAFFLE_EXAMPLE_PORT=8000 \
-BAFFLE_EXAMPLE_PRIVATE_ADDRESS=127.0.0.1 \
-cargo run --locked --example client
-```
-
-The environment variables set the example's session policy and request target.
-CI compiles this example and parses the TOML files in `examples/`; it does not
-start a daemon or a live upstream server.
+port 443. Set `BAFFLE_CONTROL_SOCKET` to use another control path. It needs a
+reachable upstream that accepts a TCP connection on the selected port. The
+example verifies only that CONNECT is established; it does not perform
+client-side TLS verification. CI compiles this example and parses the TOML
+files in `examples/`; it does not start a daemon or a live upstream server.
 
 ## Cladding `socat` example
 
