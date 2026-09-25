@@ -96,6 +96,13 @@ impl SessionPolicy {
         if request.method() == Method::CONNECT {
             return Err(AuthorizationError::InvalidAuthority);
         }
+        if !request
+            .uri()
+            .scheme_str()
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https"))
+        {
+            return Err(AuthorizationError::InvalidAuthority);
+        }
         if matches!(request.version(), Version::HTTP_10 | Version::HTTP_11)
             && !request.headers().contains_key(HOST)
         {

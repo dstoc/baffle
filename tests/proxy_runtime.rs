@@ -577,6 +577,59 @@ async fn intercepted_http2_authority_cannot_change_the_connect_destination() {
 }
 
 #[tokio::test]
+async fn intercepted_http2_http_scheme_is_rejected_before_upstream_connection() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-intercept-http2-http-scheme");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(upstream_port),
+        Arc::clone(&ca),
+        directory.path().join("http2-http-scheme.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("intercept runtime should start");
+    let authority = format!("localhost:{upstream_port}");
+    let tls = connect_intercepted_tls(runtime.local_addr(), &authority, "localhost", &ca, b"h2")
+        .await
+        .expect("matching SNI should establish intercepted TLS");
+    let (mut sender, connection) =
+        hudsucker::hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls))
+            .await
+            .expect("HTTP/2 client should connect to the intercepted stream");
+    let driver = tokio::spawn(connection);
+    let request = Request::builder()
+        .method("GET")
+        .version(Version::HTTP_2)
+        .uri(format!("http://{authority}/allowed"))
+        .body(Body::empty())
+        .expect("HTTP/2 request should build");
+    let response = timeout(Duration::from_secs(2), sender.send_request(request))
+        .await
+        .expect("HTTP/2 request should receive a response")
+        .expect("HTTP/2 response should be readable");
+    assert_eq!(response.status(), hudsucker::hyper::StatusCode::BAD_REQUEST);
+    assert!(
+        timeout(Duration::from_millis(200), upstream.accept())
+            .await
+            .is_err(),
+        "an intercepted HTTP/2 request with :scheme http must not reach the upstream"
+    );
+    drop(sender);
+    driver.abort();
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
 async fn revocation_blocks_new_http1_requests_on_an_intercepted_connection() {
     let directory = tempfile::tempdir().expect("test directory should be created");
     let ca = write_test_ca(directory.path());
