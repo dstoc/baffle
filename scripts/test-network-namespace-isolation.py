@@ -70,14 +70,15 @@ def start_process(
         bufsize=1,
     )
     processes.append(child)
-    expected = os.readlink(f"/run/netns/{namespace}")
+    namespace_handle = os.stat(f"/run/netns/{namespace}")
+    expected = (namespace_handle.st_dev, namespace_handle.st_ino)
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         try:
-            actual = os.readlink(f"/proc/{child.pid}/ns/net")
+            process_namespace = os.stat(f"/proc/{child.pid}/ns/net")
         except FileNotFoundError:
             break
-        if actual == expected:
+        if (process_namespace.st_dev, process_namespace.st_ino) == expected:
             return child
         if child.poll() is not None:
             break
