@@ -55,23 +55,21 @@ impl SessionPolicy {
         Self { rules }
     }
 
-    /// Authorize an ordinary HTTP request or a CONNECT request.
+    /// Authorize an outer proxy request. Destinations must use CONNECT.
     pub(crate) fn authorize<B>(
         &self,
         request: &Request<B>,
     ) -> Result<RuleMode, AuthorizationError> {
-        let rule = self.rule_for_request(request)?;
-
         if request.method() != Method::CONNECT {
-            canonical_authorized_path(rule, request.uri().path())?;
+            return Err(AuthorizationError::Denied);
         }
-
+        let rule = self.rule_for_request(request)?;
         Ok(rule.mode)
     }
 
-    /// Authorize a request and replace its path with the canonical path that
-    /// was checked. This keeps the upstream request target identical to the
-    /// path used for the policy decision.
+    /// Authorize an intercepted HTTPS request and replace its path with the
+    /// canonical path that was checked. This keeps the upstream request target
+    /// identical to the path used for the policy decision.
     pub(crate) fn authorize_request<B>(
         &self,
         request: &mut Request<B>,
@@ -144,11 +142,10 @@ impl SessionPolicy {
             return self.authorize_inner_request_with_injections(request, connect_authority);
         }
 
-        let mode = self.authorize_request(request)?;
-        let rule = self.rule_for_request(request)?;
-        if request.method() != Method::CONNECT && !rule.injections.is_empty() {
+        if request.method() != Method::CONNECT {
             return Err(AuthorizationError::Denied);
         }
+        let mode = self.authorize(request)?;
         Ok((mode, &[]))
     }
 
@@ -188,15 +185,6 @@ impl SessionPolicy {
             .get(&host)
             .filter(|rule| rule.ports.contains(&port))
             .ok_or(AuthorizationError::Denied)?;
-        if request.method() != Method::CONNECT
-            && request
-                .uri()
-                .scheme_str()
-                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"))
-            && !rule.injections.is_empty()
-        {
-            return Err(AuthorizationError::Denied);
-        }
         if request.method() == Method::CONNECT
             && rule.mode == RuleMode::Tunnel
             && !rule.paths.is_empty()
@@ -258,7 +246,6 @@ fn connect_destination<B>(request: &Request<B>) -> Result<(String, u16), Authori
 fn http_destination<B>(request: &Request<B>) -> Result<(String, u16), AuthorizationError> {
     let uri = request.uri();
     let default_port = match uri.scheme_str() {
-        Some(scheme) if scheme.eq_ignore_ascii_case("http") => 80,
         Some(scheme) if scheme.eq_ignore_ascii_case("https") => 443,
         _ => return Err(AuthorizationError::InvalidAuthority),
     };
@@ -403,61 +390,48 @@ mod tests {
         ))
     }
 
-    fn plaintext_path_policy(paths: &str) -> SessionPolicy {
-        policy(&format!(
-            "version = 1\noperation = \"create\"\n[session]\n\n[[rules]]\nhost = \"github.com\"\nmode = \"tunnel\"\nports = [80]\npaths = {paths}\n"
-        ))
-    }
-
     #[test]
-    fn ordinary_http_matches_normalized_exact_hosts_and_ports() {
-        let policy = policy_with("github.com", "tunnel", "ports = [80, 443]");
-        let cases = [
-            ("http://GitHub.com./path", Some("github.com:80"), true),
-            ("http://github.com:443/path", Some("github.com:443"), true),
-            (
-                "http://github.com:8080/path",
-                Some("github.com:8080"),
-                false,
-            ),
-            ("http://evilgithub.com/path", Some("evilgithub.com"), false),
-            (
-                "http://github.com.evil.example/path",
-                Some("github.com.evil.example"),
-                false,
-            ),
-            ("http://example.com/path", Some("example.com"), false),
-            ("http://127.1/path", Some("127.1"), false),
-            ("http://2130706433/path", Some("2130706433"), false),
-            ("http://[::1]:80/path", Some("[::1]:80"), false),
-        ];
-
-        for (uri, host, expected) in cases {
+    fn ordinary_forward_proxy_requests_are_denied_regardless_of_scheme_or_port() {
+        let policy = policy_with("github.com", "tunnel", "ports = [80, 443, 8443]");
+        for uri in [
+            "http://github.com/",
+            "http://github.com:443/",
+            "http://github.com:8080/",
+            "http://github.com:8443/",
+            "https://github.com/",
+            "https://github.com:80/",
+            "https://github.com:8443/",
+        ] {
+            let mut forward = request("GET", uri, None);
             assert_eq!(
-                policy.authorize(&request("GET", uri, host)).is_ok(),
-                expected,
-                "authorization for {uri} with Host {host:?}"
+                policy.authorize_proxy_request(&mut forward, None),
+                Err(AuthorizationError::Denied),
+                "outer forward request {uri} must require CONNECT"
             );
         }
     }
 
     #[test]
-    fn omitted_rule_ports_default_to_https_and_request_scheme_ports_are_used() {
+    fn omitted_rule_ports_default_to_443_and_connect_requires_a_configured_port() {
         let policy = policy_with("github.com", "tunnel", "");
-        assert!(
-            policy
-                .authorize(&request("GET", "https://github.com/path", None))
-                .is_ok()
+        assert_eq!(
+            policy.authorize(&request("CONNECT", "github.com:443", None)),
+            Ok(RuleMode::Tunnel)
         );
         assert_eq!(
-            policy.authorize(&request("GET", "http://github.com/path", None)),
+            policy.authorize(&request("CONNECT", "github.com:8443", None)),
+            Err(AuthorizationError::Denied)
+        );
+        assert_eq!(
+            policy.authorize(&request("GET", "https://github.com/path", None)),
             Err(AuthorizationError::Denied)
         );
     }
 
     #[test]
-    fn ordinary_http_enforces_exact_and_recursive_intercept_paths() {
+    fn intercepted_https_enforces_exact_and_recursive_paths() {
         let exact = path_policy("[\"/allowed\"]");
+        let authority = "github.com:443".parse::<Authority>().unwrap();
         let exact_cases = [
             ("https://github.com/allowed", true),
             ("https://github.com/%61llowed?ref=main", true),
@@ -477,8 +451,11 @@ mod tests {
         ];
 
         for (uri, expected) in exact_cases {
+            let mut inner = request("GET", uri, Some("github.com"));
             assert_eq!(
-                exact.authorize(&request("GET", uri, None)).is_ok(),
+                exact
+                    .authorize_inner_request(&mut inner, &authority)
+                    .is_ok(),
                 expected,
                 "exact path authorization for {uri}"
             );
@@ -495,29 +472,31 @@ mod tests {
         ];
 
         for (uri, expected) in recursive_cases {
+            let mut inner = request("GET", uri, Some("github.com"));
             assert_eq!(
-                recursive.authorize(&request("GET", uri, None)).is_ok(),
+                recursive
+                    .authorize_inner_request(&mut inner, &authority)
+                    .is_ok(),
                 expected,
                 "recursive path authorization for {uri}"
             );
         }
 
-        let plaintext = plaintext_path_policy("[\"/allowed\"]");
-        for (uri, expected) in [
-            ("http://github.com/allowed", true),
-            ("http://github.com/allowed?ref=main", true),
-            ("http://github.com/private", false),
-        ] {
+        for uri in ["http://github.com/allowed", "http://github.com:443/allowed"] {
+            let mut inner = request("GET", uri, Some("github.com"));
             assert_eq!(
-                plaintext.authorize(&request("GET", uri, None)).is_ok(),
-                expected,
-                "plaintext HTTP path authorization for {uri}"
+                exact.authorize_inner_request(&mut inner, &authority),
+                Err(AuthorizationError::InvalidAuthority),
+                "plaintext inner request {uri} must be rejected"
             );
         }
+        let tunnel_with_paths = policy(
+            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"github.com\"\nmode = \"tunnel\"\nports = [80]\npaths = [\"/allowed\"]\n",
+        );
         assert_eq!(
-            plaintext.authorize(&request("CONNECT", "github.com:80", None)),
+            tunnel_with_paths.authorize(&request("CONNECT", "github.com:80", None)),
             Err(AuthorizationError::Denied),
-            "a tunnel rule with path restrictions must not bypass them with CONNECT"
+            "a path-restricted rule cannot be bypassed with CONNECT"
         );
     }
 
@@ -535,8 +514,12 @@ mod tests {
             ("/repos/dstoc/cladding%2fprivate", false),
         ] {
             let uri = format!("https://api.github.com{path}");
+            let authority = "api.github.com:443".parse::<Authority>().unwrap();
+            let mut inner = request("GET", &uri, Some("api.github.com"));
             assert_eq!(
-                policy.authorize(&request("GET", &uri, None)).is_ok(),
+                policy
+                    .authorize_inner_request(&mut inner, &authority)
+                    .is_ok(),
                 expected,
                 "repository path authorization for {uri}"
             );
@@ -546,33 +529,72 @@ mod tests {
     #[test]
     fn forwards_the_same_canonical_path_that_the_policy_authorized() {
         let policy = path_policy("[\"/allowed\"]");
-        let mut allowed = request("GET", "https://github.com/%61llowed?ref=main", None);
+        let mut allowed = request(
+            "GET",
+            "https://github.com/%61llowed?ref=main",
+            Some("github.com"),
+        );
         assert_eq!(
-            policy.authorize_request(&mut allowed),
+            policy.authorize_inner_request(
+                &mut allowed,
+                &"github.com:443".parse::<Authority>().unwrap()
+            ),
             Ok(RuleMode::Intercept)
         );
         assert_eq!(allowed.uri().path(), "/allowed");
         assert_eq!(allowed.uri().query(), Some("ref=main"));
 
-        let mut missing_path = request("GET", "https://github.com", None);
+        let mut missing_path = request("GET", "https://github.com", Some("github.com"));
         let root = path_policy("[\"/\"]");
         assert_eq!(
-            root.authorize_request(&mut missing_path),
+            root.authorize_inner_request(
+                &mut missing_path,
+                &"github.com:443".parse::<Authority>().unwrap()
+            ),
             Ok(RuleMode::Intercept)
         );
         assert_eq!(missing_path.uri().path(), "/");
     }
 
     #[test]
-    fn rejects_plaintext_requests_for_rules_with_credential_injection() {
+    fn outer_requests_never_receive_injection_and_inner_requests_require_https() {
         let policy = policy(
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"github.com\"\nmode = \"intercept\"\nports = [443]\npaths = [\"/allowed\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n",
+            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"github.com\"\nmode = \"intercept\"\nports = [80, 443]\npaths = [\"/allowed\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n",
         );
+        for uri in [
+            "http://github.com:80/allowed",
+            "http://github.com:443/allowed",
+            "https://github.com:80/allowed",
+        ] {
+            let mut outer = request("GET", uri, None);
+            assert_eq!(
+                policy.authorize_proxy_request(&mut outer, None),
+                Err(AuthorizationError::Denied),
+                "outer request {uri} must not receive a managed credential"
+            );
+        }
+        let mut plaintext_inner =
+            request("GET", "http://github.com:80/allowed", Some("github.com:80"));
         assert_eq!(
-            policy.authorize(&request("GET", "http://github.com:443/allowed", None)),
-            Err(AuthorizationError::Denied),
-            "HTTP must not use a rule that has credential injection, regardless of port"
+            policy.authorize_inner_request_with_injections(
+                &mut plaintext_inner,
+                &"github.com:80".parse::<Authority>().unwrap()
+            ),
+            Err(AuthorizationError::InvalidAuthority)
         );
+        let mut tls_inner = request(
+            "GET",
+            "https://github.com:80/allowed",
+            Some("github.com:80"),
+        );
+        let (mode, injections) = policy
+            .authorize_inner_request_with_injections(
+                &mut tls_inner,
+                &"github.com:80".parse::<Authority>().unwrap(),
+            )
+            .expect("configured TLS on port 80 should authorize its inspected request");
+        assert_eq!(mode, RuleMode::Intercept);
+        assert_eq!(injections.len(), 1);
     }
 
     #[test]
@@ -616,9 +638,12 @@ mod tests {
     #[test]
     fn host_header_mismatch_and_duplicates_are_rejected() {
         let policy = policy_with("github.com", "intercept", "ports = [443]");
-        let mismatch = request("GET", "https://github.com/path", Some("evilgithub.com"));
+        let mut mismatch = request("GET", "https://github.com/path", Some("evilgithub.com"));
         assert_eq!(
-            policy.authorize(&mismatch),
+            policy.authorize_inner_request(
+                &mut mismatch,
+                &"github.com:443".parse::<Authority>().unwrap()
+            ),
             Err(AuthorizationError::InvalidAuthority)
         );
 
@@ -627,7 +652,10 @@ mod tests {
             .headers_mut()
             .append(HOST, "github.com".parse().expect("valid header"));
         assert_eq!(
-            policy.authorize(&duplicate),
+            policy.authorize_inner_request(
+                &mut duplicate,
+                &"github.com:443".parse::<Authority>().unwrap()
+            ),
             Err(AuthorizationError::InvalidAuthority)
         );
     }
@@ -659,6 +687,19 @@ mod tests {
 
         assert!(intercept.connect_should_intercept(&request));
         assert!(!tunnel.connect_should_intercept(&request));
+    }
+
+    #[test]
+    fn configured_tls_on_port_80_can_be_intercepted() {
+        let policy = policy_with("github.com", "intercept", "ports = [80]");
+        let policy = Arc::new(policy);
+        let handler = PolicyHandler::new(RuntimeId::new("test"), Arc::clone(&policy));
+        let connect = request("CONNECT", "github.com:80", None);
+        let authority = "github.com:80".parse::<Authority>().unwrap();
+
+        assert_eq!(policy.authorize(&connect), Ok(RuleMode::Intercept));
+        assert!(handler.connect_should_intercept(&connect));
+        assert!(policy.permits_tls_interception(&authority, Some("github.com")));
     }
 
     #[test]

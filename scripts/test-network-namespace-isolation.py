@@ -198,9 +198,15 @@ def stop_process(child: subprocess.Popen[str]) -> None:
         child.wait(timeout=3)
 
 
-def start_http_upstream(processes: list[subprocess.Popen[str]], namespace: str) -> int:
+def start_https_upstream(
+    processes: list[subprocess.Popen[str]],
+    namespace: str,
+    certificate: Path,
+    private_key: Path,
+) -> int:
     code = textwrap.dedent(
-        """\
+        f"""\
+        import ssl
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
         class Handler(BaseHTTPRequestHandler):
@@ -216,6 +222,9 @@ def start_http_upstream(processes: list[subprocess.Popen[str]], namespace: str) 
                 pass
 
         server = HTTPServer(("127.0.0.1", 0), Handler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain({str(certificate)!r}, {str(private_key)!r})
+        server.socket = context.wrap_socket(server.socket, server_side=True)
         print(server.server_port, flush=True)
         server.serve_forever()
         """
@@ -338,6 +347,7 @@ def exercise_client(
     code = textwrap.dedent(
         f'''\
         import errno
+        import ssl
         import signal
         import socket
         import sys
@@ -363,36 +373,55 @@ def exercise_client(
                     f"listener should refuse this address; got {{error!r}}"
                 )
 
-            # The same client can use the assigned Unix data socket and reach its allowed upstream.
+            # The same client can use the assigned Unix data socket and reach its allowed HTTPS upstream.
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as proxy:
                 proxy.settimeout(5)
                 proxy.connect({str(proxy_socket)!r})
-                request = (
-                    f"GET http://localhost:{upstream_port}/namespace-check HTTP/1.1\\r\\n"
+                connect_request = (
+                    f"CONNECT localhost:{upstream_port} HTTP/1.1\\r\\n"
                     f"Host: localhost:{upstream_port}\\r\\n"
-                    "Connection: close\\r\\n\\r\\n"
-                ).encode()
-                proxy.sendall(request)
-                response = bytearray()
-                while b"\\r\\n\\r\\n" not in response:
-                    chunk = proxy.recv(4096)
-                    if not chunk:
-                        raise AssertionError("proxy closed before sending HTTP headers")
-                    response.extend(chunk)
-                headers, body = bytes(response).split(b"\\r\\n\\r\\n", 1)
-                content_length = next(
-                    int(line.split(b":", 1)[1])
-                    for line in headers.split(b"\\r\\n")[1:]
-                    if line.lower().startswith(b"content-length:")
+                    "\\r\\n"
                 )
-                while len(body) < content_length:
+                proxy.sendall(connect_request.encode())
+                connect_response = bytearray()
+                while b"\\r\\n\\r\\n" not in connect_response:
                     chunk = proxy.recv(4096)
                     if not chunk:
-                        raise AssertionError("proxy closed before sending the full HTTP body")
-                    body += chunk
+                        raise AssertionError("proxy closed before sending CONNECT headers")
+                    connect_response.extend(chunk)
+                connect_headers = bytes(connect_response).split(b"\\r\\n\\r\\n", 1)[0]
+                assert b" 200 " in connect_headers.split(b"\\r\\n", 1)[0], connect_headers
+
+                tls_context = ssl.create_default_context()
+                tls_context.check_hostname = False
+                tls_context.verify_mode = ssl.CERT_NONE
+                with tls_context.wrap_socket(proxy, server_hostname="localhost") as upstream:
+                    request = (
+                        f"GET /namespace-check HTTP/1.1\\r\\n"
+                        f"Host: localhost:{upstream_port}\\r\\n"
+                        "Connection: close\\r\\n\\r\\n"
+                    )
+                    upstream.sendall(request.encode())
+                    response = bytearray()
+                    while b"\\r\\n\\r\\n" not in response:
+                        chunk = upstream.recv(4096)
+                        if not chunk:
+                            raise AssertionError("proxy closed before sending HTTPS headers")
+                        response.extend(chunk)
+                    headers, body = bytes(response).split(b"\\r\\n\\r\\n", 1)
+                    content_length = next(
+                        int(line.split(b":", 1)[1])
+                        for line in headers.split(b"\\r\\n")[1:]
+                        if line.lower().startswith(b"content-length:")
+                    )
+                    while len(body) < content_length:
+                        chunk = upstream.recv(4096)
+                        if not chunk:
+                            raise AssertionError("proxy closed before sending the full HTTPS body")
+                        body += chunk
             assert b"HTTP/1.1 200" in headers or b"HTTP/1.0 200" in headers, headers[:500]
             assert b"baffle-unix-bridge-ok" in body, body[-500:]
-            result_path.write_text("PASS: routed probe refused; Unix socket proxy returned HTTP 200\\n")
+            result_path.write_text("PASS: routed probe refused; Unix socket proxy returned HTTPS 200 through CONNECT\\n")
             signal.pause()
         except BaseException:
             result_path.write_text("FAIL\\n" + traceback.format_exc())
@@ -491,7 +520,9 @@ def main() -> None:
         if not control_socket.exists():
             fail("Baffle did not create its control socket")
 
-        upstream_port = start_http_upstream(processes, daemon_ns)
+        upstream_port = start_https_upstream(
+            processes, daemon_ns, certificate, private_key
+        )
         route_probe_port = start_route_probe(processes, daemon_ns)
         request = textwrap.dedent(
             f'''\

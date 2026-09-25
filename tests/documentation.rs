@@ -70,6 +70,17 @@ fn session_configuration_examples_parse() {
     assert_eq!(injection.header, "Authorization");
     assert_eq!(injection.secret.as_str(), "example-api");
     assert_eq!(injection.format, InjectionFormat::Bearer);
+
+    let ControlRequest::Create { session, .. } =
+        ControlRequest::from_toml(include_str!("../examples/session-port-80-tls.toml"))
+            .expect("port-80 TLS example should parse")
+    else {
+        panic!("port-80 example should create a session");
+    };
+    assert_eq!(session.rules[0].mode, RuleMode::Intercept);
+    assert_eq!(session.rules[0].ports, [80]);
+    assert_eq!(session.rules[0].paths[0].as_str(), "/v1/**");
+    assert_eq!(session.rules[0].inject[0].secret.as_str(), "example-api");
 }
 
 #[test]

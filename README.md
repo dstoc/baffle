@@ -11,13 +11,12 @@ do not match a session policy.
 
 ## Security model and limitations
 
-**Approved target policy; implementation follow-ups are pending.** Baffle will
-support HTTPS destinations only. A client must use HTTP `CONNECT` to establish
-the destination connection. Baffle will reject ordinary forward-proxy requests
-outside intercepted TLS, including absolute-form `http://` and `https://`
-requests. It will reject plaintext `http://` destinations on every port,
-including a request made after a client follows an HTTPS-to-HTTP redirect.
-Baffle does not follow redirects itself.
+**HTTPS-only request policy.** Baffle supports HTTPS destinations only. A
+client must use HTTP `CONNECT` to establish the destination connection. Baffle
+rejects ordinary forward-proxy requests outside intercepted TLS, including
+absolute-form `http://` and `https://` requests. It rejects plaintext
+`http://` destinations on every port, including a request made after a client
+follows an HTTPS-to-HTTP redirect. Baffle does not follow redirects itself.
 
 The proxy client is untrusted and may try to evade policy. Baffle assumes that
 sites on the hostname allowlist behave legitimately. That trust in an allowed
@@ -67,17 +66,12 @@ network namespace.
 Hostname and port rules are sufficient only when those names and the addresses
 they can reach are trusted for the workload.
 
-The runtime now leaves DNS and destination-address restrictions to deployment
+The runtime leaves DNS and destination-address restrictions to deployment
 controls. Existing session policies that contain `private_addresses` fail
 validation; remove that field and move any address restrictions to DNS and
-network egress policy before upgrading. Until baffle/24 is implemented, the
-runtime still accepts explicitly configured plaintext HTTP on tunnel rules and
-rejects port 80 for interception and credential-injection rules. It continues
-to reject opaque fallback when interception is required. The current behavior
-is documented in the
-[configuration reference](docs/configuration.md) and [security and deployment
-guide](docs/security-deployment.md).
-
+network egress policy before upgrading. The runtime enforces the HTTPS-only
+request boundary described above. See the [configuration reference](docs/configuration.md)
+and [security and deployment guide](docs/security-deployment.md).
 The executable is named `baffle`. The Cargo package is named `baffle-proxy`.
 The client library is the separate workspace package `baffle-client`.
 

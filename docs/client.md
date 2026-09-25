@@ -1,10 +1,5 @@
 # Rust client and direct protocol use
 
-**Current runtime behavior:** plaintext HTTP remains accepted by configured
-tunnel rules until baffle/24 lands. Baffle no longer supports
-`private_addresses`; old policies with that field fail validation and must
-move intended address restrictions to deployment DNS and network egress rules.
-
 The `baffle-client` package provides a typed asynchronous client for the v1
 Unix control protocol. It depends on Tokio, Serde, JSON, and TOML. It does not
 depend on Baffle's proxy runtime. The daemon package also re-exports it as
@@ -36,34 +31,45 @@ Ok(())
 
 The [client example](../examples/client.rs) sends CONNECT for
 `example.com:443`, reads the tunnel response, and closes the lease. It does not
-send a TLS request. For the approved target, use a client that establishes
-HTTPS with `CONNECT`; an `http://` proxy URL can still describe the local proxy
-endpoint.
+send a TLS request. Use an HTTP proxy client that establishes HTTPS with
+CONNECT. An `http://` proxy URL can describe the local proxy endpoint; it does
+not permit an `http://` origin.
 
-## Target client compatibility
+## Proxy client compatibility
 
 `baffle-client` manages the Unix control protocol. It does not send application
 traffic through the data socket or make an HTTP library use CONNECT. The
-consumer must provide an HTTP proxy client that sends CONNECT for HTTPS
-destinations. A request for an `http://` origin, including a request made
-after following a downgrade redirect, will be rejected after baffle/24. The
-client must not fall back to direct egress or plaintext HTTP when CONNECT or
-TLS fails. An `http://` proxy URL is still valid for the local proxy endpoint;
-the origin URL must use `https://`. CONNECT authority must include a port; map
-an `https://` origin with no explicit port to `:443`. Rules default to
-destination port 443, but that default does not remove the port from CONNECT
-authority. A configured TLS service on port 80 is also valid and must use
-CONNECT.
+consumer must provide an HTTP proxy client that sends CONNECT for every HTTPS
+destination. Baffle rejects ordinary forward-proxy requests with both
+`http://` and absolute-form `https://` targets. It rejects a plaintext
+`http://` destination on every port, including port 80. It does not follow
+redirects. If a client follows an HTTPS-to-HTTP downgrade, Baffle rejects the
+resulting request through the same policy.
+
+The client must not fall back to direct egress or plaintext HTTP when CONNECT
+or TLS fails. Clients that cannot disable plaintext downgrade or fallback are
+incompatible with Baffle. An `http://` proxy URL is valid for the local proxy
+endpoint; the origin URL must use `https://`. CONNECT authority must include a
+port. Map an HTTPS origin with no explicit port to `:443`. Rules default to
+destination port 443, and non-default ports must be configured explicitly.
+A configured TLS service on port 80 is valid when its rule includes port 80;
+the client must still use CONNECT.
+
+## Migration
+
+Change clients that use ordinary `http://` requests to HTTPS URLs and CONNECT,
+or remove the plaintext-only host and path rules. Keep an explicitly
+configured port-80 rule when its service uses TLS. Do not add automatic HTTPS
+upgrades. An upgrade can change origin behavior and does not make a client's
+redirect handling safe.
 
 Set `HostRule.paths` to allow exact URL paths or recursive patterns such as
 `/repos/example/project/**`. Exact rules match only the listed path. Recursive
 rules match the slash after the listed path and all descendant segments.
 Matching is case-sensitive and ignores the query string. Baffle rejects
 ambiguous encodings and forwards the same canonical path that it authorized.
-The current runtime applies path checks to plaintext HTTP and to each request
-on an intercepted HTTPS connection. The target policy applies path checks
-inside successfully intercepted TLS only. A path-restricted rule cannot
-accept an opaque HTTPS CONNECT tunnel.
+Path checks apply to each HTTP/1.1 or HTTP/2 request inside successfully
+intercepted TLS. A path-restricted rule cannot accept an opaque CONNECT tunnel.
 
 The client API does not contain an address exception. An allowlisted hostname
 can resolve to a private, loopback, link-local, metadata, or other sensitive

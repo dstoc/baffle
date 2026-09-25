@@ -5,6 +5,10 @@ use tokio::{
     net::UnixStream,
 };
 
+// This example opens a CONNECT destination through the Baffle data socket.
+// An `http://` proxy URL describes only the client-to-proxy protocol; the
+// destination request must use HTTPS. Clients that fall back to plaintext
+// HTTP or direct egress after a TLS failure are incompatible with Baffle.
 #[tokio::main]
 async fn main() -> Result<()> {
     let control_socket = std::env::var_os("BAFFLE_CONTROL_SOCKET")
@@ -43,7 +47,9 @@ async fn main() -> Result<()> {
         }
     }
     println!("Established an opaque CONNECT tunnel to {authority}.");
-    println!("If the destination uses TLS, the client must verify its certificate.");
+    println!(
+        "Use TLS for this HTTPS destination and verify its origin certificate before sending application data."
+    );
 
     drop(proxy);
     // Closing the handle drops the ephemeral control connection and releases

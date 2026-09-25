@@ -386,11 +386,6 @@ fn validate_rules(raw_rules: Vec<RawHostRule>) -> Result<Vec<HostRule>, ConfigEr
             }
         }
 
-        if raw.mode == RuleMode::Intercept && raw.ports.contains(&80) {
-            return Err(ConfigError::new(format!(
-                "{context} cannot intercept plaintext HTTP on port 80"
-            )));
-        }
         if raw.mode == RuleMode::Tunnel && !raw.inject.is_empty() {
             return Err(ConfigError::new(format!(
                 "{context} tunnel rules cannot inject headers"
@@ -422,11 +417,6 @@ fn validate_rules(raw_rules: Vec<RawHostRule>) -> Result<Vec<HostRule>, ConfigEr
             if !headers.insert(header.to_ascii_lowercase()) {
                 return Err(ConfigError::new(format!(
                     "{injection_context}.header duplicates another injected header"
-                )));
-            }
-            if raw.ports.contains(&80) {
-                return Err(ConfigError::new(format!(
-                    "{injection_context} cannot inject credentials over plaintext HTTP"
                 )));
             }
             let secret = validate_secret_id(&raw_injection.secret.0).map_err(|message| {
@@ -979,18 +969,18 @@ directory = "/var/lib/baffle/secrets"
     }
 
     #[test]
-    fn accepts_path_restrictions_for_explicit_plaintext_http_rules() {
+    fn accepts_interception_paths_and_injection_on_configured_port_80() {
         let request = ControlRequest::from_toml(
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\nports = [80]\npaths = [\"/public\"]\n",
+            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\nports = [80]\npaths = [\"/public\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n",
         )
-        .expect("plaintext HTTP path rule should parse");
+        .expect("configured TLS on port 80 should parse");
         let ControlRequest::Create { session, .. } = request else {
             panic!("expected create request");
         };
-        assert_eq!(session.rules[0].mode, RuleMode::Tunnel);
+        assert_eq!(session.rules[0].mode, RuleMode::Intercept);
         assert_eq!(session.rules[0].ports, [80]);
         assert_eq!(session.rules[0].paths[0].as_str(), "/public");
-        assert!(session.rules[0].inject.is_empty());
+        assert_eq!(session.rules[0].inject[0].secret.as_str(), "api-token");
     }
 
     #[test]
@@ -1084,10 +1074,6 @@ directory = "/var/lib/baffle/secrets"
             (
                 "injection on tunnel",
                 "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"bearer\"\n".to_string(),
-            ),
-            (
-                "plaintext interception",
-                config_with("host = \"example.com\"\nmode = \"intercept\"\nports = [80]"),
             ),
             (
                 "duplicate canonical host",

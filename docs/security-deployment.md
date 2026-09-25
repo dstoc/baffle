@@ -3,17 +3,16 @@
 This guide describes the security boundary that Baffle provides and the
 isolation that deployment must provide around it.
 
-## HTTPS destination model
+## HTTPS-only request model
 
-Baffle's target policy is HTTPS-only. Clients establish permitted destinations
-with HTTP `CONNECT`. Baffle rejects ordinary forward-proxy requests outside
-intercepted TLS, including absolute-form `http://` and `https://` requests. It
-rejects plaintext `http://` destinations on every port. Port 443 is the
-default. A configured TLS service on port 80 is valid; Baffle decides from the
-request form and scheme, not the port number. After successful TLS
-interception, Baffle continues to process HTTP/1.1 or HTTP/2 for path checks
-and credential injection. A rule that requires interception remains
-fail-closed.
+Baffle accepts destinations through HTTP `CONNECT` only. It rejects ordinary
+forward-proxy requests outside intercepted TLS, including absolute-form
+`http://` and `https://` requests. It rejects plaintext `http://` destinations
+on every port. Port 443 is the default. A configured TLS service on port 80 is
+valid; Baffle decides from the request form and scheme, not the port number.
+After successful TLS interception, Baffle processes HTTP/1.1 or HTTP/2 for
+path checks and credential injection. A rule that requires interception
+remains fail-closed.
 
 Proxy clients are untrusted and may deliberately try to evade policy. Baffle
 assumes that sites on the hostname allowlist behave legitimately. That site
@@ -43,11 +42,9 @@ destination address safe. Apply DNS policy and default-deny network egress
 rules when the threat model requires address containment. Ensure sandboxed
 clients cannot bypass Baffle or reach its internal listeners.
 
-The HTTPS-only request changes are tracked in baffle/24 and are not yet runtime
-behavior. The current implementation can still accept explicitly configured
-plaintext HTTP on tunnel rules and rejects port 80 for interception and
-credential-injection rules. It fails closed for unsupported or failed
-interception. baffle/25 removes Baffle's DNS-answer filtering. Existing
+Baffle implements HTTPS-only request admission and permits TLS on any
+configured port, including port 80. It fails closed when a rule requires
+interception. baffle/25 removed Baffle's DNS-answer filtering. Existing
 policies that contain `private_addresses` now fail validation. Operators must
 remove that field and move any required address restrictions to deployment DNS
 and network egress policy before upgrading.

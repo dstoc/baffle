@@ -249,6 +249,77 @@ async fn multiple_proxy_instances_deny_outbound_requests_and_stop_independently(
 }
 
 #[tokio::test]
+async fn outer_forward_http_and_https_requests_are_denied_before_upstream_dialing() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let session_toml = format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [80, 443, {upstream_port}]\npaths = [\"/allowed\"]\n"
+    );
+    let ControlRequest::Create { session, .. } =
+        ControlRequest::from_toml(&session_toml).expect("test session should be valid")
+    else {
+        panic!("test request should create a session");
+    };
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-forward-request-admission");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        session,
+        ca,
+        directory.path().join("forward-request-admission.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("runtime should start");
+
+    for (scheme, port) in [
+        ("http", 80),
+        ("https", 80),
+        ("http", 443),
+        ("https", 443),
+        ("http", upstream_port),
+        ("https", upstream_port),
+    ] {
+        let authority = format!("localhost:{port}");
+        let target = format!("{scheme}://{authority}/allowed");
+        let mut client = TcpStream::connect(runtime.local_addr())
+            .await
+            .expect("proxy should accept a forward-proxy connection");
+        client
+            .write_all(
+                format!("GET {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .expect("absolute-form request should be sent");
+        let mut client = BufReader::new(client);
+        let mut status = String::new();
+        timeout(Duration::from_secs(2), client.read_line(&mut status))
+            .await
+            .expect("policy response should arrive")
+            .expect("policy response should be readable");
+        assert!(
+            status.starts_with("HTTP/1.1 403") || status.starts_with("HTTP/1.0 403"),
+            "outer request {target} must be rejected: {status:?}"
+        );
+        assert!(
+            timeout(Duration::from_millis(40), upstream.accept())
+                .await
+                .is_err(),
+            "outer request {target} must be rejected before dialing upstream"
+        );
+    }
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
 async fn intercept_connect_with_unknown_payload_does_not_open_an_opaque_tunnel() {
     let directory = tempfile::tempdir().expect("test directory should be created");
     let ca = write_test_ca(directory.path());
@@ -461,6 +532,115 @@ async fn intercepted_https_dials_loopback_and_rejects_untrusted_upstream_certifi
 }
 
 #[tokio::test]
+async fn fragmented_client_hello_on_interception_rule_does_not_open_an_opaque_tunnel() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-fragmented-client-hello");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(upstream_port),
+        Arc::clone(&ca),
+        directory.path().join("fragmented-client-hello.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("intercept runtime should start");
+
+    let authority = format!("localhost:{upstream_port}");
+    let mut client = open_connect_tunnel(runtime.local_addr(), &authority)
+        .await
+        .expect("CONNECT should be accepted before TLS parsing");
+    let mut tls_client = hudsucker::rustls::ClientConnection::new(
+        tls_client_config(&ca, b"http/1.1"),
+        ServerName::try_from("localhost".to_owned()).unwrap(),
+    )
+    .expect("test TLS client should create a ClientHello");
+    let mut client_hello = Vec::new();
+    tls_client
+        .write_tls(&mut client_hello)
+        .expect("test ClientHello should serialize");
+    assert!(client_hello.len() > 4, "ClientHello should have a tail");
+
+    client
+        .write_all(&client_hello[..4])
+        .await
+        .expect("ClientHello prefix should be sent");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    client
+        .write_all(&client_hello[4..])
+        .await
+        .expect("fragmented ClientHello tail should be sent");
+    client
+        .shutdown()
+        .await
+        .expect("incomplete TLS handshake should close its write side");
+
+    let mut response = Vec::new();
+    timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+        .await
+        .expect("failed intercepted handshake should close")
+        .expect("failed intercepted handshake should close cleanly");
+    assert!(
+        timeout(Duration::from_millis(250), upstream.accept())
+            .await
+            .is_err(),
+        "fragmenting ClientHello must not select an opaque upstream tunnel"
+    );
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
+async fn configured_tls_service_on_port_80_can_be_intercepted() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-intercept-port-80");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(80),
+        Arc::clone(&ca),
+        directory.path().join("intercept-port-80.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("port-80 TLS rule should start");
+
+    let mut tls = connect_intercepted_tls(
+        runtime.local_addr(),
+        "localhost:80",
+        "localhost",
+        &ca,
+        b"http/1.1",
+    )
+    .await
+    .expect("configured TLS on port 80 should complete interception");
+    tls.write_all(b"GET /outside HTTP/1.1\r\nHost: localhost:80\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("inner request should be sent over intercepted TLS");
+    let mut tls = BufReader::new(tls);
+    let status = timeout(Duration::from_secs(2), read_http1_status(&mut tls))
+        .await
+        .expect("intercepted path policy should respond")
+        .expect("intercepted path response should be readable");
+    assert!(
+        status.starts_with("HTTP/1.1 403"),
+        "port-80 TLS requests should use the interception path policy: {status:?}"
+    );
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
 async fn intercepted_tls_rejects_missing_or_conflicting_sni_before_egress() {
     let directory = tempfile::tempdir().expect("test directory should be created");
     let ca = write_test_ca(directory.path());
@@ -540,119 +720,110 @@ async fn intercepted_tls_rejects_missing_or_conflicting_sni_before_egress() {
 }
 
 #[tokio::test]
-async fn plaintext_paths_are_canonicalized_and_rechecked_after_redirects_on_keepalive() {
+async fn redirect_responses_pass_through_and_downgrade_requests_are_rejected() {
     let directory = tempfile::tempdir().expect("test directory should be created");
     let ca = write_test_ca(directory.path());
-    let upstream_listener = TcpListener::bind("127.0.0.1:0")
+    let upstream = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test upstream should bind");
-    let upstream_port = upstream_listener.local_addr().unwrap().port();
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let session_toml = format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{upstream_port}]\n"
+    );
+    let ControlRequest::Create { session, .. } =
+        ControlRequest::from_toml(&session_toml).expect("test session should be valid")
+    else {
+        panic!("test request should create a session");
+    };
     let (event_sender, mut events) = mpsc::unbounded_channel();
-    let id = RuntimeId::new("runtime-http-path-keepalive");
+    let id = RuntimeId::new("runtime-redirect-downgrade");
     let runtime = ProxyRuntime::start(
         id.clone(),
-        intercept_session_config(upstream_port),
+        session,
         ca,
-        directory.path().join("http-path-keepalive.sock"),
+        directory.path().join("redirect-downgrade.sock"),
         4,
         event_sender,
     )
     .await
-    .expect("intercept runtime should start");
+    .expect("runtime should start");
 
     let authority = format!("localhost:{upstream_port}");
-    let mut client = BufReader::new(
-        TcpStream::connect(runtime.local_addr())
-            .await
-            .expect("proxy should accept plaintext HTTP"),
-    );
+    let mut client = open_connect_tunnel(runtime.local_addr(), &authority)
+        .await
+        .expect("authorized CONNECT should open an opaque tunnel");
     client
-        .get_mut()
+        .write_all(b"PING")
+        .await
+        .expect("opaque tunnel payload should trigger its upstream connection");
+    let (mut origin, _) = timeout(Duration::from_secs(2), upstream.accept())
+        .await
+        .expect("CONNECT should reach the configured origin")
+        .expect("origin should accept the tunnel");
+    let location = format!("http://{authority}/downgrade");
+    origin
         .write_all(
             format!(
-                "GET http://{authority}/%61llowed?ref=main HTTP/1.1\r\nHost: {authority}\r\nConnection: keep-alive\r\n\r\n"
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             )
             .as_bytes(),
         )
         .await
-        .expect("allowed request should be sent");
-
-    let (upstream_stream, _) = timeout(Duration::from_secs(2), upstream_listener.accept())
+        .expect("origin redirect should be sent");
+    origin
+        .shutdown()
         .await
-        .expect("allowed request should reach the upstream")
-        .expect("upstream connection should be accepted");
-    let mut upstream = BufReader::new(upstream_stream);
-    let mut request_line = String::new();
-    timeout(
-        Duration::from_secs(2),
-        upstream.read_line(&mut request_line),
-    )
-    .await
-    .expect("upstream request target should arrive")
-    .expect("upstream request target should be readable");
-    assert_eq!(
-        request_line, "GET /allowed?ref=main HTTP/1.1\r\n",
-        "upstream must receive the exact canonical path that policy checked"
-    );
-    loop {
-        let mut header = String::new();
-        timeout(Duration::from_secs(2), upstream.read_line(&mut header))
-            .await
-            .expect("upstream request headers should arrive")
-            .expect("upstream request headers should be readable");
-        if header == "\r\n" {
-            break;
-        }
-    }
-    upstream
-        .get_mut()
-        .write_all(
-            b"HTTP/1.1 302 Found\r\nLocation: /outside\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n",
-        )
+        .expect("origin response should close");
+    client
+        .shutdown()
         .await
-        .expect("upstream redirect should be sent");
-    let first_response = timeout(Duration::from_secs(2), read_http1_status(&mut client))
+        .expect("CONNECT request side should close");
+    let mut response = Vec::new();
+    timeout(Duration::from_secs(2), client.read_to_end(&mut response))
         .await
         .expect("redirect response should reach the client")
         .expect("redirect response should be readable");
     assert!(
-        first_response.starts_with("HTTP/1.1 302"),
-        "{first_response:?}"
+        response.starts_with(b"HTTP/1.1 302 Found\r\n"),
+        "Baffle should return the origin redirect unchanged: {response:?}"
+    );
+    assert!(
+        response
+            .windows(location.len())
+            .any(|window| window == location.as_bytes()),
+        "redirect Location should reach the client unchanged"
     );
 
-    client
-        .get_mut()
+    let mut downgrade = TcpStream::connect(runtime.local_addr())
+        .await
+        .expect("proxy should accept the client's redirected request");
+    downgrade
         .write_all(
-            format!(
-                "GET http://{authority}/outside HTTP/1.1\r\nHost: {authority}\r\nConnection: keep-alive\r\n\r\n"
-            )
-            .as_bytes(),
+            format!("GET {location} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
         )
         .await
-        .expect("redirect follow-up request should be sent on the reused connection");
-    let denied_response = timeout(Duration::from_secs(2), read_http1_status(&mut client))
-        .await
-        .expect("redirect follow-up should receive a policy response")
-        .expect("redirect follow-up response should be readable");
+        .expect("client downgrade request should be sent");
+    let mut downgrade = BufReader::new(downgrade);
+    let mut denied_response = String::new();
+    timeout(
+        Duration::from_secs(2),
+        downgrade.read_line(&mut denied_response),
+    )
+    .await
+    .expect("downgrade policy response should arrive")
+    .expect("downgrade policy response should be readable");
     assert!(
         denied_response.starts_with("HTTP/1.1 403"),
-        "{denied_response:?}"
+        "client-followed plaintext downgrade must be rejected: {denied_response:?}"
     );
-
-    let unexpected_upstream_request = timeout(Duration::from_millis(200), async {
-        let mut next_line = String::new();
-        tokio::select! {
-            result = upstream.read_line(&mut next_line) => result.map(|_| "reused upstream connection"),
-            result = upstream_listener.accept() => result.map(|_| "new upstream connection"),
-        }
-    })
-    .await;
     assert!(
-        unexpected_upstream_request.is_err(),
-        "a redirected request outside the path allowlist must not reach upstream"
+        timeout(Duration::from_millis(200), upstream.accept())
+            .await
+            .is_err(),
+        "client-followed plaintext downgrade must not reach upstream"
     );
 
-    drop(client);
     runtime.shutdown(Duration::from_secs(2)).await;
     assert_exit(&mut events, &id).await;
 }
@@ -666,11 +837,11 @@ async fn malformed_and_encoded_path_targets_are_rejected_before_upstream() {
         .expect("test upstream should bind");
     let upstream_port = upstream.local_addr().unwrap().port();
     let (event_sender, mut events) = mpsc::unbounded_channel();
-    let id = RuntimeId::new("runtime-http-malformed-path");
+    let id = RuntimeId::new("runtime-intercept-malformed-path");
     let runtime = ProxyRuntime::start(
         id.clone(),
         intercept_session_config(upstream_port),
-        ca,
+        Arc::clone(&ca),
         directory.path().join("http-malformed-path.sock"),
         4,
         event_sender,
@@ -686,19 +857,24 @@ async fn malformed_and_encoded_path_targets_are_rejected_before_upstream() {
         "/%2e%2e/allowed",
         "/allowed%2",
     ] {
-        let mut client = TcpStream::connect(runtime.local_addr())
-            .await
-            .expect("proxy should accept request connection");
-        let request = format!(
-            "GET http://{authority}{path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
-        );
+        let mut client = connect_intercepted_tls(
+            runtime.local_addr(),
+            &authority,
+            "localhost",
+            &ca,
+            b"http/1.1",
+        )
+        .await
+        .expect("matching SNI should establish intercepted TLS");
         client
-            .write_all(request.as_bytes())
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
             .await
-            .expect("malformed target should be sent");
+            .expect("malformed target should be sent inside TLS");
         let mut reader = BufReader::new(client);
-        let mut response = String::new();
-        timeout(Duration::from_secs(2), reader.read_line(&mut response))
+        let response = timeout(Duration::from_secs(2), read_http1_status(&mut reader))
             .await
             .expect("proxy should reject the request target")
             .expect("rejection response should be readable");
@@ -1094,9 +1270,8 @@ async fn unauthorized_ip_literal_is_rejected_before_an_upstream_connection() {
     let mut stream = TcpStream::connect(runtime.local_addr())
         .await
         .expect("proxy listener should accept connections");
-    let request = format!(
-        "GET http://{upstream_address}/ HTTP/1.1\r\nHost: {upstream_address}\r\nConnection: close\r\n\r\n"
-    );
+    let request =
+        format!("CONNECT {upstream_address} HTTP/1.1\r\nHost: {upstream_address}\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .await
@@ -1123,7 +1298,7 @@ async fn unauthorized_ip_literal_is_rejected_before_an_upstream_connection() {
 }
 
 #[tokio::test]
-async fn http_and_connect_use_default_connectors_for_an_authorized_loopback_host() {
+async fn forward_requests_are_denied_but_connect_can_use_an_authorized_destination() {
     let directory = tempfile::tempdir().expect("test directory should be created");
     let ca = write_test_ca(directory.path());
     let upstream = TcpListener::bind("127.0.0.1:0")
@@ -1146,50 +1321,9 @@ async fn http_and_connect_use_default_connectors_for_an_authorized_loopback_host
     .await
     .expect("runtime should start");
 
-    let upstream_task = tokio::spawn(async move {
-        let (mut http, _) = upstream
-            .accept()
-            .await
-            .expect("authorized HTTP request should reach upstream");
-        let mut request = Vec::new();
-        let mut chunk = [0; 1024];
-        loop {
-            let count = http
-                .read(&mut chunk)
-                .await
-                .expect("upstream request should be readable");
-            assert_ne!(count, 0, "upstream should receive an HTTP request");
-            request.extend_from_slice(&chunk[..count]);
-            if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-        }
-        assert!(request.starts_with(b"GET / HTTP/1.1"));
-        http.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-            .await
-            .expect("HTTP response should reach the proxy");
-        http.shutdown()
-            .await
-            .expect("HTTP upstream should close cleanly");
-
-        let (mut tunnel, _) = upstream
-            .accept()
-            .await
-            .expect("authorized CONNECT should reach upstream");
-        let mut payload = [0; 4];
-        tunnel
-            .read_exact(&mut payload)
-            .await
-            .expect("CONNECT payload should reach upstream");
-        tunnel
-            .write_all(&payload)
-            .await
-            .expect("CONNECT response should reach the proxy");
-    });
-
     let mut http_client = TcpStream::connect(runtime.local_addr())
         .await
-        .expect("proxy should accept HTTP");
+        .expect("proxy should accept a forward-proxy request");
     http_client
         .write_all(
             format!(
@@ -1207,52 +1341,39 @@ async fn http_and_connect_use_default_connectors_for_an_authorized_loopback_host
     .await
     .expect("HTTP response should arrive")
     .expect("HTTP response should be readable");
-    assert!(http_response.windows(6).any(|window| window == b"200 OK"));
-    assert!(http_response.ends_with(b"ok"));
-
-    let mut connect_client = TcpStream::connect(runtime.local_addr())
-        .await
-        .expect("proxy should accept CONNECT");
-    connect_client
-        .write_all(
-            format!(
-                "CONNECT localhost:{upstream_port} HTTP/1.1\r\nHost: localhost:{upstream_port}\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await
-        .expect("CONNECT request should be sent");
-    let mut connect_client = BufReader::new(connect_client);
-    let mut status = String::new();
-    timeout(
-        Duration::from_secs(3),
-        connect_client.read_line(&mut status),
-    )
-    .await
-    .expect("CONNECT response should arrive")
-    .expect("CONNECT status should be readable");
     assert!(
-        status.starts_with("HTTP/1.1 200"),
-        "unexpected response: {status:?}"
+        http_response.starts_with(b"HTTP/1.1 403"),
+        "absolute-form HTTP must be rejected: {http_response:?}"
     );
-    loop {
-        let mut header = String::new();
-        timeout(
-            Duration::from_secs(3),
-            connect_client.read_line(&mut header),
-        )
-        .await
-        .expect("CONNECT headers should arrive")
-        .expect("CONNECT header should be readable");
-        if header == "\r\n" || header.is_empty() {
-            break;
-        }
-    }
+    assert!(
+        timeout(Duration::from_millis(100), upstream.accept())
+            .await
+            .is_err(),
+        "denied HTTP request must not reach the upstream"
+    );
+
+    let mut connect_client =
+        open_connect_tunnel(runtime.local_addr(), &format!("localhost:{upstream_port}"))
+            .await
+            .expect("configured CONNECT should be accepted");
     connect_client
-        .get_mut()
         .write_all(b"ping")
         .await
         .expect("CONNECT payload should be sent");
+    let (mut tunnel, _) = timeout(Duration::from_secs(3), upstream.accept())
+        .await
+        .expect("authorized CONNECT should reach upstream")
+        .expect("upstream should accept CONNECT");
+    let mut payload = [0; 4];
+    timeout(Duration::from_secs(3), tunnel.read_exact(&mut payload))
+        .await
+        .expect("CONNECT payload should reach upstream")
+        .expect("CONNECT payload should be readable");
+    assert_eq!(&payload, b"ping");
+    tunnel
+        .write_all(&payload)
+        .await
+        .expect("CONNECT response should reach the proxy");
     let mut echoed = [0; 4];
     timeout(
         Duration::from_secs(3),
@@ -1265,13 +1386,10 @@ async fn http_and_connect_use_default_connectors_for_an_authorized_loopback_host
 
     runtime.shutdown(Duration::from_secs(2)).await;
     assert_exit(&mut events, &id).await;
-    upstream_task
-        .await
-        .expect("upstream task should complete successfully");
 }
 
 #[tokio::test]
-async fn websocket_uses_default_connector_and_denies_unapproved_port_before_dialing() {
+async fn websocket_forward_requests_are_denied_before_dialing() {
     let directory = tempfile::tempdir().expect("test directory should be created");
     let ca = write_test_ca(directory.path());
     let authorized_upstream = TcpListener::bind("127.0.0.1:0")
@@ -1341,25 +1459,20 @@ async fn websocket_uses_default_connector_and_denies_unapproved_port_before_dial
         .await
         .expect("authorized WebSocket request should be sent");
     let mut authorized_response = BufReader::new(authorized_client);
-    let authorized_status = read_http1_status(&mut authorized_response)
+    let configured_status = read_http1_status(&mut authorized_response)
         .await
         .expect("authorized response should be readable");
     assert!(
-        authorized_status.starts_with("HTTP/1.1 101"),
-        "authorized WebSocket request should upgrade: {authorized_status:?}"
+        configured_status.starts_with("HTTP/1.1 403")
+            || configured_status.starts_with("HTTP/1.0 403"),
+        "plaintext WebSocket requests must be denied outside intercepted TLS: {configured_status:?}"
     );
-
-    let (upstream_stream, _) = timeout(Duration::from_secs(3), authorized_upstream.accept())
-        .await
-        .expect("authorized WebSocket should dial the upstream")
-        .expect("authorized upstream should accept the connection");
-    timeout(
-        Duration::from_secs(3),
-        hudsucker::tokio_tungstenite::accept_async(upstream_stream),
-    )
-    .await
-    .expect("WebSocket handshake should reach the authorized upstream")
-    .expect("authorized upstream should complete the WebSocket handshake");
+    assert!(
+        timeout(Duration::from_millis(200), authorized_upstream.accept())
+            .await
+            .is_err(),
+        "a configured plaintext WebSocket destination must not receive an upstream connection"
+    );
 
     runtime.shutdown(Duration::from_secs(2)).await;
     assert_exit(&mut events, &id).await;

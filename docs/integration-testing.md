@@ -3,24 +3,23 @@
 This table describes the current implementation and its regression tests.
 baffle/25 removed application-level destination-IP filtering and its
 classification tests. The deployment-egress policy is documented in the
-[security guide](security-deployment.md). The HTTPS-only request change is
-tracked separately in baffle/24.
+[security guide](security-deployment.md). Baffle also enforces HTTPS-only
+request admission and fail-closed interception.
 
-baffle/24 must add a deliberate fragmented-ClientHello attempt and prove that
-it cannot obtain an opaque tunnel on an interception-required rule. It must
-also retain checks for unsupported CONNECT data, malformed TLS, authority
-binding, credential isolation, and per-request path checks on reused
-HTTP/1.1 and HTTP/2 connections.
+The suite checks that a fragmented ClientHello cannot obtain an opaque tunnel
+on an interception-required rule. It also checks unsupported CONNECT data,
+malformed TLS, authority binding, credential isolation, and per-request path
+checks on reused HTTP/1.1 and HTTP/2 connections.
 
 The Rust and Python tests run in `.github/workflows/ci.yml` on `ubuntu-latest`. CI also compiles all Rust examples, parses the checked-in daemon and session TOML examples, and runs the Rust suite in debug and release profiles. The tagged release workflow builds and packages the optimized Linux binary.
 
 | Area | Coverage |
 | --- | --- |
 | Control protocol and session lifecycle | `tests/control_protocol.rs`, `tests/client.rs`, `tests/daemon_lifecycle.rs`: framing errors, failed provisioning rollback, leases, persistent sessions, independent sessions, capacity, graceful shutdown, and crash recovery. |
-| Proxy policy and TLS | `tests/proxy_runtime.rs`: unauthorized destinations and IP literals, exact host and port checks, default connector dialing to an authorized loopback host, upstream TLS verification, path normalization, redirects, unsupported CONNECT payloads, malformed TLS, SNI mismatch, HTTP/2 authority and scheme checks, and established connections after revocation. |
+| Proxy policy and TLS | `tests/proxy_runtime.rs`: non-CONNECT HTTP and HTTPS rejection before dialing, configured TLS on port 80, authorized CONNECT dialing, upstream TLS verification, intercepted path checks, unchanged redirects and rejected downgrades, unsupported CONNECT payloads, fragmented and malformed ClientHello data, SNI mismatch, HTTP/2 authority and scheme checks, and established connections after revocation. |
 | Secret handling | `src/secrets.rs`, `src/proxy_runtime.rs`, and `src/control.rs`: entitlement checks, redaction, supported authorization formats, host/path/port/scheme/authority boundaries, and WebSocket rejection. |
 | Runtime resilience | `src/proxy_runtime.rs`, `src/control.rs`, `tests/daemon_lifecycle.rs`: connection and provisioning limits, I/O timeouts, task failures, bounded shutdown, and socket cleanup. |
-| Documentation examples | `tests/documentation.rs`: parses the daemon, session, credential, list, and stop TOML examples using the public configuration types. `cargo check --examples` compiles the Rust client and `socat` examples. Live upstream requests are not part of CI. |
+| Documentation examples | `tests/documentation.rs`: parses the daemon, session, credential, port-80 TLS, list, and stop TOML examples using the public configuration types. `cargo check --examples` compiles the Rust client and `socat` examples. Live upstream requests are not part of CI. |
 
 The unit suite exercises policy and peer credentials. The Linux process tests
 exercise the assembled daemon and Unix sockets.
