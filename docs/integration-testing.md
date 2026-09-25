@@ -18,7 +18,7 @@ Run the deployment confinement check as root after starting Baffle with at least
 sudo scripts/check-network-namespace-isolation.py "$BAFFLE_PID" "$SANDBOX_CLIENT_PID"
 ```
 
-The check requires `nsenter`, `ss`, and Python 3. It confirms that Baffle and the client use different network namespaces, finds the TCP listeners owned by the Baffle process, verifies that they bind only to loopback, and attempts to connect to each listener from the client's namespace. A timeout is an inconclusive result and fails the check. Requests through the assigned Unix socket bridge must still work as part of the deployment smoke test.
+The check requires `nsenter`, `ss`, and Python 3. It confirms that Baffle and the client use different network namespaces, finds the TCP listeners owned by the Baffle process, and verifies that they bind only to loopback. It does not attempt a TCP connection: `127.0.0.1` or `::1` inside the client namespace addresses the client's own loopback, not Baffle's. The measured invariants establish that these loopback listeners are confined from a client in the separate namespace. Requests through the assigned Unix socket bridge must still work as part of the deployment smoke test.
 
 The automated suite does not create network namespaces. This runner could not perform the deployment check because `unshare --net true` failed with `Operation not permitted`; run the command above in the intended deployment environment to record its result.
 
