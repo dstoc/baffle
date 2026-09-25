@@ -2,6 +2,7 @@ use crate::{
     HttpContext,
     HttpHandler,
     RequestOrResponse,
+    TlsInterception,
     WebSocketContext,
     WebSocketHandler,
     body::Body,
@@ -83,6 +84,7 @@ pub(crate) struct InternalProxy<C, CA, H, W> {
     pub websocket_connector: Option<Connector>,
     pub tcp_connector: Arc<dyn TcpConnector>,
     pub client_addr: SocketAddr,
+    pub connect_authority: Option<Authority>,
 }
 
 impl<C, CA, H, W> Clone for InternalProxy<C, CA, H, W>
@@ -101,6 +103,7 @@ where
             websocket_connector: self.websocket_connector.clone(),
             tcp_connector: Arc::clone(&self.tcp_connector),
             client_addr: self.client_addr,
+            connect_authority: self.connect_authority.clone(),
         }
     }
 }
@@ -115,6 +118,7 @@ where
     fn context(&self) -> HttpContext {
         HttpContext {
             client_addr: self.client_addr,
+            connect_authority: self.connect_authority.clone(),
         }
     }
 
@@ -201,20 +205,7 @@ where
                                 .should_intercept_connect(&self.context(), &req)
                                 .await
                             {
-                                if buffer == *b"GET " {
-                                    if let Err(e) = self
-                                        .serve_stream(
-                                            TokioIo::new(upgraded),
-                                            Scheme::HTTP,
-                                            authority,
-                                        )
-                                        .await
-                                    {
-                                        error!(error = &e, "WebSocket connect error");
-                                    }
-
-                                    return;
-                                } else if buffer[..2] == *b"\x16\x03" {
+                                if buffer[..2] == *b"\x16\x03" {
                                     let upgraded = Tee::new(upgraded);
 
                                     let start = match LazyConfigAcceptor::new(
@@ -233,13 +224,48 @@ where
                                         }
                                     };
 
-                                    if !self
+                                    let client_hello = start.client_hello();
+                                    let Some(server_name) =
+                                        client_hello.server_name()
+                                    else {
+                                        warn!("Rejected intercepted TLS without SNI");
+                                        return;
+                                    };
+                                    if !tls_server_name_matches(&authority, server_name) {
+                                        warn!(
+                                            %authority,
+                                            server_name,
+                                            "Rejected intercepted TLS with conflicting SNI"
+                                        );
+                                        return;
+                                    }
+                                    let server_authority = match Authority::try_from(server_name) {
+                                        Ok(authority) => authority,
+                                        Err(_) => {
+                                            warn!(server_name, "Rejected malformed TLS SNI");
+                                            return;
+                                        }
+                                    };
+                                    match self
                                         .http_handler
-                                        .should_intercept_tls(&self.context(), start.client_hello())
+                                        .should_intercept_tls(
+                                            &self.context(),
+                                            &authority,
+                                            client_hello,
+                                        )
                                         .await
                                     {
-                                        let mut server =
-                                            match self.tcp_connector.connect(authority.clone()).await {
+                                        TlsInterception::Intercept => {}
+                                        TlsInterception::Reject => {
+                                            warn!(%authority, "Rejected TLS interception negotiation");
+                                            return;
+                                        }
+                                        TlsInterception::Tunnel => {
+                                            let mut server = match self
+                                                .tcp_connector
+                                                .connect(authority.clone())
+                                                .await
+                                            {
                                                 Ok(server) => server,
                                                 Err(e) => {
                                                     error!(
@@ -249,32 +275,24 @@ where
                                                     return;
                                                 }
                                             };
-
-                                        if let Err(e) = tokio::io::copy_bidirectional(
-                                            &mut start.io.rewind(),
-                                            &mut server,
-                                        )
-                                        .await
-                                        {
-                                            error!(
-                                                error = &e as &dyn StdError,
-                                                "Failed to tunnel to {}", authority
-                                            );
+                                            if let Err(e) = tokio::io::copy_bidirectional(
+                                                &mut start.io.rewind(),
+                                                &mut server,
+                                            )
+                                            .await
+                                            {
+                                                error!(
+                                                    error = &e as &dyn StdError,
+                                                    "Failed to tunnel to {}", authority
+                                                );
+                                            }
+                                            return;
                                         }
-
-                                        return;
                                     }
 
                                     let server_config = self
                                         .ca
-                                        .gen_server_config(
-                                            start
-                                                .client_hello()
-                                                .server_name()
-                                                .and_then(|name| Authority::try_from(name).ok())
-                                                .as_ref()
-                                                .unwrap_or(&authority),
-                                        )
+                                        .gen_server_config(&server_authority)
                                         .instrument(info_span!("gen_server_config"))
                                         .await;
 
@@ -471,7 +489,7 @@ where
 
     #[instrument(skip_all)]
     async fn serve_stream<I>(
-        self,
+        mut self,
         stream: I,
         scheme: Scheme,
         authority: Authority,
@@ -479,6 +497,7 @@ where
     where
         I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
     {
+        self.connect_authority = Some(authority.clone());
         let service = service_fn(|mut req| {
             if req.version() == hyper::Version::HTTP_10 || req.version() == hyper::Version::HTTP_11
             {
@@ -501,6 +520,14 @@ where
             .serve_connection_with_upgrades(stream, service)
             .await
     }
+}
+
+fn tls_server_name_matches(authority: &Authority, server_name: &str) -> bool {
+    let authority_host = authority.host().trim_end_matches('.');
+    let server_name = server_name.trim_end_matches('.');
+    !authority_host.is_empty()
+        && !server_name.is_empty()
+        && authority_host.eq_ignore_ascii_case(server_name)
 }
 
 fn spawn_message_forwarder(
@@ -553,6 +580,7 @@ mod tests {
             websocket_connector: None,
             tcp_connector: Arc::new(super::tcp::DirectTcpConnector),
             client_addr: "127.0.0.1:8080".parse().unwrap(),
+            connect_authority: None,
         }
     }
 

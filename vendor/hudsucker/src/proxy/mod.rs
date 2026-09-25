@@ -167,6 +167,7 @@ where
                                     websocket_connector: websocket_connector.clone(),
                                     tcp_connector: Arc::clone(&tcp_connector),
                                     client_addr,
+                                    connect_authority: None,
                                 }
                                 .proxy(req)
                             }),

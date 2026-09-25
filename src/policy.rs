@@ -6,7 +6,7 @@ use std::{
 };
 
 use hudsucker::hyper::{
-    Method, Request,
+    Method, Request, Version,
     header::{HOST, HeaderMap},
     http::uri::Authority,
 };
@@ -84,6 +84,51 @@ impl SessionPolicy {
         }
 
         Ok(rule.mode)
+    }
+
+    /// Authorize an HTTP request carried by an intercepted CONNECT stream.
+    /// The inner authority must remain bound to the original CONNECT target.
+    pub(crate) fn authorize_inner<B>(
+        &self,
+        request: &Request<B>,
+        connect_authority: &Authority,
+    ) -> Result<RuleMode, AuthorizationError> {
+        if request.method() == Method::CONNECT {
+            return Err(AuthorizationError::InvalidAuthority);
+        }
+        if matches!(request.version(), Version::HTTP_10 | Version::HTTP_11)
+            && !request.headers().contains_key(HOST)
+        {
+            return Err(AuthorizationError::InvalidAuthority);
+        }
+
+        let expected = parse_authority(connect_authority, None)?;
+        let actual = http_destination(request)?;
+        if actual != expected {
+            return Err(AuthorizationError::InvalidAuthority);
+        }
+        self.authorize(request)
+    }
+
+    /// Check that an intercepted CONNECT uses a policy-authorized SNI name
+    /// that identifies the same host as the CONNECT authority.
+    pub(crate) fn permits_tls_interception(
+        &self,
+        connect_authority: &Authority,
+        server_name: Option<&str>,
+    ) -> bool {
+        let Ok((connect_host, port)) = parse_authority(connect_authority, None) else {
+            return false;
+        };
+        let Some(server_name) = server_name.and_then(normalize_dns_name) else {
+            return false;
+        };
+        if server_name != connect_host {
+            return false;
+        }
+        self.rules
+            .get(&connect_host)
+            .is_some_and(|rule| rule.mode == RuleMode::Intercept && rule.ports.contains(&port))
     }
 
     /// Return whether a non-public DNS answer is explicitly permitted by this
@@ -462,6 +507,86 @@ mod tests {
 
         assert!(intercept.connect_should_intercept(&request));
         assert!(!tunnel.connect_should_intercept(&request));
+    }
+
+    #[test]
+    fn intercepted_tls_requires_matching_sni_and_intercept_policy() {
+        let intercept = policy_with("github.com", "intercept", "ports = [443]");
+        let tunnel = policy_with("github.com", "tunnel", "ports = [443]");
+        let authority = "github.com:443".parse::<Authority>().unwrap();
+
+        assert!(intercept.permits_tls_interception(&authority, Some("github.com")));
+        assert!(intercept.permits_tls_interception(&authority, Some("GITHUB.COM.")));
+        assert!(!intercept.permits_tls_interception(&authority, None));
+        assert!(!intercept.permits_tls_interception(&authority, Some("other.example")));
+        assert!(!tunnel.permits_tls_interception(&authority, Some("github.com")));
+    }
+
+    #[test]
+    fn inner_http_authority_stays_bound_for_http1_and_http2() {
+        let policy = policy(
+            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"github.com\"\nmode = \"intercept\"\nports = [443]\n\n[[rules]]\nhost = \"example.org\"\nmode = \"intercept\"\nports = [443]\n",
+        );
+        let connect_authority = "github.com:443".parse::<Authority>().unwrap();
+
+        let http1 = Request::builder()
+            .method("GET")
+            .version(Version::HTTP_11)
+            .uri("https://github.com/allowed")
+            .header(HOST, "github.com")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            policy.authorize_inner(&http1, &connect_authority),
+            Ok(RuleMode::Intercept)
+        );
+
+        let http2 = Request::builder()
+            .method("GET")
+            .version(Version::HTTP_2)
+            .uri("https://github.com/allowed")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            policy.authorize_inner(&http2, &connect_authority),
+            Ok(RuleMode::Intercept),
+            "HTTP/2 :authority must match the CONNECT destination"
+        );
+
+        let missing_http1_host = Request::builder()
+            .method("GET")
+            .version(Version::HTTP_11)
+            .uri("https://github.com/allowed")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            policy.authorize_inner(&missing_http1_host, &connect_authority),
+            Err(AuthorizationError::InvalidAuthority)
+        );
+
+        let conflicting_http1 = Request::builder()
+            .method("GET")
+            .version(Version::HTTP_11)
+            .uri("https://github.com/allowed")
+            .header(HOST, "example.org")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            policy.authorize_inner(&conflicting_http1, &connect_authority),
+            Err(AuthorizationError::InvalidAuthority)
+        );
+
+        let conflicting_http2 = Request::builder()
+            .method("GET")
+            .version(Version::HTTP_2)
+            .uri("https://example.org/allowed")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            policy.authorize_inner(&conflicting_http2, &connect_authority),
+            Err(AuthorizationError::InvalidAuthority),
+            "HTTP/2 :authority must not change the CONNECT destination"
+        );
     }
 
     #[test]
