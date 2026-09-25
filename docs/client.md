@@ -30,9 +30,19 @@ Ok(())
 ```
 
 The [client example](../examples/client.rs) sends an HTTP proxy request through
-the returned Unix socket, reads the response, and closes the lease. The daemon
-currently denies outbound requests while policy enforcement is incomplete, so
-the example may print an HTTP 403 response.
+the returned Unix socket, reads the response, and closes the lease. The request
+is forwarded only when the session policy allows its host and destination port.
+
+Use `with_private_address` to allow one exact non-public DNS answer for a host.
+The exception applies only to that rule's ports. Other non-public DNS answers
+remain denied.
+
+```rust
+let policy = SessionConfig::new().with_rule(
+    HostRule::tunnel("internal.example")
+        .with_private_address("10.20.30.40"),
+);
+```
 
 Cladding or another orchestrator should own the `Client` and ephemeral session
 outside the sandbox. It can expose the returned data socket to that workload
@@ -78,6 +88,12 @@ persistent = false
 host = "crates.io"
 mode = "tunnel"
 ports = [443]
+
+[[rules]]
+host = "internal.example"
+mode = "tunnel"
+ports = [8443]
+private_addresses = ["10.20.30.40"]
 ```
 
 The response contains `result.id`, `result.socket`, and `result.persistent`.
