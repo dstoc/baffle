@@ -17,7 +17,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio_rustls::rustls::{ClientConfig, crypto::CryptoProvider};
+use tokio_rustls::rustls::{ClientConfig, RootCertStore, crypto::CryptoProvider};
 use tokio_tungstenite::Connector;
 
 #[derive(Debug, Error)]
@@ -131,12 +131,34 @@ impl<CA> ProxyBuilder<WantsClient<CA>> {
         provider: CryptoProvider,
     ) -> ProxyBuilder<WantsHandlers<CA, impl Connect + Clone, NoopHandler, NoopHandler, Pending<()>>>
     {
+        self.with_rustls_connector_with_roots(provider, None)
+    }
+
+    /// Use a hyper-rustls connector with an optional explicit trust store.
+    ///
+    /// `None` preserves the default WebPKI roots. A supplied store replaces
+    /// those roots. Baffle uses this only in its integration-test build to
+    /// trust the local upstream fixture CA.
+    #[cfg(feature = "rustls-client")]
+    pub fn with_rustls_connector_with_roots(
+        self,
+        provider: CryptoProvider,
+        roots: Option<RootCertStore>,
+    ) -> ProxyBuilder<WantsHandlers<CA, impl Connect + Clone, NoopHandler, NoopHandler, Pending<()>>>
+    {
         use hyper_rustls::ConfigBuilderExt;
 
         let rustls_config = match ClientConfig::builder_with_provider(Arc::new(provider))
             .with_safe_default_protocol_versions()
+            .map(|builder| {
+                let builder = match roots {
+                    Some(roots) => builder.with_root_certificates(roots),
+                    None => builder.with_webpki_roots(),
+                };
+                builder.with_no_client_auth()
+            })
         {
-            Ok(config) => config.with_webpki_roots().with_no_client_auth(),
+            Ok(config) => config,
             Err(e) => {
                 return ProxyBuilder(WantsHandlers {
                     al: self.0.al,

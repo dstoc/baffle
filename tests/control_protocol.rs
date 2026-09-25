@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hudsucker::rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
+use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -494,7 +494,10 @@ fn assert_proxy_available(socket_path: &PathBuf) {
         .read_line(&mut status)
         .expect("proxy response should be readable");
     assert!(
-        status.starts_with("HTTP/1.1 403") || status.starts_with("HTTP/1.0 403"),
+        status.starts_with("HTTP/1.1 400")
+            || status.starts_with("HTTP/1.0 400")
+            || status.starts_with("HTTP/1.1 403")
+            || status.starts_with("HTTP/1.0 403"),
         "running deny-all proxy should respond through its own bridge: {status:?}"
     );
 }

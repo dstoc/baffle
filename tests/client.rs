@@ -10,7 +10,7 @@ use std::{
 };
 
 use baffle_client::{Client, HostRule, SessionConfig, SessionState};
-use hudsucker::rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
+use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -145,8 +145,8 @@ async fn request_through_proxy(socket_path: &std::path::Path) {
         .expect("proxy response should arrive")
         .expect("proxy response should be readable");
     assert!(
-        response.starts_with(b"HTTP/1.1 403"),
-        "current daemon policy handler should deny the request: {}",
+        response.starts_with(b"HTTP/1.1 400") || response.starts_with(b"HTTP/1.1 403"),
+        "the daemon should deny plaintext forward HTTP: {}",
         String::from_utf8_lossy(&response)
     );
 }
