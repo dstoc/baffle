@@ -64,6 +64,17 @@ impl ProxyRuntime {
 #[cfg(test)]
 mod tests {
     use super::ProxyRuntimeError;
+    use rama::{
+        io::peek::PeekTimeoutPolicy,
+        tls::{
+            KeyLogIntent,
+            boring::proxy::{TlsMitmEgressServerAuth, TlsMitmRelay},
+            client::ServerVerifyMode,
+            server::peek_client_hello_from_input_with_timeout_policy,
+        },
+    };
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn unavailable_backend_reports_a_stable_failure_class() {
@@ -79,5 +90,71 @@ mod tests {
     #[test]
     fn rama_boring_server_api_is_selected() {
         let _ = std::any::type_name::<rama::tls::boring::server::TlsAcceptorLayer>();
+    }
+
+    #[test]
+    fn rama_exposes_verified_egress_and_disabled_key_logging_controls() {
+        let auth = TlsMitmEgressServerAuth::new().with_server_verify(ServerVerifyMode::Auto);
+        let relay = TlsMitmRelay::new(())
+            .with_keylog_intent(KeyLogIntent::Disabled)
+            .with_egress_server_auth(auth);
+
+        assert!(matches!(relay.keylog_intent_ref(), KeyLogIntent::Disabled));
+        assert!(relay.egress_server_auth_ref().is_some());
+    }
+
+    #[tokio::test]
+    async fn rama_client_hello_peek_fails_closed_on_fragmented_input() {
+        let (mut client, proxy) = tokio::io::duplex(64);
+        let (fragment_written, fragment_ready) = tokio::sync::oneshot::channel();
+        let write_fragment = tokio::spawn(async move {
+            // A plausible TLS handshake record header and a partial ClientHello.
+            client
+                .write_all(&[0x16, 0x03, 0x03, 0x00, 0x20, 0x01, 0x00])
+                .await
+                .expect("partial ClientHello should be written");
+            fragment_written
+                .send(())
+                .expect("the peek test should still be active");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        fragment_ready
+            .await
+            .expect("partial ClientHello should arrive before the peek starts");
+
+        let result = peek_client_hello_from_input_with_timeout_policy(
+            proxy,
+            Some(Duration::from_millis(5)),
+            PeekTimeoutPolicy::FailClosed,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "an incomplete ClientHello must be rejected"
+        );
+        write_fragment.await.expect("fragment writer should finish");
+    }
+
+    #[tokio::test]
+    async fn rama_client_hello_peek_reports_non_tls_without_a_fallback_decision() {
+        let (mut client, proxy) = tokio::io::duplex(64);
+        client
+            .write_all(b"not a TLS ClientHello")
+            .await
+            .expect("non-TLS prefix should be written");
+
+        let (_, client_hello) = peek_client_hello_from_input_with_timeout_policy(
+            proxy,
+            Some(Duration::from_millis(50)),
+            PeekTimeoutPolicy::FailClosed,
+        )
+        .await
+        .expect("a definitive non-TLS prefix is not a peek timeout");
+
+        assert!(
+            client_hello.is_none(),
+            "the caller must reject this result for interception-required traffic"
+        );
     }
 }
