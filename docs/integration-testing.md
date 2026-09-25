@@ -10,6 +10,16 @@ The integration tests run as part of `cargo test --all-features` in `.github/wor
 | Secret handling | `src/secrets.rs`, `src/proxy_runtime.rs`, and `src/control.rs`: entitlement checks, redaction, supported authorization formats, host/path/port/scheme/authority boundaries, and WebSocket rejection. |
 | Runtime resilience | `src/proxy_runtime.rs`, `src/control.rs`, `tests/daemon_lifecycle.rs`: connection and provisioning limits, I/O timeouts, task failures, bounded shutdown, and socket cleanup. |
 
-The unit suite injects DNS answers and peer credentials to make rebinding and unauthorized-user checks deterministic. The Linux process tests exercise the assembled daemon and Unix sockets. For deployment verification, compare `/proc/<baffle-pid>/ns/net` and `/proc/<client-pid>/ns/net`, confirm they identify separate namespaces, and inspect Baffle's listening addresses with `nsenter -t <baffle-pid> -n ss -ltn`. From the client namespace, connections to the Baffle namespace's non-loopback addresses at those ports must fail; requests through the assigned Unix socket bridge must still work. The automated suite does not create network namespaces because this runner does not grant the required network administration capability. This run could not perform that deployment check (`unshare --net true` failed with `Operation not permitted`).
+The unit suite injects DNS answers and peer credentials to make rebinding and unauthorized-user checks deterministic. The Linux process tests exercise the assembled daemon and Unix sockets.
+
+Run the deployment confinement check as root after starting Baffle with at least one active session and a sandbox client:
+
+```sh
+sudo scripts/check-network-namespace-isolation.py "$BAFFLE_PID" "$SANDBOX_CLIENT_PID"
+```
+
+The check requires `nsenter`, `ss`, and Python 3. It confirms that Baffle and the client use different network namespaces, finds the TCP listeners owned by the Baffle process, verifies that they bind only to loopback, and attempts to connect to each listener from the client's namespace. A timeout is an inconclusive result and fails the check. Requests through the assigned Unix socket bridge must still work as part of the deployment smoke test.
+
+The automated suite does not create network namespaces. This runner could not perform the deployment check because `unshare --net true` failed with `Operation not permitted`; run the command above in the intended deployment environment to record its result.
 
 Use `cargo run --example cladding_socat -- github.com` for the standalone Cladding bridge example. Use `examples/measure_sessions.rs` with an idle Linux daemon to measure create latency, concurrent session creation, and idle-session RSS. The observed values for this run are in [performance observations](performance-observations.md); the example does not enforce a performance target.
