@@ -1211,10 +1211,11 @@ mod header_injection_tests {
     use std::sync::Arc;
 
     use hudsucker::{
-        Body, RequestOrResponse,
+        Body, RequestOrResponse, TlsInterception,
         hyper::{
-            Request, StatusCode,
+            Request, StatusCode, Version,
             header::{AUTHORIZATION, HeaderValue},
+            http::uri::Uri,
         },
     };
 
@@ -1296,6 +1297,10 @@ mod header_injection_tests {
             response.status(),
             StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN
         ));
+        assert!(
+            !response.headers().contains_key(AUTHORIZATION),
+            "a denied request must not receive a managed credential"
+        );
     }
 
     #[test]
@@ -1379,6 +1384,73 @@ mod header_injection_tests {
         let request = intercepted_request("https://api.github.com/repos/dstoc/cladding/issues");
         let request = forwarded_request(&handler, request, "api.github.com:443");
         assert_eq!(request.headers()["x-api-key"], "fixture-value");
+    }
+
+    #[test]
+    fn http2_inner_request_receives_credentials_after_authority_and_path_checks() {
+        let handler = handler(REST_CONFIG, &[("github-api", "http2-fixture-token")]);
+        let request = Request::builder()
+            .method("GET")
+            .version(Version::HTTP_2)
+            .uri("https://api.github.com/repos/dstoc/cladding/issues")
+            .body(Body::empty())
+            .expect("HTTP/2 request should build");
+        let request = forwarded_request(&handler, request, "api.github.com:443");
+        assert_eq!(
+            request.headers()[AUTHORIZATION],
+            "Bearer http2-fixture-token"
+        );
+    }
+
+    #[test]
+    fn port_80_tls_connect_intercepts_and_injects_only_into_authorized_inner_https() {
+        let config = "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"api.github.com\"\nmode = \"intercept\"\nports = [80]\npaths = [\"/allowed\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"github-api\"\nformat = \"bearer\"\n";
+        let handler = handler(config, &[("github-api", "port-80-token")]);
+        let authority = "api.github.com:80"
+            .parse::<hudsucker::hyper::http::uri::Authority>()
+            .expect("CONNECT authority should parse");
+        let connect = Request::builder()
+            .method("CONNECT")
+            .uri(
+                Uri::builder()
+                    .authority(authority.clone())
+                    .build()
+                    .expect("CONNECT URI should build"),
+            )
+            .body(Body::empty())
+            .expect("CONNECT request should build");
+
+        assert!(handler.connect_should_intercept(&connect));
+        assert_eq!(
+            handler.tls_should_intercept(&authority, Some("api.github.com")),
+            TlsInterception::Intercept
+        );
+        let connect = match handler.handle_policy_request(connect) {
+            RequestOrResponse::Request(request) => request,
+            RequestOrResponse::Response(response) => {
+                panic!("authorized CONNECT was denied: {}", response.status())
+            }
+        };
+        assert!(
+            !connect.headers().contains_key(AUTHORIZATION),
+            "CONNECT itself must not receive a managed credential"
+        );
+
+        let inner = intercepted_request("https://api.github.com:80/allowed");
+        let inner = forwarded_request(&handler, inner, "api.github.com:80");
+        assert_eq!(inner.headers()[AUTHORIZATION], "Bearer port-80-token");
+
+        assert_denied(
+            &handler,
+            intercepted_request("https://api.github.com:80/outside"),
+            Some("api.github.com:80"),
+        );
+        let plaintext = Request::builder()
+            .method("GET")
+            .uri("http://api.github.com:80/allowed")
+            .body(Body::empty())
+            .expect("plaintext downgrade request should build");
+        assert_denied(&handler, plaintext, None);
     }
 
     #[test]

@@ -137,10 +137,10 @@ impl SessionConfig {
 #[serde(rename_all = "lowercase")]
 pub enum RuleMode {
     /// Permit HTTPS CONNECT without TLS decryption. Path-restricted rules do
-    /// not permit CONNECT; their paths can still restrict plaintext HTTP.
+    /// not permit an opaque connection because Baffle cannot inspect its paths.
     Tunnel,
-    /// Intercept HTTPS so path and header rules can be applied. Path rules
-    /// also apply to explicitly permitted plaintext HTTP requests.
+    /// Intercept HTTPS so path and header rules can be applied to inner HTTP
+    /// requests after successful TLS negotiation.
     Intercept,
 }
 

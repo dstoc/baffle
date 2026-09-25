@@ -1,6 +1,6 @@
 # Baffle: Ephemeral policy-driven HTTPS proxy daemon
 
-- **Status:** Approved target policy; runtime follow-ups pending
+- **Status:** Approved; HTTPS-only request policy implemented, destination-IP follow-up pending
 - **Project:** New standalone Rust repository, independent of Cladding
 - **Executable:** `baffle`
 - **Suggested Cargo package:** `baffle-proxy` (`baffle` already exists on crates.io)
@@ -21,12 +21,10 @@ An explicit opaque tunnel cannot prove that its payload is TLS or let Baffle
 verify the upstream certificate; the client owns TLS verification for that
 tunnel.
 
-This document specifies the target policy. The baffle/24 HTTPS-only request
-change is not yet implemented: the current runtime still accepts explicitly
-configured plaintext HTTP on tunnel rules and rejects port 80 for interception
-and credential-injection rules. The runtime does not filter resolved
-destination addresses after baffle/25. It continues to reject opaque fallback
-for rules that require interception.
+The runtime implements the HTTPS-only request boundary, including TLS on
+configured port 80. baffle/25 removed destination-IP filtering and the
+`private_addresses` field. Interception remains fail-closed when a rule
+requires path or credential checks.
 
 “HTTPS-only” describes the supported request model. It is not a byte-level
 guarantee for an opaque tunnel: Baffle cannot prove that each established
@@ -233,7 +231,12 @@ Do not remove fail-closed interception for rules that require path checks or cre
 
 As reviewed on 2026-09-25, upstream Hudsucker 0.25.0 exposes boolean CONNECT and TLS decisions and supports custom HTTP and WebSocket connectors. Its API does not provide the explicit `Intercept`/`Tunnel`/`Reject` TLS result, CONNECT-bound TLS context, or inner HTTP authority binding used by the local patch. Its CONNECT handling can turn an unsupported payload into an opaque tunnel. baffle/25 removed the address-filtering connector and resolver but retained these security changes. Keep the vendored crate until an upstream API and release provide equivalent safeguards and Baffle's tests verify them.
 
-The Hudsucker security patch remains in place. Baffle no longer performs IP classification or filtering. An allowed name can resolve to a sensitive address even when the certificate is valid for that hostname. See the [Hudsucker 0.25.0 handler API](https://docs.rs/hudsucker/0.25.0/hudsucker/trait.HttpHandler.html) and [builder API](https://docs.rs/hudsucker/0.25.0/hudsucker/builder/struct.ProxyBuilder.html), plus `vendor/hudsucker/PATCHES.md` for the current patch inventory.
+The Hudsucker security patch remains in place. Baffle no longer performs IP
+classification or filtering. An allowed name can resolve to a sensitive
+address even when the certificate is valid for that hostname. See the
+[Hudsucker 0.25.0 handler API](https://docs.rs/hudsucker/0.25.0/hudsucker/trait.HttpHandler.html)
+and [builder API](https://docs.rs/hudsucker/0.25.0/hudsucker/builder/struct.ProxyBuilder.html),
+plus `vendor/hudsucker/PATCHES.md` for the current patch inventory.
 
 ## 9. Security model
 
@@ -281,7 +284,7 @@ This split is illustrative. Begin with one crate if separate crates would slow d
 
 **Milestone A — Daemon and leases.** Implement the Unix control protocol, daemon TOML, multi-session registry, per-session Unix/TCP bridge, Hudsucker task lifecycle, unique socket names and graceful cleanup. A test creates two concurrent proxies with different configurations, verifies separate sockets, closes only one lease and observes only its proxy terminate; a persistent proxy survives its creator disconnect and is explicitly stopped.
 
-**Milestone B — Enforced policy.** Implement HTTPS-only admission, exact-domain/port allowlists, CONNECT authorization, selective MITM, restricted path patterns, HTTP/1.1 and HTTP/2 authority handling, and fail-closed handling for rules that require inspection. Run table-driven positive/negative tests covering plaintext HTTP rejection on every port, TLS over configured port 80, hostname suffix attacks, alternate ports, IP literals, redirect downgrades, path normalization, encoded separators, TLS/SNI mismatches, unsupported CONNECT data, malformed and deliberately fragmented ClientHello data, and interception failures. Verify authority and path checks on reused HTTP/1.1 and HTTP/2 connections. Do not route a path-restricted destination through an opaque fallback tunnel.
+**Milestone B — Enforced policy (implemented).** Baffle enforces HTTPS-only admission, exact host and port allowlists, CONNECT authorization, selective MITM, path rules, HTTP/1.1 and HTTP/2 authority handling, and fail-closed handling for rules that require inspection. The tests cover plaintext HTTP rejection on every port, configured TLS on port 80, hostname suffix attacks, alternate ports, IP literals, redirect downgrades, path normalization, encoded separators, TLS/SNI mismatches, unsupported CONNECT data, fragmented ClientHello data, and interception failures. They verify reused HTTP/1.1 and HTTP/2 connections. A path-restricted destination cannot use an opaque fallback tunnel.
 
 **Milestone C — Secret injection.** Add daemon-only secret resolution and per-session entitlements, bearer/Basic/custom header formats, header overwrite/reject semantics and redacted logging. Test that a credential cannot reach an unauthorized host, path, port, scheme, redirected origin or WebSocket upgrade. Test GitHub's REST and Git smart-HTTP flows against representative fixtures without relying on live secrets.
 

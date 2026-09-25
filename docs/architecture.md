@@ -1,9 +1,10 @@
 # Architecture
 
-**Current runtime architecture.** baffle/25 removed Baffle's DNS and
-destination-IP filtering. Deployment egress controls own address restrictions.
-The HTTPS-only request change remains tracked separately in baffle/24. The
-fail-closed interception behavior described below remains required.
+**Current runtime architecture.** Baffle accepts HTTPS destinations through
+CONNECT and rejects ordinary forward-proxy requests. baffle/25 removed
+application-level destination-IP filtering; deployment egress controls own
+address restrictions. Fail-closed interception and identity binding remain
+required.
 
 Baffle runs one Tokio daemon process. The daemon owns the control listener,
 session registry, CA signing key, secret store, shared CA handle, and runtime.
@@ -50,20 +51,20 @@ interception, and upstream proxy behavior. The bridge does not buffer complete
 requests or responses.
 
 Before forwarding, the policy handler checks the exact host and destination
-port. It checks paths for plaintext HTTP and for each request carried inside a
-successfully intercepted TLS connection. It checks the CONNECT authority
-against TLS SNI and each decrypted request authority. Only after an intercepted
-request passes all checks can the handler add its configured headers.
+port. Only CONNECT can establish an outbound destination. It checks paths for
+each request carried inside a successfully intercepted TLS connection. It
+checks the CONNECT authority against TLS SNI and each decrypted request
+authority. Only after an intercepted request passes all checks can the handler
+add its configured headers.
 
 For HTTPS, `tunnel` rules permit an opaque CONNECT tunnel only when no path
 restriction or credential injection requires inspection. `intercept` rules
 require supported TLS negotiation and a matching SNI. The current code closes
-unsupported CONNECT payloads, missing or mismatched SNI, and TLS interception
-failures; it does not select an opaque fallback tunnel. The target policy also
-requires malformed or fragmented ClientHello data to fail closed. A client
-must not force an opaque tunnel for a rule that needs inspection. The target
-policy treats proxy clients as untrusted and assumes allowlisted sites behave
-legitimately.
+unsupported CONNECT payloads, missing or mismatched SNI, malformed or
+fragmented ClientHello data, and TLS interception failures; it does not select
+an opaque fallback tunnel. A client must not force an opaque tunnel for a rule
+that needs inspection. Baffle treats proxy clients as untrusted and assumes
+allowlisted sites behave legitimately.
 
 The policy authorizes the exact hostname and port before Hudsucker's default
 connectors dial the destination. Baffle does not classify DNS answers, filter
@@ -79,24 +80,23 @@ process from making a direct network connection. Deployment must force client
 egress through the assigned proxy and must isolate Baffle's internal loopback
 listeners as described in the [security guide](security-deployment.md).
 
-## Approved target boundary
+## Request admission boundary
 
-The target policy accepts HTTPS destinations through CONNECT. It rejects
-ordinary forward-proxy requests outside intercepted TLS, including plaintext
-`http://` destinations. HTTP/1.1 and HTTP/2 inside successfully intercepted TLS
-remain available for path checks and credential injection. A rule that
-requires those checks remains fail-closed. Check each request on reused h1/h2
-connections against the CONNECT authority, TLS identity, and path policy
-before forwarding or injecting a credential. Reject plaintext based on request
-form or scheme on every port; a configured TLS service on port 80 is valid.
+The policy accepts HTTPS destinations through CONNECT. It rejects ordinary
+forward-proxy requests outside intercepted TLS, including absolute-form
+`http://` and `https://` requests. HTTP/1.1 and HTTP/2 inside successfully
+intercepted TLS remain available for path checks and credential injection. A
+rule that requires those checks remains fail-closed. Check each request on
+reused h1/h2 connections against the CONNECT authority, TLS identity, and path
+policy before forwarding or injecting a credential. Reject plaintext based on
+request form or scheme on every port; a configured TLS service on port 80 is
+valid.
 
 An explicit tunnel rule remains opaque. Baffle authorizes its configured host
 and port, but cannot prove that tunneled bytes are TLS, inspect paths, or
-verify the upstream certificate. The client must verify TLS identity.
-
-The current runtime has no DNS-answer restrictions; deployment DNS and network
-egress controls must block sensitive addresses where the threat model requires
-it. The separate baffle/24 plaintext-request changes are not yet implemented.
+verify the upstream certificate. The client must verify TLS identity. The
+runtime has no DNS-answer restrictions; deployment DNS and network egress
+controls must block sensitive addresses when the threat model requires it.
 
 ## Session lifecycle
 
