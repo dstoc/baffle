@@ -650,14 +650,25 @@ fn validate_header(input: &str) -> Result<String, &'static str> {
     let prohibited = [
         "connection",
         "content-length",
+        "forwarded",
         "host",
+        "http2-settings",
         "keep-alive",
         "proxy-authenticate",
         "proxy-authorization",
+        "proxy-connection",
         "te",
         "trailer",
         "transfer-encoding",
         "upgrade",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-port",
+        "x-forwarded-proto",
+        "x-original-host",
+        "x-original-url",
+        "x-real-ip",
+        "x-rewrite-url",
     ];
     if input.is_empty()
         || !input
@@ -1212,6 +1223,29 @@ format = "raw"
         let error = ControlRequest::from_toml(input).expect_err("duplicate header should fail");
         assert!(error.to_string().contains("duplicates"));
         assert!(!error.to_string().contains("secret-value"));
+    }
+
+    #[test]
+    fn rejects_hop_by_hop_and_routing_sensitive_injection_headers() {
+        for header in [
+            "Connection",
+            "Content-Length",
+            "Forwarded",
+            "Host",
+            "HTTP2-Settings",
+            "Proxy-Connection",
+            "Transfer-Encoding",
+            "Upgrade",
+            "X-Forwarded-Host",
+            "X-Original-URL",
+        ] {
+            let input = format!(
+                "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"{header}\"\nsecret = \"token\"\nformat = \"raw\"\n"
+            );
+            let error = ControlRequest::from_toml(&input)
+                .expect_err("unsafe header names should be rejected");
+            assert!(error.to_string().contains("hop-by-hop or routing-critical"));
+        }
     }
 
     #[test]

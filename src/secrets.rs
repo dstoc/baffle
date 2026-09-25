@@ -13,10 +13,8 @@ use crate::config::SessionConfig;
 const MAX_SECRET_BYTES: u64 = 64 * 1024;
 
 /// Secret material intentionally has a redacted debug representation.
-#[allow(dead_code)] // The proxy injection adapter consumes these values in the next runtime layer.
 pub(crate) struct SecretValue(String);
 
-#[allow(dead_code)] // Kept private to the daemon until the injection adapter uses it.
 impl SecretValue {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
@@ -30,13 +28,22 @@ impl fmt::Debug for SecretValue {
 }
 
 /// Resolved values belong to one session and are not serializable.
-#[allow(dead_code)] // Stored with the owning session for its internal injection handler.
+#[derive(Default)]
 pub(crate) struct ResolvedSecrets(HashMap<String, SecretValue>);
 
-#[allow(dead_code)] // The proxy injection adapter will read values through this narrow accessor.
 impl ResolvedSecrets {
     pub(crate) fn get(&self, name: &str) -> Option<&SecretValue> {
         self.0.get(name)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_values(values: impl IntoIterator<Item = (String, String)>) -> Self {
+        Self(
+            values
+                .into_iter()
+                .map(|(name, value)| (name, SecretValue(value)))
+                .collect(),
+        )
     }
 }
 

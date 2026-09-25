@@ -11,10 +11,14 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hudsucker::{
     Body, HttpContext, HttpHandler, Proxy, RequestOrResponse, TlsInterception, WebSocketContext,
     WebSocketHandler,
-    hyper::{Request, Response, StatusCode},
+    hyper::{
+        Request, Response, StatusCode,
+        header::{CONNECTION, HeaderName, HeaderValue, UPGRADE},
+    },
     rustls::crypto::aws_lc_rs,
     tokio_tungstenite::tungstenite::Message,
 };
@@ -28,9 +32,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ca::ManagedCa,
-    config::{RuleMode, SessionConfig},
+    config::{HeaderInjection, InjectionFormat, RuleMode, SessionConfig},
     egress::EgressConnector,
     policy::{AuthorizationError, SessionPolicy},
+    secrets::{ResolvedSecrets, SecretValue},
     telemetry::Metrics,
 };
 
@@ -126,6 +131,7 @@ impl ProxyRuntime {
         Self::start_with_metrics(
             runtime_id,
             session,
+            Arc::new(ResolvedSecrets::default()),
             ca,
             socket_path,
             max_connections,
@@ -141,6 +147,7 @@ impl ProxyRuntime {
     pub(crate) async fn start_with_metrics(
         runtime_id: RuntimeId,
         session: SessionConfig,
+        secrets: Arc<ResolvedSecrets>,
         ca: Arc<ManagedCa>,
         socket_path: PathBuf,
         max_connections: usize,
@@ -165,6 +172,7 @@ impl ProxyRuntime {
         let policy_handler = PolicyHandler::with_metrics(
             runtime_id.clone(),
             Arc::clone(&policy),
+            secrets,
             Arc::clone(&metrics),
             cancellation.clone(),
         );
@@ -906,6 +914,7 @@ impl Drop for ProxyRuntime {
 pub(crate) struct PolicyHandler {
     runtime_id: RuntimeId,
     policy: Arc<SessionPolicy>,
+    secrets: Arc<ResolvedSecrets>,
     metrics: Arc<Metrics>,
     cancellation: CancellationToken,
 }
@@ -916,6 +925,7 @@ impl PolicyHandler {
         Self::with_metrics(
             runtime_id,
             policy,
+            Arc::new(ResolvedSecrets::default()),
             Arc::new(Metrics::default()),
             CancellationToken::new(),
         )
@@ -924,12 +934,14 @@ impl PolicyHandler {
     fn with_metrics(
         runtime_id: RuntimeId,
         policy: Arc<SessionPolicy>,
+        secrets: Arc<ResolvedSecrets>,
         metrics: Arc<Metrics>,
         cancellation: CancellationToken,
     ) -> Self {
         Self {
             runtime_id,
             policy,
+            secrets,
             metrics,
             cancellation,
         }
@@ -945,46 +957,53 @@ impl PolicyHandler {
         mut request: Request<Body>,
         connect_authority: Option<&hudsucker::hyper::http::uri::Authority>,
     ) -> RequestOrResponse {
-        let unsupported_upgrade = connect_authority.is_some()
-            && request
-                .headers()
-                .contains_key(hudsucker::hyper::header::UPGRADE);
-        let authorization = if self.cancellation.is_cancelled() || unsupported_upgrade {
+        let authorization = if self.cancellation.is_cancelled() {
             Err(AuthorizationError::Denied)
-        } else if let Some(connect_authority) = connect_authority {
-            self.policy
-                .authorize_inner_request(&mut request, connect_authority)
         } else {
-            self.policy.authorize_request(&mut request)
+            self.policy
+                .authorize_proxy_request(&mut request, connect_authority)
         };
         match authorization {
-            Ok(_) => RequestOrResponse::Request(request),
-            Err(error) => {
-                let request_count = self.metrics.denied_request();
-                let destination = request_destination(&request);
-                let (status, reason) = match error {
-                    AuthorizationError::InvalidAuthority => {
-                        (StatusCode::BAD_REQUEST, "invalid_authority")
-                    }
-                    AuthorizationError::Denied => (StatusCode::FORBIDDEN, "no_matching_rule"),
-                };
-                tracing::info!(
-                    event = "request_decision",
-                    session_id = %self.runtime_id.as_str(),
-                    method = %request.method(),
-                    %destination,
-                    outcome = "denied",
-                    reason,
-                    denied_requests = request_count,
-                    "proxy request denied"
-                );
-                Response::builder()
-                    .status(status)
-                    .body(Body::empty())
-                    .expect("static policy response is valid")
-                    .into()
+            Ok((_, injections))
+                if !injections.is_empty()
+                    && has_unsupported_upgrade_or_hop_header(&request, injections) =>
+            {
+                self.deny_request(&request, AuthorizationError::Denied)
             }
+            Ok((_, injections)) => match inject_headers(&mut request, injections, &self.secrets) {
+                Ok(()) => RequestOrResponse::Request(request),
+                Err(()) => self.deny_request(&request, AuthorizationError::Denied),
+            },
+            Err(error) => self.deny_request(&request, error),
         }
+    }
+
+    fn deny_request(
+        &self,
+        request: &Request<Body>,
+        error: AuthorizationError,
+    ) -> RequestOrResponse {
+        let request_count = self.metrics.denied_request();
+        let destination = request_destination(request);
+        let (status, reason) = match error {
+            AuthorizationError::InvalidAuthority => (StatusCode::BAD_REQUEST, "invalid_authority"),
+            AuthorizationError::Denied => (StatusCode::FORBIDDEN, "no_matching_rule"),
+        };
+        tracing::info!(
+            event = "request_decision",
+            session_id = %self.runtime_id.as_str(),
+            method = %request.method(),
+            %destination,
+            outcome = "denied",
+            reason,
+            denied_requests = request_count,
+            "proxy request denied"
+        );
+        Response::builder()
+            .status(status)
+            .body(Body::empty())
+            .expect("static policy response is valid")
+            .into()
     }
 
     pub(crate) fn connect_should_intercept(&self, request: &Request<Body>) -> bool {
@@ -1014,6 +1033,63 @@ impl PolicyHandler {
             TlsInterception::Reject
         }
     }
+}
+
+fn has_unsupported_upgrade_or_hop_header(
+    request: &Request<Body>,
+    injections: &[HeaderInjection],
+) -> bool {
+    if request.headers().contains_key(UPGRADE) || connection_header_has(request, "upgrade") {
+        return true;
+    }
+    injections
+        .iter()
+        .any(|injection| connection_header_has(request, &injection.header))
+}
+
+fn connection_header_has(request: &Request<Body>, expected: &str) -> bool {
+    request
+        .headers()
+        .get_all(CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|token| token.trim().eq_ignore_ascii_case(expected))
+}
+
+fn inject_headers(
+    request: &mut Request<Body>,
+    injections: &[HeaderInjection],
+    secrets: &ResolvedSecrets,
+) -> Result<(), ()> {
+    let values = injections
+        .iter()
+        .map(|injection| {
+            let name = HeaderName::from_bytes(injection.header.as_bytes()).map_err(|_| ())?;
+            let secret = secrets.get(injection.secret.as_str()).ok_or(())?;
+            let value = format_secret(injection, secret)?;
+            let value = HeaderValue::from_bytes(value.as_bytes()).map_err(|_| ())?;
+            Ok((name, value))
+        })
+        .collect::<Result<Vec<_>, ()>>()?;
+
+    for (name, value) in values {
+        request.headers_mut().remove(&name);
+        request.headers_mut().insert(name, value);
+    }
+    Ok(())
+}
+
+fn format_secret(injection: &HeaderInjection, secret: &SecretValue) -> Result<String, ()> {
+    Ok(match injection.format {
+        InjectionFormat::Raw => secret.as_str().to_owned(),
+        InjectionFormat::Bearer => format!("Bearer {}", secret.as_str()),
+        InjectionFormat::BasicPassword => {
+            let username = injection.username.as_deref().ok_or(())?;
+            let encoded = STANDARD.encode(format!("{username}:{}", secret.as_str()));
+            format!("Basic {encoded}")
+        }
+    })
 }
 
 impl HttpHandler for PolicyHandler {
@@ -1129,6 +1205,287 @@ mod request_log_tests {
         ));
         assert_eq!(handler.metrics.snapshot().denied_requests, 1);
         assert_eq!(handler.runtime_id.as_str(), "test-session");
+    }
+}
+
+#[cfg(test)]
+mod header_injection_tests {
+    use std::sync::Arc;
+
+    use hudsucker::{
+        Body, RequestOrResponse,
+        hyper::{
+            Request, StatusCode,
+            header::{AUTHORIZATION, HeaderValue},
+        },
+    };
+
+    use super::{PolicyHandler, RuntimeId};
+    use crate::{
+        config::ControlRequest, policy::SessionPolicy, secrets::ResolvedSecrets, telemetry::Metrics,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    const REST_CONFIG: &str = "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"api.github.com\"\nmode = \"intercept\"\nports = [443]\npaths = [\"/repos/dstoc/cladding\", \"/repos/dstoc/cladding/**\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"github-api\"\nformat = \"bearer\"\n";
+
+    const GIT_CONFIG: &str = "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"github.com\"\nmode = \"intercept\"\nports = [443]\npaths = [\"/dstoc/cladding.git/**\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"github-git\"\nformat = \"basic_password\"\nusername = \"x-access-token\"\n";
+
+    const COMBINED_CONFIG: &str = "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"api.github.com\"\nmode = \"intercept\"\nports = [443]\npaths = [\"/repos/dstoc/cladding\", \"/repos/dstoc/cladding/**\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"github-api\"\nformat = \"bearer\"\n\n[[rules]]\nhost = \"github.com\"\nmode = \"intercept\"\nports = [443]\npaths = [\"/dstoc/cladding.git/**\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"github-git\"\nformat = \"basic_password\"\nusername = \"x-access-token\"\n";
+
+    fn handler(config: &str, secrets: &[(&str, &str)]) -> PolicyHandler {
+        let ControlRequest::Create { session, .. } =
+            ControlRequest::from_toml(config).expect("injection policy should parse")
+        else {
+            panic!("test config should create a session");
+        };
+        let policy = Arc::new(SessionPolicy::compile(&session));
+        let secrets = Arc::new(ResolvedSecrets::from_values(
+            secrets
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+        ));
+        PolicyHandler::with_metrics(
+            RuntimeId::new("header-injection-test"),
+            policy,
+            secrets,
+            Arc::new(Metrics::default()),
+            CancellationToken::new(),
+        )
+    }
+
+    fn intercepted_request(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("host", uri_host(uri))
+            .body(Body::empty())
+            .expect("intercepted request should build")
+    }
+
+    fn uri_host(uri: &str) -> &str {
+        uri.strip_prefix("https://")
+            .expect("test URI should use HTTPS")
+            .split('/')
+            .next()
+            .expect("test URI should include a host")
+    }
+
+    fn forwarded_request(
+        handler: &PolicyHandler,
+        request: Request<Body>,
+        authority: &str,
+    ) -> Request<Body> {
+        let authority = authority.parse().expect("CONNECT authority should parse");
+        match handler.handle_policy_request_with_context(request, Some(&authority)) {
+            RequestOrResponse::Request(request) => request,
+            RequestOrResponse::Response(response) => {
+                panic!(
+                    "authorized fixture request was denied: {}",
+                    response.status()
+                )
+            }
+        }
+    }
+
+    fn assert_denied(handler: &PolicyHandler, request: Request<Body>, authority: Option<&str>) {
+        let authority = authority.map(|value| value.parse().expect("authority should parse"));
+        let response = match handler.handle_policy_request_with_context(request, authority.as_ref())
+        {
+            RequestOrResponse::Response(response) => response,
+            RequestOrResponse::Request(_) => panic!("request must be denied"),
+        };
+        assert!(matches!(
+            response.status(),
+            StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN
+        ));
+    }
+
+    #[test]
+    fn github_rest_injects_bearer_after_authorization_and_replaces_client_values() {
+        let handler = handler(REST_CONFIG, &[("github-api", "rest-fixture-token")]);
+        let mut request =
+            intercepted_request("https://api.github.com/repos/dstoc/cladding/issues?state=open");
+        request.headers_mut().insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer client-value"),
+        );
+        request.headers_mut().append(
+            AUTHORIZATION,
+            HeaderValue::from_static("Basic second-client-value"),
+        );
+
+        let request = forwarded_request(&handler, request, "api.github.com:443");
+        let values = request
+            .headers()
+            .get_all(AUTHORIZATION)
+            .iter()
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], "Bearer rest-fixture-token");
+        assert_eq!(request.uri().query(), Some("state=open"));
+    }
+
+    #[test]
+    fn github_git_smart_http_discovery_fetch_and_push_use_basic_credentials() {
+        let handler = handler(GIT_CONFIG, &[("github-git", "git-fixture-token")]);
+        let flows = [
+            ("GET", "info/refs?service=git-upload-pack"),
+            ("POST", "git-upload-pack"),
+            ("GET", "info/refs?service=git-receive-pack"),
+            ("POST", "git-receive-pack"),
+        ];
+
+        for (method, operation) in flows {
+            let uri = format!("https://github.com/dstoc/cladding.git/{operation}");
+            let mut request = intercepted_request(&uri);
+            *request.method_mut() = method.parse().expect("Git method should parse");
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                HeaderValue::from_static("Bearer client-value"),
+            );
+            let request = forwarded_request(&handler, request, "github.com:443");
+            assert_eq!(
+                request.headers()[AUTHORIZATION],
+                "Basic eC1hY2Nlc3MtdG9rZW46Z2l0LWZpeHR1cmUtdG9rZW4="
+            );
+        }
+    }
+
+    #[test]
+    fn github_api_and_git_rules_use_their_own_secret_and_format() {
+        let handler = handler(
+            COMBINED_CONFIG,
+            &[
+                ("github-api", "rest-fixture-token"),
+                ("github-git", "git-fixture-token"),
+            ],
+        );
+        let rest = intercepted_request("https://api.github.com/repos/dstoc/cladding/issues");
+        let rest = forwarded_request(&handler, rest, "api.github.com:443");
+        assert_eq!(rest.headers()[AUTHORIZATION], "Bearer rest-fixture-token");
+
+        let git = intercepted_request(
+            "https://github.com/dstoc/cladding.git/info/refs?service=git-upload-pack",
+        );
+        let git = forwarded_request(&handler, git, "github.com:443");
+        assert_eq!(
+            git.headers()[AUTHORIZATION],
+            "Basic eC1hY2Nlc3MtdG9rZW46Z2l0LWZpeHR1cmUtdG9rZW4="
+        );
+    }
+
+    #[test]
+    fn raw_format_injects_the_secret_without_a_scheme_prefix() {
+        let config = "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"api.github.com\"\nmode = \"intercept\"\nports = [443]\npaths = [\"/repos/dstoc/cladding/**\"]\n\n[[rules.inject]]\nheader = \"X-Api-Key\"\nsecret = \"raw-token\"\nformat = \"raw\"\n";
+        let handler = handler(config, &[("raw-token", "fixture-value")]);
+        let request = intercepted_request("https://api.github.com/repos/dstoc/cladding/issues");
+        let request = forwarded_request(&handler, request, "api.github.com:443");
+        assert_eq!(request.headers()["x-api-key"], "fixture-value");
+    }
+
+    #[test]
+    fn credentials_are_denied_for_wrong_host_path_port_scheme_authority_and_upgrade() {
+        let handler = handler(REST_CONFIG, &[("github-api", "rest-fixture-token")]);
+
+        assert_denied(
+            &handler,
+            intercepted_request("https://evil.example/repos/dstoc/cladding"),
+            Some("evil.example:443"),
+        );
+        assert_denied(
+            &handler,
+            intercepted_request("https://api.github.com/repos/other/repository"),
+            Some("api.github.com:443"),
+        );
+        assert_denied(
+            &handler,
+            intercepted_request("https://api.github.com:444/repos/dstoc/cladding"),
+            Some("api.github.com:444"),
+        );
+
+        let plaintext = Request::builder()
+            .method("GET")
+            .uri("http://api.github.com/repos/dstoc/cladding")
+            .body(Body::empty())
+            .expect("plaintext request should build");
+        assert_denied(&handler, plaintext, Some("api.github.com:443"));
+
+        assert_denied(
+            &handler,
+            intercepted_request("https://api.github.com/repos/dstoc/cladding"),
+            Some("redirected.example:443"),
+        );
+
+        // A redirect is followed by the client as a new CONNECT and request.
+        // Even another GitHub hostname must match a separate rule before it
+        // can receive this session's credential.
+        assert_denied(
+            &handler,
+            intercepted_request("https://github.com/repos/dstoc/cladding"),
+            Some("github.com:443"),
+        );
+
+        let mut conflicting_host =
+            intercepted_request("https://api.github.com/repos/dstoc/cladding");
+        conflicting_host
+            .headers_mut()
+            .insert("host", HeaderValue::from_static("evil.example"));
+        assert_denied(&handler, conflicting_host, Some("api.github.com:443"));
+
+        let mut upgraded = intercepted_request("https://api.github.com/repos/dstoc/cladding");
+        upgraded.headers_mut().insert(
+            "connection",
+            HeaderValue::from_static("keep-alive, Upgrade"),
+        );
+        upgraded
+            .headers_mut()
+            .insert("upgrade", HeaderValue::from_static("websocket"));
+        assert_denied(&handler, upgraded, Some("api.github.com:443"));
+
+        let mut nominated_as_hop_by_hop =
+            intercepted_request("https://api.github.com/repos/dstoc/cladding");
+        nominated_as_hop_by_hop
+            .headers_mut()
+            .insert("connection", HeaderValue::from_static("Authorization"));
+        assert_denied(
+            &handler,
+            nominated_as_hop_by_hop,
+            Some("api.github.com:443"),
+        );
+
+        let mut direct = intercepted_request("https://api.github.com/repos/dstoc/cladding");
+        direct.headers_mut().insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer client-value"),
+        );
+        assert_denied(&handler, direct, None);
+    }
+
+    #[test]
+    fn missing_resolved_secret_fails_closed_before_forwarding() {
+        let handler = handler(REST_CONFIG, &[]);
+        let request = intercepted_request("https://api.github.com/repos/dstoc/cladding/issues");
+        assert_denied(&handler, request, Some("api.github.com:443"));
+    }
+
+    #[test]
+    fn outer_connect_is_authorized_without_receiving_credentials() {
+        let handler = handler(REST_CONFIG, &[("github-api", "rest-fixture-token")]);
+        let connect = Request::builder()
+            .method("CONNECT")
+            .uri("api.github.com:443")
+            .header("proxy-authorization", "client-proxy-value")
+            .body(Body::empty())
+            .expect("CONNECT request should build");
+        let original = connect.headers()["proxy-authorization"].clone();
+        let forwarded = match handler.handle_policy_request(connect) {
+            RequestOrResponse::Request(request) => request,
+            RequestOrResponse::Response(response) => {
+                panic!("authorized CONNECT was denied: {}", response.status())
+            }
+        };
+        assert_eq!(forwarded.headers()["proxy-authorization"], original);
+        assert!(!forwarded.headers().contains_key(AUTHORIZATION));
     }
 }
 

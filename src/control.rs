@@ -534,6 +534,7 @@ impl SessionManager {
         session: SessionConfig,
         secrets: ResolvedSecrets,
     ) -> std::result::Result<SessionInfo, SessionError> {
+        let secrets = Arc::new(secrets);
         let id = new_session_id().map_err(|_| SessionError::Internal)?;
         let persistent = session.persistent;
         {
@@ -553,6 +554,7 @@ impl SessionManager {
         let runtime = match ProxyRuntime::start_with_metrics(
             RuntimeId::new(id.clone()),
             session.clone(),
+            Arc::clone(&secrets),
             Arc::clone(&self.ca),
             socket_path,
             self.max_connections_per_session,
@@ -719,7 +721,7 @@ struct ManagedSession {
     // held separately and neither value is included in list responses.
     _configuration: SessionConfig,
     // Secret values remain scoped to this session and are never serialized.
-    _secrets: ResolvedSecrets,
+    _secrets: Arc<ResolvedSecrets>,
     runtime: Option<ProxyRuntime>,
 }
 

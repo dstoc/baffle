@@ -201,6 +201,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "baffle-client",
+ "base64",
  "clap",
  "hudsucker",
  "serde",

@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 baffle-client = { path = "crates/baffle-client" }
 anyhow = "1.0.104"
+base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 hudsucker = { version = "=0.25.0", features = ["http2"] }
 serde = { version = "1.0.229", features = ["derive"] }
