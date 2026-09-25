@@ -523,6 +523,239 @@ async fn intercepted_tls_rejects_missing_or_conflicting_sni_before_egress() {
 }
 
 #[tokio::test]
+async fn plaintext_paths_are_canonicalized_and_rechecked_after_redirects_on_keepalive() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream_listener.local_addr().unwrap().port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-http-path-keepalive");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(upstream_port),
+        ca,
+        directory.path().join("http-path-keepalive.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("intercept runtime should start");
+
+    let authority = format!("localhost:{upstream_port}");
+    let mut client = BufReader::new(
+        TcpStream::connect(runtime.local_addr())
+            .await
+            .expect("proxy should accept plaintext HTTP"),
+    );
+    client
+        .get_mut()
+        .write_all(
+            format!(
+                "GET http://{authority}/%61llowed?ref=main HTTP/1.1\r\nHost: {authority}\r\nConnection: keep-alive\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("allowed request should be sent");
+
+    let (upstream_stream, _) = timeout(Duration::from_secs(2), upstream_listener.accept())
+        .await
+        .expect("allowed request should reach the upstream")
+        .expect("upstream connection should be accepted");
+    let mut upstream = BufReader::new(upstream_stream);
+    let mut request_line = String::new();
+    timeout(
+        Duration::from_secs(2),
+        upstream.read_line(&mut request_line),
+    )
+    .await
+    .expect("upstream request target should arrive")
+    .expect("upstream request target should be readable");
+    assert_eq!(
+        request_line, "GET /allowed?ref=main HTTP/1.1\r\n",
+        "upstream must receive the exact canonical path that policy checked"
+    );
+    loop {
+        let mut header = String::new();
+        timeout(Duration::from_secs(2), upstream.read_line(&mut header))
+            .await
+            .expect("upstream request headers should arrive")
+            .expect("upstream request headers should be readable");
+        if header == "\r\n" {
+            break;
+        }
+    }
+    upstream
+        .get_mut()
+        .write_all(
+            b"HTTP/1.1 302 Found\r\nLocation: /outside\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n",
+        )
+        .await
+        .expect("upstream redirect should be sent");
+    let first_response = timeout(Duration::from_secs(2), read_http1_status(&mut client))
+        .await
+        .expect("redirect response should reach the client")
+        .expect("redirect response should be readable");
+    assert!(
+        first_response.starts_with("HTTP/1.1 302"),
+        "{first_response:?}"
+    );
+
+    client
+        .get_mut()
+        .write_all(
+            format!(
+                "GET http://{authority}/outside HTTP/1.1\r\nHost: {authority}\r\nConnection: keep-alive\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("redirect follow-up request should be sent on the reused connection");
+    let denied_response = timeout(Duration::from_secs(2), read_http1_status(&mut client))
+        .await
+        .expect("redirect follow-up should receive a policy response")
+        .expect("redirect follow-up response should be readable");
+    assert!(
+        denied_response.starts_with("HTTP/1.1 403"),
+        "{denied_response:?}"
+    );
+
+    let unexpected_upstream_request = timeout(Duration::from_millis(200), async {
+        let mut next_line = String::new();
+        tokio::select! {
+            result = upstream.read_line(&mut next_line) => result.map(|_| "reused upstream connection"),
+            result = upstream_listener.accept() => result.map(|_| "new upstream connection"),
+        }
+    })
+    .await;
+    assert!(
+        unexpected_upstream_request.is_err(),
+        "a redirected request outside the path allowlist must not reach upstream"
+    );
+
+    drop(client);
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
+async fn malformed_and_encoded_path_targets_are_rejected_before_upstream() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-http-malformed-path");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(upstream_port),
+        ca,
+        directory.path().join("http-malformed-path.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("intercept runtime should start");
+
+    let authority = format!("localhost:{upstream_port}");
+    for path in [
+        "/allowedness",
+        "/allowed%2fprivate",
+        "/allowed%252fprivate",
+        "/%2e%2e/allowed",
+        "/allowed%2",
+    ] {
+        let mut client = TcpStream::connect(runtime.local_addr())
+            .await
+            .expect("proxy should accept request connection");
+        let request = format!(
+            "GET http://{authority}{path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+        );
+        client
+            .write_all(request.as_bytes())
+            .await
+            .expect("malformed target should be sent");
+        let mut reader = BufReader::new(client);
+        let mut response = String::new();
+        timeout(Duration::from_secs(2), reader.read_line(&mut response))
+            .await
+            .expect("proxy should reject the request target")
+            .expect("rejection response should be readable");
+        assert!(
+            response.starts_with("HTTP/1.1 400") || response.starts_with("HTTP/1.1 403"),
+            "unsafe target {path:?} received {response:?}"
+        );
+    }
+
+    assert!(
+        timeout(Duration::from_millis(200), upstream.accept())
+            .await
+            .is_err(),
+        "malformed or non-matching paths must not reach the upstream"
+    );
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
+async fn intercepted_http2_path_rules_reject_disallowed_streams() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-intercept-http2-path");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(upstream_port),
+        Arc::clone(&ca),
+        directory.path().join("http2-path.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("intercept runtime should start");
+
+    let authority = format!("localhost:{upstream_port}");
+    let tls = connect_intercepted_tls(runtime.local_addr(), &authority, "localhost", &ca, b"h2")
+        .await
+        .expect("matching SNI should establish intercepted TLS");
+    let (mut sender, connection) =
+        hudsucker::hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls))
+            .await
+            .expect("HTTP/2 client should connect to the intercepted stream");
+    let driver = tokio::spawn(connection);
+    let request = Request::builder()
+        .method("GET")
+        .version(Version::HTTP_2)
+        .uri(format!("https://{authority}/outside"))
+        .body(Body::empty())
+        .expect("HTTP/2 request should build");
+    let response = timeout(Duration::from_secs(2), sender.send_request(request))
+        .await
+        .expect("HTTP/2 path denial should return a response")
+        .expect("HTTP/2 denial response should be readable");
+    assert_eq!(response.status(), hudsucker::hyper::StatusCode::FORBIDDEN);
+    assert!(
+        timeout(Duration::from_millis(200), upstream.accept())
+            .await
+            .is_err(),
+        "a disallowed HTTP/2 path must not reach the upstream"
+    );
+    drop(sender);
+    driver.abort();
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
 async fn intercepted_http2_authority_cannot_change_the_connect_destination() {
     let directory = tempfile::tempdir().expect("test directory should be created");
     let ca = write_test_ca(directory.path());

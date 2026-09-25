@@ -136,11 +136,11 @@ In this example, `crates.io` is permitted as an opaque HTTPS tunnel; the GitHub 
 
 - No rule matches: deny. Hosts match exactly by default; any later wildcard support must be explicit (`*.example.com`), segment-aware and forbidden for credential injection unless separately authorized. Normalize DNS names, ports and case before matching.
 - Each rule specifies permitted destination ports; the initial default, if omitted, is HTTPS port 443. Add an exact IP address to `private_addresses` on a host rule to permit that non-public DNS answer. The exception applies only to that exact host, address, and a port listed on the same rule. Other non-public DNS answers remain denied. The field accepts individual IPv4 or IPv6 addresses, not CIDRs.
-- `mode = "tunnel"` permits HTTPS CONNECT without decryption and cannot carry path restrictions or injected secrets. `mode = "intercept"` requires HTTPS MITM and can allow all paths or specify an allowlist. A rule with `paths` or `inject` must be intercepted; reject invalid configuration rather than silently downgrade.
+- `mode = "tunnel"` permits HTTPS CONNECT without decryption and cannot carry injected secrets. `mode = "intercept"` requires HTTPS MITM. Path rules on HTTPS therefore require `intercept`; path rules on explicitly permitted plaintext HTTP are checked directly without TLS. A path-restricted tunnel rule cannot accept CONNECT, so it cannot bypass its HTTP path checks.
 - An exact path matches only itself. `/x/**` matches `/x/` and descendants; `/x` must be separately listed to match the root. No naive string-prefix matching. Path matching is case-sensitive, and query strings are ignored unless a later explicit query constraint is introduced.
-- For restricted paths, reject ambiguous or malformed encodings, encoded path separators and unsafe dot-segment forms rather than relying on a normalization that differs from the origin server's interpretation. Evaluate the same canonical path that is forwarded.
+- For restricted paths, reject ambiguous or malformed encodings, encoded path separators and unsafe dot-segment forms rather than relying on a normalization that differs from the origin server's interpretation. Evaluate and forward the same canonical path, while preserving the query string unchanged.
 - Reject overlapping rules with conflicting outcomes unless a documented deterministic precedence can be proven safe. Version 1 can start with one non-overlapping rule per exact host.
-- HTTP on port 80 may be explicitly allowed without MITM, but credentials must not be injected over plaintext HTTP. Deny unsupported CONNECT ports and protocols by default.
+- HTTP on port 80 may be explicitly allowed without MITM, and its path rules are enforced on each request. Credentials must not be injected over plaintext HTTP. Deny unsupported CONNECT ports and protocols by default.
 
 ### 5.3 Headers and secrets
 

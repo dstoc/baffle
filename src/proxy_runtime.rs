@@ -942,7 +942,7 @@ impl PolicyHandler {
 
     fn handle_policy_request_with_context(
         &self,
-        request: Request<Body>,
+        mut request: Request<Body>,
         connect_authority: Option<&hudsucker::hyper::http::uri::Authority>,
     ) -> RequestOrResponse {
         let unsupported_upgrade = connect_authority.is_some()
@@ -952,9 +952,10 @@ impl PolicyHandler {
         let authorization = if self.cancellation.is_cancelled() || unsupported_upgrade {
             Err(AuthorizationError::Denied)
         } else if let Some(connect_authority) = connect_authority {
-            self.policy.authorize_inner(&request, connect_authority)
+            self.policy
+                .authorize_inner_request(&mut request, connect_authority)
         } else {
-            self.policy.authorize(&request)
+            self.policy.authorize_request(&mut request)
         };
         match authorization {
             Ok(_) => RequestOrResponse::Request(request),
