@@ -10,7 +10,6 @@ use crate::{
     rewind::{ArrayPrefix, Rewind},
     tee::Tee,
 };
-use super::tcp::TcpConnector;
 use futures::{Sink, Stream, StreamExt};
 use http::uri::{Authority, Scheme};
 use hyper::{
@@ -30,7 +29,7 @@ use hyper_util::{
     server::conn::auto::Builder as ServerBuilder,
 };
 use std::{convert::Infallible, error::Error as StdError, io, net::SocketAddr, sync::Arc};
-use tokio::{io::AsyncReadExt, task::JoinHandle};
+use tokio::{io::AsyncReadExt, net::TcpStream, task::JoinHandle};
 use tokio_rustls::{LazyConfigAcceptor, StartHandshake};
 use tokio_tungstenite::{
     Connector,
@@ -82,7 +81,6 @@ pub(crate) struct InternalProxy<C, CA, H, W> {
     pub http_handler: H,
     pub websocket_handler: W,
     pub websocket_connector: Option<Connector>,
-    pub tcp_connector: Arc<dyn TcpConnector>,
     pub client_addr: SocketAddr,
     pub connect_authority: Option<Authority>,
 }
@@ -101,7 +99,6 @@ where
             http_handler: self.http_handler.clone(),
             websocket_handler: self.websocket_handler.clone(),
             websocket_connector: self.websocket_connector.clone(),
-            tcp_connector: Arc::clone(&self.tcp_connector),
             client_addr: self.client_addr,
             connect_authority: self.connect_authority.clone(),
         }
@@ -261,11 +258,7 @@ where
                                             return;
                                         }
                                         TlsInterception::Tunnel => {
-                                            let mut server = match self
-                                                .tcp_connector
-                                                .connect(authority.clone())
-                                                .await
-                                            {
+                                            let mut server = match TcpStream::connect(authority.as_ref()).await {
                                                 Ok(server) => server,
                                                 Err(e) => {
                                                     error!(
@@ -336,7 +329,7 @@ where
                                 }
                             }
 
-                            let mut server = match self.tcp_connector.connect(authority.clone()).await {
+                            let mut server = match TcpStream::connect(authority.as_ref()).await {
                                 Ok(server) => server,
                                 Err(e) => {
                                     error!(
@@ -425,37 +418,16 @@ where
         req: Request<()>,
     ) -> Result<(), tungstenite::Error> {
         let uri = req.uri().clone();
-
-        let host = req
-            .uri()
-            .host()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing WebSocket host"))?;
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        let port = req.uri().port_u16().unwrap_or_else(|| {
-            if req.uri().scheme_str() == Some("wss") {
-                443
-            } else {
-                80
-            }
-        });
-        let authority = if host.contains(':') {
-            format!("[{host}]:{port}")
-        } else {
-            format!("{host}:{port}")
-        }
-        .parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid WebSocket authority"))?;
-        let socket = self.tcp_connector.connect(authority).await?;
         #[cfg(any(feature = "rustls-client", feature = "native-tls-client"))]
-        let (server_socket, _) = tokio_tungstenite::client_async_tls_with_config(
+        let (server_socket, _) = tokio_tungstenite::connect_async_tls_with_config(
             req,
-            socket,
             None,
+            false,
             self.websocket_connector,
         )
         .await?;
         #[cfg(not(any(feature = "rustls-client", feature = "native-tls-client")))]
-        let (server_socket, _) = tokio_tungstenite::client_async(req, socket).await?;
+        let (server_socket, _) = tokio_tungstenite::connect_async(req).await?;
 
         let (server_sink, server_stream) = server_socket.split();
         let (client_sink, client_stream) = client_socket.split();
@@ -578,7 +550,6 @@ mod tests {
             http_handler: crate::NoopHandler::new(),
             websocket_handler: crate::NoopHandler::new(),
             websocket_connector: None,
-            tcp_connector: Arc::new(super::tcp::DirectTcpConnector),
             client_addr: "127.0.0.1:8080".parse().unwrap(),
             connect_authority: None,
         }

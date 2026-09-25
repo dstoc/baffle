@@ -21,13 +21,12 @@ An explicit opaque tunnel cannot prove that its payload is TLS or let Baffle
 verify the upstream certificate; the client owns TLS verification for that
 tunnel.
 
-This document specifies the target policy, not current runtime behavior.
-Until baffle/24 and baffle/25 land, the current implementation still accepts
-explicitly configured plaintext HTTP on tunnel rules, filters resolved
-destination addresses, and rejects opaque fallback for rules that require
-interception. The current configuration also rejects port 80 for interception
-and credential-injection rules. Those protections and their regression tests
-remain intact until the follow-ups are reviewed and implemented.
+This document specifies the target policy. The baffle/24 HTTPS-only request
+change is not yet implemented: the current runtime still accepts explicitly
+configured plaintext HTTP on tunnel rules and rejects port 80 for interception
+and credential-injection rules. The runtime does not filter resolved
+destination addresses after baffle/25. It continues to reject opaque fallback
+for rules that require interception.
 
 “HTTPS-only” describes the supported request model. It is not a byte-level
 guarantee for an opaque tunnel: Baffle cannot prove that each established
@@ -164,11 +163,11 @@ In this example, `crates.io` is permitted as an opaque HTTPS tunnel; the GitHub 
 
 - No rule matches: deny. Hosts match exactly by default; any later wildcard support must be explicit (`*.example.com`), segment-aware and forbidden for credential injection unless separately authorized. Normalize DNS names, ports and case before matching.
 - Each rule specifies permitted destination ports; if omitted, the rule uses HTTPS port 443. A CONNECT authority must include an explicit port, including `:443` for the default HTTPS port. Port 80 is not reserved: any configured port may carry TLS if the destination service supports it. Reject plaintext HTTP based on its request form or scheme, regardless of port. A non-default TLS port must be listed explicitly. A port number does not prove that an opaque tunnel carries TLS.
-- Remove `private_addresses` from the target session schema. A request that includes it must fail strict configuration validation after baffle/25; deployments must apply address restrictions outside Baffle.
+- The current session schema rejects `private_addresses`. Operators must remove that field and apply any intended address restrictions through deployment DNS and network egress policy.
 - `mode = "tunnel"` permits an opaque CONNECT tunnel without decryption. It cannot carry path or injection rules. It does not prove that the tunneled bytes are TLS or let Baffle verify the upstream certificate. The client must verify the certificate.
 - `mode = "intercept"` requires HTTPS MITM. A rule with path checks or credential injection requires successful interception. If interception fails or the payload is unsupported, close the connection. Do not fall back to a tunnel.
 - A malformed or fragmented ClientHello, unsupported post-CONNECT data, or failed TLS handshake must close the connection when inspection is required. A client must not cause opaque fallback by splitting ClientHello data. Such a fallback would bypass path restrictions and the credential-injection boundary.
-- Baffle authorizes the configured hostname and port. It does not filter DNS answers or pin destination IPs in the target model. DNS rebinding and access to private, loopback, link-local, metadata, or other sensitive addresses are deployment risks. Apply DNS controls and network egress restrictions outside Baffle when needed.
+- Baffle authorizes the configured hostname and port. It does not filter DNS answers or pin destination IPs. DNS rebinding and access to private, loopback, link-local, metadata, or other sensitive addresses are deployment risks. Apply DNS controls and default-deny network egress rules outside Baffle when the threat model requires address containment.
 - An exact path matches only itself. `/x/**` matches `/x/` and descendants; `/x` must be separately listed to match the root. No naive string-prefix matching. Path matching is case-sensitive, and query strings are ignored unless a later explicit query constraint is introduced.
 - For restricted paths, reject ambiguous or malformed encodings, encoded path separators and unsafe dot-segment forms rather than relying on a normalization that differs from the origin server's interpretation. Evaluate and forward the same canonical path, while preserving the query string unchanged.
 - Reject overlapping rules with conflicting outcomes unless a documented deterministic precedence can be proven safe. Version 1 can start with one non-overlapping rule per exact host.
@@ -226,15 +225,15 @@ Use Hudsucker's `with_listener(TcpListener)` with a pre-bound `127.0.0.1:0` list
 
 Baffle's Unix-to-TCP bridge should use Tokio's `copy_bidirectional`, track active bridges for session cancellation and enforce connection limits **before** connecting to the corresponding internal Hudsucker listener. There is no external TCP bind and no separate `socat` instance inside Baffle; Cladding may still use its existing `socat` mapping from a sandbox-local TCP endpoint to the Baffle Unix socket.
 
-The current implementation pins Hudsucker 0.25.0 to `vendor/hudsucker`. The local patch adds the checked connector and resolver, binds TLS and inner HTTP identity to the CONNECT authority, and closes unsupported payloads instead of falling back to an opaque tunnel when interception is required. `src/egress.rs` resolves names, filters addresses, and pins an approved address to its outbound connection. `private_addresses` supplies exact exceptions to that filter.
+The current implementation pins Hudsucker 0.25.0 to `vendor/hudsucker`. The local patch binds TLS and inner HTTP identity to the CONNECT authority, and closes unsupported payloads instead of falling back to an opaque tunnel when interception is required. baffle/25 removed `src/egress.rs`, Baffle's DNS-answer classification and address pinning, and the custom Hudsucker connector and resolver hooks. Hudsucker's default connectors now resolve and dial the hostname after exact host and port authorization.
 
-The approved target model removes application-level DNS/IP filtering. baffle/25 will reassess and may remove `private_addresses`, `SessionPolicy::permits_private_address`, destination classification and pinning in `src/egress.rs`, related connector/resolver hooks, and tests whose purpose is to enforce those address restrictions. Host and port authorization before outbound dialing remains. DNS policy and network egress restrictions become deployment responsibilities where required.
+The approved policy removes application-level DNS/IP filtering. baffle/25 removed the `private_addresses` field and client API, compiled address rules, destination classification and pinning, related connector/resolver hooks, and tests whose purpose was to enforce those address restrictions. Existing policies that include `private_addresses` now fail strict validation. Operators must remove that field and move intended internal-service restrictions to DNS and network egress policy before upgrading. Host and port authorization before outbound dialing remains.
 
 Do not remove fail-closed interception for rules that require path checks or credential injection. Do not remove CONNECT-authority, TLS-SNI and inner-HTTP-authority checks. They keep path and injection rules tied to the authorized origin. Keep normal upstream certificate and hostname verification when Baffle terminates TLS. Explicit tunnel rules remain opaque; the client must verify upstream TLS identity. The tunnel's CONNECT host and port are authorized, but Baffle cannot verify the encrypted protocol or inspect its HTTP content.
 
-As reviewed on 2026-09-25, upstream Hudsucker 0.25.0 exposes `HttpHandler` decisions as booleans and custom HTTP and WebSocket connector hooks. Its public API does not provide the same common checked connector for every CONNECT/TCP path or the explicit `Intercept`/`Tunnel`/`Reject` decision and CONNECT-bound TLS context used by the local patch. Removing address filtering may make the outbound connector and resolver hooks unnecessary, but it does not by itself make the upstream crate a safe replacement. Retain the smallest patch that preserves fail-closed interception and identity binding. Revisit replacement only after an upstream API and release provide those safeguards and Baffle's tests verify them.
+As reviewed on 2026-09-25, upstream Hudsucker 0.25.0 exposes boolean CONNECT and TLS decisions and supports custom HTTP and WebSocket connectors. Its API does not provide the explicit `Intercept`/`Tunnel`/`Reject` TLS result, CONNECT-bound TLS context, or inner HTTP authority binding used by the local patch. Its CONNECT handling can turn an unsupported payload into an opaque tunnel. baffle/25 removed the address-filtering connector and resolver but retained these security changes. Keep the vendored crate until an upstream API and release provide equivalent safeguards and Baffle's tests verify them.
 
-The current Hudsucker patch and the stronger current IP checks remain in place until follow-up implementation issues are reviewed. This documentation update does not change runtime behavior. See the [Hudsucker 0.25.0 handler API](https://docs.rs/hudsucker/0.25.0/hudsucker/trait.HttpHandler.html) and [builder API](https://docs.rs/hudsucker/0.25.0/hudsucker/builder/struct.ProxyBuilder.html), plus `vendor/hudsucker/PATCHES.md` for the current patch inventory.
+The Hudsucker security patch remains in place. Baffle no longer performs IP classification or filtering. An allowed name can resolve to a sensitive address even when the certificate is valid for that hostname. See the [Hudsucker 0.25.0 handler API](https://docs.rs/hudsucker/0.25.0/hudsucker/trait.HttpHandler.html) and [builder API](https://docs.rs/hudsucker/0.25.0/hudsucker/builder/struct.ProxyBuilder.html), plus `vendor/hudsucker/PATCHES.md` for the current patch inventory.
 
 ## 9. Security model
 
@@ -294,4 +293,4 @@ A v1 release is acceptable when all four milestones pass automated integration t
 
 **Decided:** standalone Rust project; Hudsucker backend; Tokio; TOML daemon and session policies; Unix control and per-session data sockets; one multi-proxy daemon process; ephemeral lease by default; opt-in persistent sessions; HTTPS-only destination requests through CONNECT; exact hostname and port authorization; optional path constraints on intercepted TLS; secret-backed header injection; initial Unix-to-loopback bridge; Cladding as an independent consumer. Destination-IP restrictions belong to deployment egress controls. Interception-required rules fail closed; an explicit opaque tunnel leaves TLS verification to the client.
 
-**Implementation questions:** settle the smallest Hudsucker patch set that preserves fail-closed interception and identity binding after the connector/resolver reassessment; confirm the exact per-session secret entitlement mechanism; settle first-release Linux runtime installation conventions; select a published Cargo package name because `baffle` is already occupied; decide whether v1 needs wildcard host patterns and `list` beyond the minimal `create`/`stop` protocol. None of these should relax interception safeguards or control-socket separation.
+**Implementation questions:** retain the smallest Hudsucker patch set that preserves fail-closed interception and identity binding until upstream adds equivalent safeguards; confirm the exact per-session secret entitlement mechanism; settle first-release Linux runtime installation conventions; select a published Cargo package name because `baffle` is already occupied; decide whether v1 needs wildcard host patterns and `list` beyond the minimal `create`/`stop` protocol. None of these should relax interception safeguards or control-socket separation.

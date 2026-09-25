@@ -505,7 +505,6 @@ def main() -> None:
             host = "localhost"
             mode = "tunnel"
             ports = [{upstream_port}]
-            private_addresses = ["127.0.0.1"]
             '''
         )
         created = send_control_request(control_socket, request)

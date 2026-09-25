@@ -1,9 +1,6 @@
 mod internal;
-mod tcp;
 
 pub mod builder;
-
-pub use tcp::TcpConnector;
 
 use crate::{
     Error,
@@ -81,7 +78,6 @@ pub struct Proxy<C, CA, H, W, F> {
     http_handler: H,
     websocket_handler: W,
     websocket_connector: Option<Connector>,
-    tcp_connector: Arc<dyn TcpConnector>,
     server: Option<ServerBuilder<TokioExecutor>>,
     graceful_shutdown: F,
 }
@@ -152,7 +148,6 @@ where
                     let http_handler = self.http_handler.clone();
                     let websocket_handler = self.websocket_handler.clone();
                     let websocket_connector = self.websocket_connector.clone();
-                    let tcp_connector = Arc::clone(&self.tcp_connector);
 
                     shutdown.spawn_task_fn(move |guard| async move {
                         let conn = server.serve_connection_with_upgrades(
@@ -165,7 +160,6 @@ where
                                     http_handler: http_handler.clone(),
                                     websocket_handler: websocket_handler.clone(),
                                     websocket_connector: websocket_connector.clone(),
-                                    tcp_connector: Arc::clone(&tcp_connector),
                                     client_addr,
                                     connect_authority: None,
                                 }

@@ -22,17 +22,16 @@ Reviewed on 2026-09-25 for the initial Linux release work.
 
 - `hudsucker` is pinned to exactly `0.25.0` and patched to
   `vendor/hudsucker`. `vendor/hudsucker/PATCHES.md` records the fail-closed
-  CONNECT and TLS hooks, validated outbound address hooks, their security
-  rationale, and the upstreaming plan.
-- Baffle relies on the vendored connector and resolver hooks for outbound
-  HTTP, CONNECT, and WebSocket connections. Keep the local diff narrow and
-  repeat egress, interception, CONNECT, HTTP/2, and WebSocket coverage before
-  changing the pinned version.
-- The approved target policy in baffle/21 defers destination-IP filtering to
-  deployment egress controls. baffle/25 will reassess the connector and
-  resolver hooks; it must preserve fail-closed interception and
-  CONNECT/TLS/HTTP identity checks. The current runtime retains both the IP
-  checks and their tests until that follow-up lands.
+  CONNECT and TLS hooks, authority binding, their security rationale, and the
+  remaining upstream gaps.
+- baffle/25 removed Baffle's resolver and TCP connector hooks for address
+  filtering. Hudsucker's default outbound connectors now resolve and dial
+  authorized hostnames. Keep the local diff narrow and repeat interception,
+  CONNECT, HTTP/2, and WebSocket coverage before changing the pinned version.
+- Baffle authorizes the exact hostname and port before dialing, but does not
+  filter DNS answers or pin destination addresses. Deployment DNS and network
+  egress controls own address restrictions. Retain fail-closed interception,
+  CONNECT/TLS/HTTP identity checks, and normal upstream TLS verification.
 - The dependency versions used by CI and releases come from the committed lock
   file. This repository does not currently run an automated RustSec advisory
   scan; maintainers should add one before adopting a security patch cadence.

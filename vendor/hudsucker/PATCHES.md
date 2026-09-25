@@ -1,66 +1,67 @@
 # Local Hudsucker patch inventory
 
-This directory contains Hudsucker 0.25.0 from crates.io. Baffle carries three
-patch areas. The approved target policy treats them differently.
+This directory contains Hudsucker 0.25.0 from crates.io. baffle/25 removed
+Baffle's custom TCP connector and DNS resolver hooks. The remaining local patch
+preserves fail-closed interception and authority binding.
 
-## Keep: strict interception and authority binding
+## Retain: fail-closed CONNECT interception
 
-The upstream CONNECT handler can turn an unknown payload into an opaque TCP
-tunnel after the handler requests interception. The local patch adds an
-explicit `Intercept`, `Tunnel`, or `Reject` result and closes the upgraded
-connection when interception is required but the payload is unsupported or TLS
-negotiation fails. A malformed or fragmented ClientHello must not change this
-decision into an opaque tunnel. It must fail closed.
+Upstream Hudsucker 0.25.0 can open a raw TCP tunnel when CONNECT interception
+was requested but the received payload does not match its recognized TLS or
+WebSocket forms. The local patch reads the initial payload prefix, asks the
+handler for an explicit `Intercept`, `Tunnel`, or `Reject` TLS decision, and
+closes unsupported payloads when policy requires interception. Malformed or
+fragmented ClientHello data must not select an opaque tunnel. A failed TLS
+handshake also closes the connection.
 
-The patch passes the CONNECT authority to the TLS policy hook and intercepted
-HTTP context. It checks intercepted TLS SNI against the CONNECT host and lets
-the handler bind every decrypted HTTP authority to that CONNECT authority.
-Plaintext HTTP after an intercepted CONNECT is rejected. These checks must
-apply to each request on reused HTTP/1.1 and HTTP/2 connections. They protect
-path authorization and credential injection from a malicious proxy client.
+The patch passes the CONNECT authority to the TLS policy hook and records it in
+the intercepted HTTP context. It checks TLS SNI against the CONNECT host and
+lets Baffle bind every decrypted HTTP authority to the CONNECT authority.
+Plaintext HTTP after an intercepted CONNECT is rejected. These checks apply to
+each request on reused HTTP/1.1 and HTTP/2 connections. They protect path
+authorization and credential injection from an untrusted client.
 
-Retain these changes until an upstream Hudsucker release provides equivalent
-behavior and Baffle's regression tests prove it. The test plan must include an
-attempt to trigger opaque fallback by fragmenting ClientHello, unsupported
-CONNECT data, malformed TLS, conflicting SNI or HTTP authority, and repeated
-requests over intercepted HTTP/1.1 and HTTP/2 connections.
+Baffle's regression tests cover unsupported CONNECT data, malformed TLS,
+conflicting SNI and HTTP authority, request checks on reused connections,
+credential isolation, and normal upstream certificate validation. The
+fragmented ClientHello regression is tracked separately in baffle/24. Keep the
+local patch until an upstream release provides the same behavior and Baffle's
+tests verify it.
 
-## Reassess: checked TCP connector hook
+## Removed: address-filtering connector and resolver
 
-The local TCP connector hook covers CONNECT tunnels and WebSocket connections.
-Baffle currently uses it to filter and pin destination addresses against
-`private_addresses`.
+The prior local TCP connector covered CONNECT and WebSocket connections. The
+paired resolver supplied DNS answers to Hudsucker's outbound HTTP connector.
+Baffle used them to classify addresses, filter DNS answers, and pin an
+approved answer to each outbound connection.
 
-baffle/25 defers destination-IP filtering to deployment DNS and network egress
-controls. The checked connector may then be unnecessary. Before removing it,
-verify that every CONNECT tunnel and WebSocket path authorizes the exact host
-and port before dialing. Keep upstream TLS certificate and hostname
-validation, and keep the network-namespace boundary. Do not retain this
-connector only to enforce the deferred address filter.
+baffle/25 removed both hooks and `src/egress.rs`. The runtime uses upstream
+Hudsucker's default Rustls HTTP connector, CONNECT TCP dialer, and WebSocket
+connector. Baffle authorizes the exact hostname and port before the request
+reaches those outbound paths. The Rustls client keeps normal upstream
+certificate-chain and hostname validation. A local integration test confirms
+that an authorized loopback destination is dialed and that an untrusted
+upstream certificate is rejected.
 
-## Reassess: DNS resolver hook
+Destination-address restrictions now belong to deployment DNS policy and
+network egress controls. The network-namespace boundary that prevents clients
+from reaching Baffle's internal listeners remains required.
 
-The resolver hook supplies the addresses used by Hudsucker's outbound HTTP
-connector. Baffle currently uses it to classify DNS answers and pin an
-authorized answer for the outbound connection.
+## Exact upstream gaps
 
-After baffle/25 removes application-level address filtering, the custom
-resolver hook may be unnecessary. Before removing it, verify that each HTTP
-request still passes exact hostname and port authorization before dialing and
-that intercepted requests still validate upstream TLS certificates and
-hostnames. Deployment DNS and network egress controls own destination-address
-containment when a deployment requires it.
+The public Hudsucker 0.25.0 `HttpHandler` API has boolean CONNECT and TLS
+decisions. It does not provide Baffle's explicit reject decision for failed
+interception. Its TLS hook does not receive the CONNECT authority, and its
+intercepted HTTP context does not retain that authority for per-request
+binding. Its CONNECT handling can send unsupported payloads into an opaque
+tunnel. Those gaps prevent replacing the vendored source safely.
 
-## Upstream replacement criteria
-
-Upstream Hudsucker 0.25.0 exposes boolean `HttpHandler` decisions and custom
-HTTP and WebSocket connector hooks. Its public API does not provide the same
-common checked connector for every CONNECT/TCP path or the explicit
-CONNECT-bound TLS decision used by the local patch. Removing address filtering
-does not by itself make the upstream crate a safe replacement.
-
-Before replacing the vendored copy, verify the upstream API and tests against
-the required CONNECT denial, strict interception, SNI/CONNECT/HTTP authority
-binding, reused h1/h2 requests, and TLS verification behavior. Keep the
-smallest local patch that provides any missing safeguards. Recheck this
-inventory when upgrading Hudsucker.
+The upstream builder does provide `with_rustls_connector`, custom HTTP and
+WebSocket connector options, and its default outbound connection paths.
+Address filtering does not require a Baffle-specific connector. Review the
+[Hudsucker 0.25.0 handler API](https://docs.rs/hudsucker/0.25.0/hudsucker/trait.HttpHandler.html)
+and [builder API](https://docs.rs/hudsucker/0.25.0/hudsucker/builder/struct.ProxyBuilder.html)
+when reassessing the pin. Do not remove the remaining local patch until an
+upstream API and tests preserve fail-closed interception, CONNECT/TLS/HTTP
+authority binding, reused HTTP/1.1 and HTTP/2 checks, and normal TLS
+verification.

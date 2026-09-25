@@ -57,23 +57,24 @@ constrain those credentials.
 Here, “HTTPS-only” defines supported requests at Baffle's proxy interface. It
 does not guarantee that every established opaque tunnel carries HTTPS.
 
-The target policy will authorize exact configured hostnames and ports. It
-will not check the IP addresses returned by DNS. An allowlisted name can
+The policy authorizes exact configured hostnames and ports. Baffle does not
+check the IP addresses returned by DNS. An allowlisted name can
 resolve to a private, loopback, link-local, metadata, or other sensitive
 address, even when the service presents a valid certificate for that name.
 For a threat model that requires address containment, the deployment must
-control DNS and restrict network egress with a firewall or network namespace.
+control DNS and apply default-deny network egress rules with a firewall or
+network namespace.
 Hostname and port rules are sufficient only when those names and the addresses
 they can reach are trusted for the workload.
 
-These are target guarantees, not the current runtime behavior. Until
-baffle/24 and baffle/25 are implemented, the current runtime still accepts
-explicitly configured plaintext HTTP on tunnel rules, filters resolved
-destination addresses, and rejects opaque fallback when interception is
-required. The current runtime also rejects port 80 for interception and
-credential-injection rules. The target policy will reject plaintext by request
-form or scheme and will permit TLS on any configured port, including port 80.
-The current behavior is documented in the
+The runtime now leaves DNS and destination-address restrictions to deployment
+controls. Existing session policies that contain `private_addresses` fail
+validation; remove that field and move any address restrictions to DNS and
+network egress policy before upgrading. Until baffle/24 is implemented, the
+runtime still accepts explicitly configured plaintext HTTP on tunnel rules and
+rejects port 80 for interception and credential-injection rules. It continues
+to reject opaque fallback when interception is required. The current behavior
+is documented in the
 [configuration reference](docs/configuration.md) and [security and deployment
 guide](docs/security-deployment.md).
 
@@ -134,9 +135,10 @@ and HTTPS traffic. A bounded in-process bridge connects the data socket to a
 private, pre-bound loopback TCP listener used by Hudsucker.
 
 The current implementation gives every session a separate immutable policy,
-Hudsucker runtime, DNS-aware outbound connector, credential state, and resource
-counters. The session
-manager shares the Tokio runtime and CA material. See the
+Hudsucker runtime, credential state, and resource counters. Hudsucker's default
+outbound connectors resolve and dial authorized hostnames; Baffle does not
+filter or pin DNS answers. The session manager shares the Tokio runtime and CA
+material. See the
 [architecture guide](docs/architecture.md) for component details and data
 flows.
 
