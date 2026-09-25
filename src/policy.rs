@@ -12,7 +12,9 @@ use hudsucker::hyper::{
 };
 use url::Host;
 
-use crate::config::{PathRule, RuleMode, SessionConfig, canonicalize_request_path};
+use crate::config::{
+    HeaderInjection, PathRule, RuleMode, SessionConfig, canonicalize_request_path,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthorizationError {
@@ -26,7 +28,7 @@ struct CompiledRule {
     ports: HashSet<u16>,
     private_addresses: HashSet<IpAddr>,
     paths: Vec<PathRule>,
-    has_injections: bool,
+    injections: Vec<HeaderInjection>,
 }
 
 /// A read-only set of host and port rules for one proxy session.
@@ -50,7 +52,7 @@ impl SessionPolicy {
                         ports: rule.ports.iter().copied().collect(),
                         private_addresses: rule.private_addresses.iter().copied().collect(),
                         paths: rule.paths.clone(),
-                        has_injections: !rule.inject.is_empty(),
+                        injections: rule.inject.clone(),
                     },
                 )
             })
@@ -92,11 +94,23 @@ impl SessionPolicy {
 
     /// Authorize an intercepted HTTPS request and canonicalize its path before
     /// forwarding it to the origin.
+    #[cfg(test)]
     pub(crate) fn authorize_inner_request<B>(
         &self,
         request: &mut Request<B>,
         connect_authority: &Authority,
     ) -> Result<RuleMode, AuthorizationError> {
+        self.authorize_inner_request_with_injections(request, connect_authority)
+            .map(|(mode, _)| mode)
+    }
+
+    /// Authorize an intercepted HTTPS request and return the matching rule's
+    /// injection declarations only after authority and canonical path checks.
+    pub(crate) fn authorize_inner_request_with_injections<'a, B>(
+        &'a self,
+        request: &mut Request<B>,
+        connect_authority: &Authority,
+    ) -> Result<(RuleMode, &'a [HeaderInjection]), AuthorizationError> {
         if request.method() == Method::CONNECT {
             return Err(AuthorizationError::InvalidAuthority);
         }
@@ -118,7 +132,29 @@ impl SessionPolicy {
         if actual != expected {
             return Err(AuthorizationError::InvalidAuthority);
         }
-        self.authorize_request(request)
+        let mode = self.authorize_request(request)?;
+        let rule = self.rule_for_request(request)?;
+        Ok((mode, &rule.injections))
+    }
+
+    /// Authorize a proxy request for the handler. Only inner requests carried
+    /// by an intercepted CONNECT may receive credentials. The outer CONNECT
+    /// itself is authorized so Hudsucker can establish the inspected stream.
+    pub(crate) fn authorize_proxy_request<'a, B>(
+        &'a self,
+        request: &mut Request<B>,
+        connect_authority: Option<&Authority>,
+    ) -> Result<(RuleMode, &'a [HeaderInjection]), AuthorizationError> {
+        if let Some(connect_authority) = connect_authority {
+            return self.authorize_inner_request_with_injections(request, connect_authority);
+        }
+
+        let mode = self.authorize_request(request)?;
+        let rule = self.rule_for_request(request)?;
+        if request.method() != Method::CONNECT && !rule.injections.is_empty() {
+            return Err(AuthorizationError::Denied);
+        }
+        Ok((mode, &[]))
     }
 
     /// Check that an intercepted CONNECT uses a policy-authorized SNI name
@@ -179,7 +215,7 @@ impl SessionPolicy {
                 .uri()
                 .scheme_str()
                 .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"))
-            && rule.has_injections
+            && !rule.injections.is_empty()
         {
             return Err(AuthorizationError::Denied);
         }
