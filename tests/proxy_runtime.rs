@@ -12,6 +12,14 @@ use tokio::{
     sync::mpsc,
     time::timeout,
 };
+use tokio_rustls::{
+    TlsConnector,
+    rustls::{
+        ClientConfig, RootCertStore,
+        crypto::aws_lc_rs,
+        pki_types::{CertificateDer, ServerName},
+    },
+};
 
 fn session_config() -> SessionConfig {
     let request = ControlRequest::from_toml(
@@ -238,6 +246,112 @@ async fn intercept_connect_with_unknown_payload_does_not_open_an_opaque_tunnel()
         .expect("proxy should close an unsupported intercepted payload")
         .expect("proxy connection should close cleanly");
     assert_eq!(read, 0, "unsupported payload must not receive tunnel data");
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
+async fn intercepted_https_rejects_private_upstream_addresses() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream
+        .local_addr()
+        .expect("test upstream address should be available")
+        .port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-intercept-private-upstream");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(upstream_port),
+        Arc::clone(&ca),
+        directory.path().join("intercept-private.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("intercept runtime should start");
+
+    let mut proxy = TcpStream::connect(runtime.local_addr())
+        .await
+        .expect("proxy should accept CONNECT");
+    proxy
+        .write_all(
+            format!(
+                "CONNECT localhost:{upstream_port} HTTP/1.1\r\nHost: localhost:{upstream_port}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("CONNECT request should be sent");
+    let mut proxy = BufReader::new(proxy);
+    let mut status = String::new();
+    timeout(Duration::from_secs(2), proxy.read_line(&mut status))
+        .await
+        .expect("proxy should respond to CONNECT")
+        .expect("CONNECT response should be readable");
+    assert!(
+        status.starts_with("HTTP/1.1 200"),
+        "unexpected CONNECT response: {status:?}"
+    );
+    loop {
+        let mut header = String::new();
+        timeout(Duration::from_secs(2), proxy.read_line(&mut header))
+            .await
+            .expect("CONNECT response headers should arrive")
+            .expect("CONNECT response header should be readable");
+        if header == "\r\n" || header.is_empty() {
+            break;
+        }
+    }
+
+    let (_, ca_certificate) = x509_parser::pem::parse_x509_pem(ca.public_certificate_pem())
+        .expect("test CA certificate should be valid PEM");
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(ca_certificate.contents))
+        .expect("test CA certificate should be a valid root");
+    let client_config =
+        ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("supported TLS versions should be available")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    let server_name =
+        ServerName::try_from("localhost".to_owned()).expect("test TLS server name should be valid");
+    let mut tls = timeout(
+        Duration::from_secs(3),
+        TlsConnector::from(Arc::new(client_config)).connect(server_name, proxy.into_inner()),
+    )
+    .await
+    .expect("proxy TLS handshake should complete")
+    .expect("test CA should authenticate the intercepted connection");
+    tls.write_all(
+        format!(
+            "GET /allowed HTTP/1.1\r\nHost: localhost:{upstream_port}\r\nConnection: close\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .await
+    .expect("intercepted HTTPS request should be sent");
+    let mut response = Vec::new();
+    timeout(Duration::from_secs(3), tls.read_to_end(&mut response))
+        .await
+        .expect("intercepted HTTPS response should arrive")
+        .expect("intercepted HTTPS response should be readable");
+    assert!(
+        response.starts_with(b"HTTP/1.1 502") || response.starts_with(b"HTTP/1.0 502"),
+        "private upstream resolution should fail as a gateway error: {response:?}"
+    );
+    assert!(
+        timeout(Duration::from_millis(100), upstream.accept())
+            .await
+            .is_err(),
+        "intercepted HTTPS must validate the upstream IP before dialing"
+    );
 
     runtime.shutdown(Duration::from_secs(2)).await;
     assert_exit(&mut events, &id).await;
