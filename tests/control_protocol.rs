@@ -10,6 +10,7 @@ use std::{
     },
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::{Arc, Barrier},
     thread,
     time::{Duration, Instant},
 };
@@ -23,6 +24,19 @@ struct DaemonProcess {
     _directory: TempDir,
     socket: PathBuf,
     socket_dir: PathBuf,
+}
+
+struct DaemonProcesses(Vec<Child>);
+
+impl Drop for DaemonProcesses {
+    fn drop(&mut self) {
+        for child in &mut self.0 {
+            if matches!(child.try_wait(), Ok(None) | Err(_)) {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+    }
 }
 
 impl Drop for DaemonProcess {
@@ -205,6 +219,174 @@ fn failed_session_creation_leaves_no_socket_or_registry_entry() {
         0,
         "failed startup must not leave a session socket"
     );
+}
+
+#[test]
+fn daemon_reclaims_stale_control_and_session_sockets_after_crash() {
+    let mut daemon = start_daemon(250);
+    let (_creator, created) = create_session(&daemon.socket, true, "crash.example.test");
+    let stale_proxy_path = PathBuf::from(
+        created["result"]["socket"]
+            .as_str()
+            .expect("persistent session should return its socket path"),
+    );
+    let competing_start = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("daemon")
+        .arg("--config")
+        .arg(daemon._directory.path().join("daemon.toml"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("a competing daemon process should start");
+    assert!(
+        !competing_start.success(),
+        "a second daemon must not remove an active control socket"
+    );
+    assert_eq!(
+        request(&daemon.socket, "version = 1\noperation = \"list\"\n")["ok"],
+        true,
+        "the active daemon should remain available"
+    );
+    daemon.child.kill().expect("daemon should be killable");
+    daemon
+        .child
+        .wait()
+        .expect("crashed daemon should be reaped");
+    assert!(
+        daemon.socket.exists(),
+        "SIGKILL should leave the control socket"
+    );
+    assert!(
+        stale_proxy_path.exists(),
+        "SIGKILL should leave the session socket"
+    );
+
+    let config_path = daemon._directory.path().join("daemon.toml");
+    daemon.child = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("daemon")
+        .arg("--config")
+        .arg(config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("daemon should restart with the same paths");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = daemon
+            .child
+            .try_wait()
+            .expect("restarted daemon status should be readable")
+        {
+            panic!("daemon failed to reclaim stale sockets: {status}");
+        }
+        if UnixStream::connect(&daemon.socket).is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon should bind its control socket"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(
+        !stale_proxy_path.exists(),
+        "restart should remove the stale session socket"
+    );
+    assert_eq!(
+        fs::read_dir(&daemon.socket_dir)
+            .expect("session socket directory should remain available")
+            .count(),
+        0,
+        "restart should leave no stale session socket entries"
+    );
+    assert_eq!(
+        request(&daemon.socket, "version = 1\noperation = \"list\"\n")["ok"],
+        true
+    );
+}
+
+#[test]
+fn concurrent_daemon_restarts_preserve_the_live_control_socket() {
+    const STARTERS: usize = 16;
+
+    let mut crashed_daemon = start_daemon(250);
+    crashed_daemon
+        .child
+        .kill()
+        .expect("daemon should be killable");
+    crashed_daemon
+        .child
+        .wait()
+        .expect("crashed daemon should be reaped");
+
+    let config_path = crashed_daemon._directory.path().join("daemon.toml");
+    let start_gate = Arc::new(Barrier::new(STARTERS));
+    let mut launchers = Vec::with_capacity(STARTERS);
+    for _ in 0..STARTERS {
+        let config_path = config_path.clone();
+        let start_gate = Arc::clone(&start_gate);
+        launchers.push(thread::spawn(move || {
+            start_gate.wait();
+            Command::new(env!("CARGO_BIN_EXE_baffle"))
+                .arg("daemon")
+                .arg("--config")
+                .arg(config_path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("concurrent daemon process should start")
+        }));
+    }
+    let mut starters = DaemonProcesses(
+        launchers
+            .into_iter()
+            .map(|launcher| launcher.join().expect("launcher thread should finish"))
+            .collect(),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut alive = 0;
+        for child in &mut starters.0 {
+            if child
+                .try_wait()
+                .expect("daemon process status should be readable")
+                .is_none()
+            {
+                alive += 1;
+            }
+        }
+        let responding = UnixStream::connect(&crashed_daemon.socket)
+            .ok()
+            .and_then(|mut stream| {
+                stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+                write_frame(&mut stream, b"version = 1\noperation = \"list\"\n");
+                Some(read_response(&mut stream)["ok"] == true)
+            })
+            .unwrap_or(false);
+
+        if alive == 1 && responding {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "exactly one concurrent restart should own a responding control socket; {alive} processes remain"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        request(
+            &crashed_daemon.socket,
+            "version = 1\noperation = \"list\"\n"
+        )["ok"],
+        true,
+        "the surviving daemon should retain its control socket"
+    );
+
+    drop(starters);
 }
 
 fn start_daemon(read_timeout_ms: u64) -> DaemonProcess {

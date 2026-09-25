@@ -2,9 +2,13 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, Read},
-    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    os::unix::net::UnixStream as StdUnixStream,
+    os::{
+        fd::AsRawFd,
+        unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -116,11 +120,23 @@ impl ControlServer {
         ensure_private_directory(parent, trusted_uid)?;
         ensure_private_directory(socket_dir, trusted_uid)?;
 
+        // Keep this lock until the control listener is bound. A lock file is
+        // intentionally retained: unlinking it while another process waits
+        // would let a third process lock a different inode.
+        let _startup_lock = StartupLock::acquire(control_socket, trusted_uid)?;
+
         match fs::symlink_metadata(control_socket) {
+            Ok(metadata) if metadata.file_type().is_socket() => {
+                if !remove_stale_socket(control_socket, trusted_uid)? {
+                    bail!("control socket path already exists");
+                }
+            }
             Ok(_) => bail!("control socket path already exists"),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error).context("could not inspect control socket path"),
         }
+
+        remove_stale_session_sockets(socket_dir, trusted_uid)?;
 
         let listener = UnixListener::bind(control_socket).with_context(|| {
             format!("could not bind control socket {}", control_socket.display())
@@ -260,6 +276,48 @@ impl ControlServer {
     }
 }
 
+struct StartupLock {
+    _file: File,
+}
+
+impl StartupLock {
+    fn acquire(control_socket: &Path, expected_uid: u32) -> Result<Self> {
+        let lock_name = format!(
+            "{}.lock",
+            control_socket
+                .file_name()
+                .context("control socket path has no file name")?
+                .to_string_lossy()
+        );
+        let lock_path = control_socket.with_file_name(lock_name);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&lock_path)
+            .with_context(|| format!("could not open startup lock {}", lock_path.display()))?;
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("could not inspect startup lock {}", lock_path.display()))?;
+        if !metadata.is_file()
+            || metadata.uid() != expected_uid
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            bail!("startup lock has unexpected owner, type, or permissions");
+        }
+
+        // flock is released by closing the file if startup fails.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == -1 {
+            return Err(io::Error::last_os_error())
+                .with_context(|| format!("could not lock startup file {}", lock_path.display()));
+        }
+
+        Ok(Self { _file: file })
+    }
+}
+
 fn ensure_private_directory(path: &Path, expected_uid: u32) -> Result<()> {
     let absolute_path = if path.is_absolute() {
         path.to_path_buf()
@@ -295,6 +353,83 @@ fn ensure_private_directory(path: &Path, expected_uid: u32) -> Result<()> {
     }
     if metadata.permissions().mode() & 0o077 != 0 {
         bail!("control socket directory permissions must be 0700 or more restrictive");
+    }
+    Ok(())
+}
+
+/// Remove a disconnected Unix socket without deleting an active listener or a
+/// path that changed while it was being checked. Returns true only when this
+/// call removed a stale socket.
+fn remove_stale_socket(path: &Path, expected_uid: u32) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not inspect {}", path.display()));
+        }
+    };
+    if !metadata.file_type().is_socket() || metadata.uid() != expected_uid {
+        return Ok(false);
+    }
+
+    match StdUnixStream::connect(path) {
+        Ok(stream) => {
+            drop(stream);
+            Ok(false)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) =>
+        {
+            let current = match fs::symlink_metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("could not recheck {}", path.display()));
+                }
+            };
+            if !current.file_type().is_socket()
+                || current.uid() != expected_uid
+                || current.dev() != metadata.dev()
+                || current.ino() != metadata.ino()
+            {
+                bail!("socket path changed during stale socket cleanup");
+            }
+            fs::remove_file(path)
+                .with_context(|| format!("could not remove stale socket {}", path.display()))?;
+            Ok(true)
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "could not check whether socket {} is active",
+                path.display()
+            )
+        }),
+    }
+}
+
+fn remove_stale_session_sockets(directory: &Path, expected_uid: u32) -> Result<()> {
+    for entry in fs::read_dir(directory).with_context(|| {
+        format!(
+            "could not read session socket directory {}",
+            directory.display()
+        )
+    })? {
+        let entry = entry.context("could not inspect session socket directory entry")?;
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("could not inspect {}", path.display()));
+            }
+        };
+        if metadata.file_type().is_socket() {
+            remove_stale_socket(&path, expected_uid)?;
+        }
     }
     Ok(())
 }
@@ -1091,5 +1226,82 @@ mod tests {
                 .as_str(),
             "credential-must-not-leak"
         );
+    }
+}
+
+#[cfg(test)]
+mod startup_lock_tests {
+    use super::{StartupLock, remove_stale_socket};
+    use std::{
+        os::unix::{
+            fs::{MetadataExt, PermissionsExt},
+            net::{UnixListener, UnixStream},
+        },
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
+
+    #[test]
+    fn serializes_stale_socket_cleanup_through_listener_bind() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("control directory should be private");
+        let uid = std::fs::metadata(directory.path())
+            .expect("control directory metadata should be readable")
+            .uid();
+        let socket = directory.path().join("control.sock");
+
+        drop(UnixListener::bind(&socket).expect("stale test socket should bind"));
+        let first_lock = StartupLock::acquire(&socket, uid).expect("first startup should lock");
+        assert!(
+            remove_stale_socket(&socket, uid).expect("stale socket should be removed"),
+            "the first startup should remove the disconnected socket"
+        );
+        let listener = UnixListener::bind(&socket).expect("first startup should bind listener");
+
+        let socket_for_second = socket.clone();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (finished_sender, finished_receiver) = mpsc::channel();
+        let second_start = thread::spawn(move || {
+            started_sender
+                .send(())
+                .expect("test should observe the second start");
+            let _lock = StartupLock::acquire(&socket_for_second, uid)
+                .expect("second startup should acquire the lock after the first binds");
+            let removed = remove_stale_socket(&socket_for_second, uid)
+                .expect("active socket check should succeed");
+            let bind_failed = UnixListener::bind(&socket_for_second).is_err();
+            finished_sender
+                .send((removed, bind_failed))
+                .expect("test should observe the second start result");
+        });
+
+        started_receiver
+            .recv()
+            .expect("second startup should reach the lock");
+        assert!(
+            finished_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "second startup must wait while the first holds the lock through bind"
+        );
+        drop(first_lock);
+
+        assert_eq!(
+            finished_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("second startup should continue after the first binds"),
+            (false, true),
+            "second startup must preserve the active socket and fail to bind"
+        );
+        second_start
+            .join()
+            .expect("second startup thread should finish");
+        assert!(
+            UnixStream::connect(&socket).is_ok(),
+            "first startup's listener should remain reachable"
+        );
+        drop(listener);
     }
 }

@@ -204,6 +204,7 @@ dependencies = [
  "base64",
  "clap",
  "hudsucker",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
