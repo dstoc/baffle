@@ -147,6 +147,8 @@ fn is_public_ipv4(address: Ipv4Addr) -> bool {
         && !(a == 198 && (b == 18 || b == 19))
         && !(a == 198 && b == 51 && c == 100)
         && !(a == 203 && b == 0 && c == 113)
+        // Azure WireServer is a VM platform endpoint, despite being in public address space.
+        && address != Ipv4Addr::new(168, 63, 129, 16)
         && a < 240
 }
 
@@ -233,6 +235,7 @@ mod tests {
             ("100.64.0.1", false),
             ("192.0.2.1", false),
             ("198.18.0.1", false),
+            ("168.63.129.16", false),
             ("224.0.0.1", false),
             ("240.0.0.1", false),
             ("2606:4700:4700::1111", true),
@@ -293,6 +296,24 @@ mod tests {
         let result = connector.connect(authority).await;
 
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn rejects_azure_wireserver_resolution_before_connecting() {
+        let connector = mock_connector(
+            vec![vec!["168.63.129.16".parse().unwrap()]],
+            policy("allowed.example", "ports = [80]", ""),
+        );
+
+        let result = connector
+            .connect("allowed.example:80".parse().unwrap())
+            .await;
+
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied,
+            "Azure WireServer must be denied before the connector attempts a TCP dial"
+        );
     }
 
     #[tokio::test]
