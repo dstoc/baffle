@@ -21,10 +21,12 @@ do not match a session policy.
   and validates the CONNECT hostname, TLS SNI, and HTTP authority. It checks
   every intercepted request. If required interception fails, Baffle rejects
   the connection instead of opening an opaque tunnel.
-* **Credential protection:** Baffle injects daemon-managed credentials only
+* **Credential handling:** Baffle injects daemon-managed credentials only
   into authorized HTTPS requests after successful interception, upstream TLS
-  identity verification, and policy checks. It never sends those credentials
-  to clients or injects them into plaintext requests or opaque tunnels.
+  identity verification, and policy checks. It does not inject credentials
+  into plaintext requests or opaque tunnels. Baffle forwards upstream
+  responses without filtering credential values, so trust allowlisted sites
+  with injected credentials.
 * **Opaque tunnels:** Explicit tunnel-only rules support destinations without
   path restrictions or credential injection. Baffle cannot inspect tunnel
   contents, prove they carry HTTPS, or verify the upstream certificate; the
