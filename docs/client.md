@@ -33,6 +33,15 @@ The [client example](../examples/client.rs) sends an HTTP proxy request through
 the returned Unix socket, reads the response, and closes the lease. The request
 is forwarded only when the session policy allows its host and destination port.
 
+Set `HostRule.paths` to allow exact URL paths or recursive patterns such as
+`/repos/example/project/**`. Exact rules match only the listed path. Recursive
+rules match the slash after the listed path and all descendant segments.
+Matching is case-sensitive and ignores the query string. Baffle rejects
+ambiguous encodings and forwards the same canonical path that it authorized.
+These checks apply to each plaintext HTTP request and to each request on an
+intercepted HTTPS connection. A path-restricted rule cannot accept an opaque
+HTTPS CONNECT tunnel.
+
 Use `with_private_address` to allow one exact non-public DNS answer for a host.
 The exception applies only to that rule's ports. Other non-public DNS answers
 remain denied.

@@ -229,14 +229,7 @@ impl PathRule {
         &self.path
     }
 
-    /// Check a request path against this validated exact or recursive pattern.
-    ///
-    /// Request paths use the same canonicalization rules as configured paths.
-    /// Invalid or ambiguous request paths never match.
-    pub(crate) fn matches_path(&self, path: &str) -> bool {
-        let Ok(path) = canonicalize_path(path) else {
-            return false;
-        };
+    pub(crate) fn matches_canonical_path(&self, path: &str) -> bool {
         if self.recursive {
             path.starts_with(&self.path)
         } else {
@@ -400,12 +393,11 @@ fn validate_rules(raw_rules: Vec<RawHostRule>) -> Result<Vec<HostRule>, ConfigEr
                 "{context} cannot intercept plaintext HTTP on port 80"
             )));
         }
-        if raw.mode == RuleMode::Tunnel && (!raw.paths.is_empty() || !raw.inject.is_empty()) {
+        if raw.mode == RuleMode::Tunnel && !raw.inject.is_empty() {
             return Err(ConfigError::new(format!(
-                "{context} tunnel rules cannot set paths or inject headers"
+                "{context} tunnel rules cannot inject headers"
             )));
         }
-
         let mut paths = Vec::with_capacity(raw.paths.len());
         for (path_index, raw_path) in raw.paths.into_iter().enumerate() {
             let path = validate_path(&raw_path.0).map_err(|message| {
@@ -612,6 +604,10 @@ fn canonicalize_path(path: &str) -> Result<String, &'static str> {
     }
 
     Ok(canonical)
+}
+
+pub(crate) fn canonicalize_request_path(path: &str) -> Result<String, &'static str> {
+    canonicalize_path(if path.is_empty() { "/" } else { path })
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
@@ -993,6 +989,21 @@ directory = "/var/lib/baffle/secrets"
     }
 
     #[test]
+    fn accepts_path_restrictions_for_explicit_plaintext_http_rules() {
+        let request = ControlRequest::from_toml(
+            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\nports = [80]\npaths = [\"/public\"]\n",
+        )
+        .expect("plaintext HTTP path rule should parse");
+        let ControlRequest::Create { session, .. } = request else {
+            panic!("expected create request");
+        };
+        assert_eq!(session.rules[0].mode, RuleMode::Tunnel);
+        assert_eq!(session.rules[0].ports, [80]);
+        assert_eq!(session.rules[0].paths[0].as_str(), "/public");
+        assert!(session.rules[0].inject.is_empty());
+    }
+
+    #[test]
     fn defaults_create_persistence_and_destination_port() {
         let request =
             ControlRequest::from_toml(MINIMAL_CREATE).expect("minimal create request should parse");
@@ -1100,12 +1111,6 @@ directory = "/var/lib/baffle/secrets"
                 "duplicate private destination address",
                 config_with(
                     "host = \"example.com\"\nmode = \"tunnel\"\nprivate_addresses = [\"10.0.0.1\", \"10.0.0.1\"]",
-                ),
-            ),
-            (
-                "path on tunnel",
-                config_with(
-                    "host = \"example.com\"\nmode = \"tunnel\"\npaths = [\"/private\"]",
                 ),
             ),
             (

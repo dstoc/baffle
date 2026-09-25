@@ -136,9 +136,11 @@ impl SessionConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleMode {
-    /// Permit HTTPS CONNECT without TLS decryption.
+    /// Permit HTTPS CONNECT without TLS decryption. Path-restricted rules do
+    /// not permit CONNECT; their paths can still restrict plaintext HTTP.
     Tunnel,
-    /// Intercept HTTPS so path and header rules can be applied.
+    /// Intercept HTTPS so path and header rules can be applied. Path rules
+    /// also apply to explicitly permitted plaintext HTTP requests.
     Intercept,
 }
 
@@ -155,7 +157,9 @@ pub struct HostRule {
     /// Exact non-public destination addresses permitted for this hostname.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub private_addresses: Vec<String>,
-    /// Optional exact paths or recursive patterns such as `/v1/**`.
+    /// Optional exact paths or recursive patterns such as `/v1/**`. Paths
+    /// match case-sensitively, ignore query strings, and are canonicalized
+    /// before forwarding. Unsafe or ambiguous encodings are denied.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
     /// Optional daemon-managed header injections.
