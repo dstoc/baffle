@@ -227,7 +227,6 @@ impl PathRule {
         &self.path
     }
 
-    #[cfg(feature = "backend-hudsucker")]
     pub(crate) fn matches_canonical_path(&self, path: &str) -> bool {
         if self.recursive {
             path.starts_with(&self.path)
@@ -578,7 +577,6 @@ fn canonicalize_path(path: &str) -> Result<String, &'static str> {
     Ok(canonical)
 }
 
-#[cfg(feature = "backend-hudsucker")]
 pub(crate) fn canonicalize_request_path(path: &str) -> Result<String, &'static str> {
     canonicalize_path(if path.is_empty() { "/" } else { path })
 }

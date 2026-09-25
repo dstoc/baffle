@@ -10,7 +10,6 @@ pub use baffle_client as client;
 pub mod config;
 pub mod control;
 pub mod daemon;
-#[cfg(feature = "backend-hudsucker")]
 mod policy;
 pub mod proxy_runtime;
 mod secrets;

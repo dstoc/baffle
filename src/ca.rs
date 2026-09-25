@@ -19,6 +19,9 @@ use x509_parser::{parse_x509_certificate, pem::parse_x509_pem};
 
 use crate::config::CaConfig;
 
+#[cfg(feature = "backend-rama")]
+use rama::tls::boring::core::{pkey::PKey, pkey::Private, x509::X509};
+
 #[cfg(feature = "backend-hudsucker")]
 const CERTIFICATE_CACHE_CAPACITY: u64 = 4096;
 
@@ -26,6 +29,10 @@ const CERTIFICATE_CACHE_CAPACITY: u64 = 4096;
 pub struct ManagedCa {
     #[cfg(feature = "backend-hudsucker")]
     authority: Arc<RcgenAuthority>,
+    #[cfg(feature = "backend-rama")]
+    rama_certificate: X509,
+    #[cfg(feature = "backend-rama")]
+    rama_private_key: PKey<Private>,
     public_certificate_pem: Arc<[u8]>,
 }
 
@@ -65,6 +72,13 @@ impl ManagedCa {
         let issuer = Issuer::from_ca_cert_pem(certificate_pem, key_pair)
             .context("CA certificate cannot be used as an issuer")?;
 
+        #[cfg(feature = "backend-rama")]
+        let (rama_certificate, rama_private_key) = (
+            X509::from_pem(&certificate.pem).context("could not load CA certificate for Rama")?,
+            PKey::private_key_from_pem(&key_bytes)
+                .context("could not load CA private key for Rama")?,
+        );
+
         // Hudsucker generates leaves lazily. Sign a probe now so unsupported or
         // unusable signing keys fail daemon startup instead of the first request.
         CertificateParams::default()
@@ -81,6 +95,10 @@ impl ManagedCa {
         Ok(Self {
             #[cfg(feature = "backend-hudsucker")]
             authority: Arc::new(authority),
+            #[cfg(feature = "backend-rama")]
+            rama_certificate,
+            #[cfg(feature = "backend-rama")]
+            rama_private_key,
             public_certificate_pem: certificate.pem.into(),
         })
     }
@@ -89,6 +107,15 @@ impl ManagedCa {
     #[cfg(feature = "backend-hudsucker")]
     pub fn for_proxy(&self) -> SharedCaAuthority {
         SharedCaAuthority(Arc::clone(&self.authority))
+    }
+
+    /// Return Rama's BoringSSL issuer material to the backend runtime.
+    ///
+    /// The managed CA remains the daemon-owned source of truth. The Rama
+    /// backend only clones the in-memory key handle needed to sign leaves.
+    #[cfg(feature = "backend-rama")]
+    pub(crate) fn for_rama_proxy(&self) -> (X509, PKey<Private>) {
+        (self.rama_certificate.clone(), self.rama_private_key.clone())
     }
 
     /// Return the public certificate PEM. The private signing key is not exposed.
