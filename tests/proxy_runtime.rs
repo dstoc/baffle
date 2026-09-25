@@ -1269,3 +1269,98 @@ async fn http_and_connect_use_default_connectors_for_an_authorized_loopback_host
         .await
         .expect("upstream task should complete successfully");
 }
+
+#[tokio::test]
+async fn websocket_uses_default_connector_and_denies_unapproved_port_before_dialing() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let authorized_upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("authorized WebSocket upstream should bind");
+    let authorized_port = authorized_upstream
+        .local_addr()
+        .expect("authorized upstream address should be available")
+        .port();
+    let denied_upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("denied WebSocket upstream should bind");
+    let denied_port = denied_upstream
+        .local_addr()
+        .expect("denied upstream address should be available")
+        .port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-authorized-websocket");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        loopback_session_config(authorized_port),
+        ca,
+        directory.path().join("authorized-websocket.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("runtime should start");
+
+    let mut denied_client = TcpStream::connect(runtime.local_addr())
+        .await
+        .expect("proxy should accept the denied WebSocket request");
+    denied_client
+        .write_all(
+            format!(
+                "GET http://localhost:{denied_port}/socket HTTP/1.1\r\nHost: localhost:{denied_port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("denied WebSocket request should be sent");
+    let mut denied_response = BufReader::new(denied_client);
+    let denied_status = read_http1_status(&mut denied_response)
+        .await
+        .expect("denied response should be readable");
+    assert!(
+        denied_status.starts_with("HTTP/1.1 403") || denied_status.starts_with("HTTP/1.0 403"),
+        "an unapproved destination port should be denied: {denied_status:?}"
+    );
+    assert!(
+        timeout(Duration::from_millis(200), denied_upstream.accept())
+            .await
+            .is_err(),
+        "the denied WebSocket destination must not receive an outbound connection"
+    );
+
+    let mut authorized_client = TcpStream::connect(runtime.local_addr())
+        .await
+        .expect("proxy should accept the authorized WebSocket request");
+    authorized_client
+        .write_all(
+            format!(
+                "GET http://localhost:{authorized_port}/socket HTTP/1.1\r\nHost: localhost:{authorized_port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("authorized WebSocket request should be sent");
+    let mut authorized_response = BufReader::new(authorized_client);
+    let authorized_status = read_http1_status(&mut authorized_response)
+        .await
+        .expect("authorized response should be readable");
+    assert!(
+        authorized_status.starts_with("HTTP/1.1 101"),
+        "authorized WebSocket request should upgrade: {authorized_status:?}"
+    );
+
+    let (upstream_stream, _) = timeout(Duration::from_secs(3), authorized_upstream.accept())
+        .await
+        .expect("authorized WebSocket should dial the upstream")
+        .expect("authorized upstream should accept the connection");
+    timeout(
+        Duration::from_secs(3),
+        hudsucker::tokio_tungstenite::accept_async(upstream_stream),
+    )
+    .await
+    .expect("WebSocket handshake should reach the authorized upstream")
+    .expect("authorized upstream should complete the WebSocket handshake");
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
