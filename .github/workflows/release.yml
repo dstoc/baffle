@@ -1,0 +1,61 @@
+name: Linux release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    name: Package Linux x86-64 binary
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check release tag against package version
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "baffle-proxy") | .version')"
+          test "$tag_version" = "$package_version"
+
+      - name: Build release binary
+        run: cargo build --locked --release --package baffle-proxy --bin baffle
+
+      - name: Check binary version
+        run: ./target/release/baffle --version
+
+      - name: Package binary and documentation
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          target="x86_64-unknown-linux-gnu"
+          asset="baffle-proxy-v${version}-${target}.tar.gz"
+          stage="$(mktemp -d)"
+          mkdir -p "$stage/share/doc/baffle"
+          install -m 0755 target/release/baffle "$stage/baffle"
+          install -m 0644 README.md "$stage/share/doc/baffle/README.md"
+          cp -R docs "$stage/share/doc/baffle/docs"
+          cp -R examples "$stage/share/doc/baffle/examples"
+          mkdir -p dist
+          tar -C "$stage" -czf "dist/$asset" .
+          (cd dist && sha256sum "$asset" > SHA256SUMS)
+
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          "dist/baffle-proxy-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz"
+          dist/SHA256SUMS
+          --title "Baffle $GITHUB_REF_NAME"
+          --generate-notes

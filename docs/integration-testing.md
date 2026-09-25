@@ -1,6 +1,6 @@
 # Integration test suite
 
-The Rust and Python tests run in `.github/workflows/ci.yml` on `ubuntu-latest`. They cover protocol framing, session lifecycle, proxy policy, DNS filtering, credential handling, and runtime cleanup.
+The Rust and Python tests run in `.github/workflows/ci.yml` on `ubuntu-latest`. CI also compiles all Rust examples, parses the checked-in daemon and session TOML examples, and runs the Rust suite in debug and release profiles. The tagged release workflow builds and packages the optimized Linux binary.
 
 | Area | Coverage |
 | --- | --- |
@@ -9,6 +9,7 @@ The Rust and Python tests run in `.github/workflows/ci.yml` on `ubuntu-latest`. 
 | DNS and egress | `src/egress.rs`: mixed and rebinding answers, failed lookups, private address exceptions, and validated address dialing. |
 | Secret handling | `src/secrets.rs`, `src/proxy_runtime.rs`, and `src/control.rs`: entitlement checks, redaction, supported authorization formats, host/path/port/scheme/authority boundaries, and WebSocket rejection. |
 | Runtime resilience | `src/proxy_runtime.rs`, `src/control.rs`, `tests/daemon_lifecycle.rs`: connection and provisioning limits, I/O timeouts, task failures, bounded shutdown, and socket cleanup. |
+| Documentation examples | `tests/documentation.rs`: parses the daemon, session, credential, list, and stop TOML examples using the public configuration types. `cargo check --examples` compiles the Rust client and `socat` examples. Live upstream requests are not part of CI. |
 
 The unit suite injects DNS answers and peer credentials to make rebinding and unauthorized-user checks deterministic. The Linux process tests exercise the assembled daemon and Unix sockets.
 
