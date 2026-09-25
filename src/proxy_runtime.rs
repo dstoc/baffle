@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     ca::ManagedCa,
     config::{RuleMode, SessionConfig},
+    egress::EgressConnector,
     policy::{AuthorizationError, SessionPolicy},
     telemetry::Metrics,
 };
@@ -159,10 +160,11 @@ impl ProxyRuntime {
         let bridge_force_cancellation = CancellationToken::new();
         let policy = Arc::new(SessionPolicy::compile(&session));
 
+        let egress = EgressConnector::system();
         let proxy = Proxy::builder()
             .with_listener(listener)
             .with_ca(ca.for_proxy())
-            .with_rustls_connector(aws_lc_rs::default_provider())
+            .with_rustls_connector_and_tcp_connector(aws_lc_rs::default_provider(), egress)
             .with_http_handler(PolicyHandler::with_metrics(
                 runtime_id.clone(),
                 Arc::clone(&policy),

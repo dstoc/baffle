@@ -266,6 +266,9 @@ features = [
 [dependencies.tokio-tungstenite]
 version = "0.30.0"
 
+[dependencies.tower-service]
+version = "0.3.3"
+
 [dependencies.tokio-util]
 version = "0.7.1"
 features = ["io"]
