@@ -160,7 +160,7 @@ impl ProxyRuntime {
         let bridge_force_cancellation = CancellationToken::new();
         let policy = Arc::new(SessionPolicy::compile(&session));
 
-        let egress = EgressConnector::system();
+        let egress = EgressConnector::system(Arc::clone(&policy));
         let proxy = Proxy::builder()
             .with_listener(listener)
             .with_ca(ca.for_proxy())

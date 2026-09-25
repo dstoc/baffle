@@ -10,6 +10,8 @@ use std::{
 use hudsucker::{TcpConnector, hyper_util::client::legacy::connect::dns::Name};
 use tower_service::Service;
 
+use crate::policy::SessionPolicy;
+
 type LookupFuture = Pin<Box<dyn Future<Output = io::Result<Vec<IpAddr>>> + Send + 'static>>;
 
 trait HostResolver: Send + Sync + 'static {
@@ -19,13 +21,20 @@ trait HostResolver: Send + Sync + 'static {
 #[derive(Clone)]
 pub(crate) struct EgressConnector {
     resolver: Arc<dyn HostResolver>,
+    policy: Arc<SessionPolicy>,
 }
 
 impl EgressConnector {
-    pub(crate) fn system() -> Self {
+    pub(crate) fn system(policy: Arc<SessionPolicy>) -> Self {
         Self {
             resolver: Arc::new(SystemResolver),
+            policy,
         }
+    }
+
+    #[cfg(test)]
+    fn with_resolver(policy: Arc<SessionPolicy>, resolver: Arc<dyn HostResolver>) -> Self {
+        Self { resolver, policy }
     }
 
     async fn resolve_addresses(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
@@ -37,7 +46,14 @@ impl EgressConnector {
 
         let addresses: Vec<_> = addresses
             .into_iter()
-            .filter(is_public_destination)
+            .filter(|address| {
+                is_public_destination(address)
+                    || self.policy.permits_private_address(
+                        host,
+                        (port != 0).then_some(port),
+                        *address,
+                    )
+            })
             .map(|address| SocketAddr::new(address, port))
             .collect();
         if addresses.is_empty() {
@@ -158,6 +174,8 @@ mod tests {
     use super::*;
     use std::{collections::VecDeque, sync::Mutex};
 
+    use crate::{config::ControlRequest, policy::SessionPolicy};
+
     struct QueueResolver(Mutex<VecDeque<Vec<IpAddr>>>);
 
     impl HostResolver for QueueResolver {
@@ -170,10 +188,23 @@ mod tests {
         }
     }
 
-    fn mock_connector(responses: Vec<Vec<IpAddr>>) -> EgressConnector {
-        EgressConnector {
-            resolver: Arc::new(QueueResolver(Mutex::new(responses.into()))),
-        }
+    fn policy(host: &str, ports: &str, private_addresses: &str) -> Arc<SessionPolicy> {
+        let input = format!(
+            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n{ports}\n{private_addresses}\n"
+        );
+        let ControlRequest::Create { session, .. } =
+            ControlRequest::from_toml(&input).expect("test session policy should parse")
+        else {
+            panic!("test request should create a session");
+        };
+        Arc::new(SessionPolicy::compile(&session))
+    }
+
+    fn mock_connector(responses: Vec<Vec<IpAddr>>, policy: Arc<SessionPolicy>) -> EgressConnector {
+        EgressConnector::with_resolver(
+            policy,
+            Arc::new(QueueResolver(Mutex::new(responses.into()))),
+        )
     }
 
     #[test]
@@ -210,10 +241,13 @@ mod tests {
 
     #[tokio::test]
     async fn filters_mixed_dns_answers_and_rechecks_rebinding_answers() {
-        let mut connector = mock_connector(vec![
-            vec!["8.8.8.8".parse().unwrap(), "127.0.0.1".parse().unwrap()],
-            vec!["169.254.169.254".parse().unwrap()],
-        ]);
+        let mut connector = mock_connector(
+            vec![
+                vec!["8.8.8.8".parse().unwrap(), "127.0.0.1".parse().unwrap()],
+                vec!["169.254.169.254".parse().unwrap()],
+            ],
+            policy("api.example", "ports = [443]", ""),
+        );
 
         let name = "api.example"
             .parse::<Name>()
@@ -235,7 +269,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_dns_answers_with_only_prohibited_destinations() {
-        let connector = mock_connector(vec![vec!["10.1.2.3".parse().unwrap()]]);
+        let connector = mock_connector(
+            vec![vec!["10.1.2.3".parse().unwrap()]],
+            policy("api.example", "ports = [443]", ""),
+        );
 
         let authority = "api.example:443"
             .parse()
@@ -243,5 +280,92 @@ mod tests {
         let result = connector.connect(authority).await;
 
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn http_dns_resolution_allows_only_the_sessions_explicit_private_address() {
+        let private_address = "10.1.2.3".parse().unwrap();
+        let mut connector = mock_connector(
+            vec![vec![private_address, "10.1.2.4".parse().unwrap()]],
+            policy(
+                "api.internal.example",
+                "ports = [8443]",
+                "private_addresses = [\"10.1.2.3\"]",
+            ),
+        );
+        let name = "api.internal.example"
+            .parse::<Name>()
+            .expect("test DNS name should parse");
+
+        let resolved = connector
+            .call(name.clone())
+            .await
+            .expect("explicitly permitted private DNS answer should remain usable")
+            .collect::<Vec<_>>();
+        assert_eq!(resolved, vec!["10.1.2.3:0".parse().unwrap()]);
+
+        let mut other_session = mock_connector(
+            vec![vec![private_address]],
+            policy("api.internal.example", "ports = [8443]", ""),
+        );
+        let denied = other_session
+            .call(name)
+            .await
+            .expect_err("a second session must not inherit the private address exception");
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn connect_dials_an_explicit_private_address_only_on_the_rule_port() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test destination should bind");
+        let port = listener
+            .local_addr()
+            .expect("test destination address should be available")
+            .port();
+        let connector = mock_connector(
+            vec![
+                vec!["127.0.0.1".parse().unwrap(), "127.0.0.2".parse().unwrap()],
+                vec!["127.0.0.1".parse().unwrap()],
+            ],
+            policy(
+                "internal.example",
+                &format!("ports = [{port}]"),
+                "private_addresses = [\"127.0.0.1\"]",
+            ),
+        );
+
+        let stream = connector
+            .connect(format!("internal.example:{port}").parse().unwrap())
+            .await
+            .expect("explicit CONNECT exception should dial the permitted address");
+        let (accepted, _) = listener
+            .accept()
+            .await
+            .expect("permitted private destination should receive the connection");
+        assert_eq!(
+            stream.local_addr().unwrap().ip(),
+            "127.0.0.1".parse::<IpAddr>().unwrap()
+        );
+        drop(accepted);
+        drop(stream);
+
+        let wrong_port = if port == 443 { 444 } else { 443 };
+        let denied = connector
+            .connect(format!("internal.example:{wrong_port}").parse().unwrap())
+            .await
+            .expect_err("the exception must not permit another destination port");
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+
+        let other_session = mock_connector(
+            vec![vec!["127.0.0.1".parse().unwrap()]],
+            policy("internal.example", &format!("ports = [{port}]"), ""),
+        );
+        let denied = other_session
+            .connect(format!("internal.example:{port}").parse().unwrap())
+            .await
+            .expect_err("a second session must not inherit the private address exception");
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
     }
 }

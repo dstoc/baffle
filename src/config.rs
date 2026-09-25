@@ -198,6 +198,8 @@ pub struct HostRule {
     pub host: String,
     pub mode: RuleMode,
     pub ports: Vec<u16>,
+    /// Exact non-public destination addresses permitted for this hostname.
+    pub private_addresses: Vec<IpAddr>,
     pub paths: Vec<PathRule>,
     pub inject: Vec<HeaderInjection>,
 }
@@ -468,10 +470,27 @@ fn validate_rules(raw_rules: Vec<RawHostRule>) -> Result<Vec<HostRule>, ConfigEr
             });
         }
 
+        let mut private_addresses = Vec::with_capacity(raw.private_addresses.len());
+        let mut addresses = HashSet::with_capacity(raw.private_addresses.len());
+        for (address_index, raw_address) in raw.private_addresses.iter().enumerate() {
+            let address = raw_address.parse::<IpAddr>().map_err(|_| {
+                ConfigError::new(format!(
+                    "{context}.private_addresses[{address_index}] must be an IP address"
+                ))
+            })?;
+            if !addresses.insert(address) {
+                return Err(ConfigError::new(format!(
+                    "{context}.private_addresses contains a duplicate"
+                )));
+            }
+            private_addresses.push(address);
+        }
+
         rules.push(HostRule {
             host,
             mode: raw.mode,
             ports: raw.ports,
+            private_addresses,
             paths,
             inject,
         });
@@ -812,6 +831,8 @@ struct RawHostRule {
     #[serde(default = "default_ports")]
     ports: Vec<u16>,
     #[serde(default)]
+    private_addresses: Vec<String>,
+    #[serde(default)]
     paths: Vec<RawPathRule>,
     #[serde(default)]
     inject: Vec<RawHeaderInjection>,
@@ -982,6 +1003,27 @@ directory = "/var/lib/baffle/secrets"
         assert!(!session.persistent);
         assert_eq!(session.rules[0].host, "example.com");
         assert_eq!(session.rules[0].ports, [443]);
+        assert!(session.rules[0].private_addresses.is_empty());
+    }
+
+    #[test]
+    fn validates_exact_private_destination_addresses() {
+        let request = ControlRequest::from_toml(
+            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"Internal.Example.\"\nmode = \"tunnel\"\nports = [8443]\nprivate_addresses = [\"10.20.30.40\", \"fd00::8\"]\n",
+        )
+        .expect("exact private destination addresses should parse");
+        let ControlRequest::Create { session, .. } = request else {
+            panic!("expected create request");
+        };
+        assert_eq!(session.rules[0].host, "internal.example");
+        assert_eq!(session.rules[0].ports, [8443]);
+        assert_eq!(
+            session.rules[0].private_addresses,
+            vec![
+                "10.20.30.40".parse::<std::net::IpAddr>().unwrap(),
+                "fd00::8".parse::<std::net::IpAddr>().unwrap()
+            ]
+        );
     }
 
     #[test]
@@ -1047,6 +1089,18 @@ directory = "/var/lib/baffle/secrets"
             (
                 "empty port list",
                 config_with("host = \"example.com\"\nmode = \"tunnel\"\nports = []"),
+            ),
+            (
+                "invalid private destination address",
+                config_with(
+                    "host = \"example.com\"\nmode = \"tunnel\"\nprivate_addresses = [\"internal\"]",
+                ),
+            ),
+            (
+                "duplicate private destination address",
+                config_with(
+                    "host = \"example.com\"\nmode = \"tunnel\"\nprivate_addresses = [\"10.0.0.1\", \"10.0.0.1\"]",
+                ),
             ),
             (
                 "path on tunnel",

@@ -36,6 +36,18 @@ fn intercept_session_config(port: u16) -> SessionConfig {
     session
 }
 
+fn private_destination_session_config(port: u16) -> SessionConfig {
+    let toml = format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{port}]\nprivate_addresses = [\"127.0.0.1\"]\n"
+    );
+    let ControlRequest::Create { session, .. } =
+        ControlRequest::from_toml(&toml).expect("private destination session should be valid")
+    else {
+        panic!("test request should create a session");
+    };
+    session
+}
+
 fn write_test_ca(directory: &std::path::Path) -> Arc<ManagedCa> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -377,4 +389,152 @@ async fn unauthorized_ip_literal_is_rejected_before_an_upstream_connection() {
 
     runtime.shutdown(Duration::from_secs(2)).await;
     assert_exit(&mut events, &runtime_id).await;
+}
+
+#[tokio::test]
+async fn http_and_connect_can_use_an_explicit_private_destination() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream
+        .local_addr()
+        .expect("test upstream address should be available")
+        .port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-private-destination");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        private_destination_session_config(upstream_port),
+        ca,
+        directory.path().join("private-destination.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("runtime should start");
+
+    let upstream_task = tokio::spawn(async move {
+        let (mut http, _) = upstream
+            .accept()
+            .await
+            .expect("authorized HTTP request should reach upstream");
+        let mut request = Vec::new();
+        let mut chunk = [0; 1024];
+        loop {
+            let count = http
+                .read(&mut chunk)
+                .await
+                .expect("upstream request should be readable");
+            assert_ne!(count, 0, "upstream should receive an HTTP request");
+            request.extend_from_slice(&chunk[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        assert!(request.starts_with(b"GET / HTTP/1.1"));
+        http.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .expect("HTTP response should reach the proxy");
+        http.shutdown()
+            .await
+            .expect("HTTP upstream should close cleanly");
+
+        let (mut tunnel, _) = upstream
+            .accept()
+            .await
+            .expect("authorized CONNECT should reach upstream");
+        let mut payload = [0; 4];
+        tunnel
+            .read_exact(&mut payload)
+            .await
+            .expect("CONNECT payload should reach upstream");
+        tunnel
+            .write_all(&payload)
+            .await
+            .expect("CONNECT response should reach the proxy");
+    });
+
+    let mut http_client = TcpStream::connect(runtime.local_addr())
+        .await
+        .expect("proxy should accept HTTP");
+    http_client
+        .write_all(
+            format!(
+                "GET http://localhost:{upstream_port}/ HTTP/1.1\r\nHost: localhost:{upstream_port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("HTTP request should be sent");
+    let mut http_response = Vec::new();
+    timeout(
+        Duration::from_secs(3),
+        http_client.read_to_end(&mut http_response),
+    )
+    .await
+    .expect("HTTP response should arrive")
+    .expect("HTTP response should be readable");
+    assert!(http_response.windows(6).any(|window| window == b"200 OK"));
+    assert!(http_response.ends_with(b"ok"));
+
+    let mut connect_client = TcpStream::connect(runtime.local_addr())
+        .await
+        .expect("proxy should accept CONNECT");
+    connect_client
+        .write_all(
+            format!(
+                "CONNECT localhost:{upstream_port} HTTP/1.1\r\nHost: localhost:{upstream_port}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("CONNECT request should be sent");
+    let mut connect_client = BufReader::new(connect_client);
+    let mut status = String::new();
+    timeout(
+        Duration::from_secs(3),
+        connect_client.read_line(&mut status),
+    )
+    .await
+    .expect("CONNECT response should arrive")
+    .expect("CONNECT status should be readable");
+    assert!(
+        status.starts_with("HTTP/1.1 200"),
+        "unexpected response: {status:?}"
+    );
+    loop {
+        let mut header = String::new();
+        timeout(
+            Duration::from_secs(3),
+            connect_client.read_line(&mut header),
+        )
+        .await
+        .expect("CONNECT headers should arrive")
+        .expect("CONNECT header should be readable");
+        if header == "\r\n" || header.is_empty() {
+            break;
+        }
+    }
+    connect_client
+        .get_mut()
+        .write_all(b"ping")
+        .await
+        .expect("CONNECT payload should be sent");
+    let mut echoed = [0; 4];
+    timeout(
+        Duration::from_secs(3),
+        connect_client.read_exact(&mut echoed),
+    )
+    .await
+    .expect("CONNECT response should arrive")
+    .expect("CONNECT response should be readable");
+    assert_eq!(&echoed, b"ping");
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+    upstream_task
+        .await
+        .expect("upstream task should complete successfully");
 }

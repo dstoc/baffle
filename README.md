@@ -8,7 +8,7 @@ The repository contains one Rust crate. The binary is named baffle; its Cargo pa
 
 The proposal describes a Tokio daemon with a private Unix control socket and one Unix data socket per proxy session. Hudsucker handles HTTP and HTTPS proxying. A small in-process bridge connects each Unix data socket to a pre-bound loopback TCP listener used by Hudsucker.
 
-Hudsucker is pinned to version 0.25.0 in Cargo.toml. Each session has a distinct Unix data socket and a streaming bridge to its private loopback TCP listener. The current handler denies outbound requests while policy enforcement is under development.
+Hudsucker is pinned to version 0.25.0 in Cargo.toml. Each session has a distinct Unix data socket and a streaming bridge to its private loopback TCP listener. The runtime checks each request against that session's exact host and port rules, then filters and pins resolved destinations before dialing. A rule can permit an exact non-public DNS answer with `private_addresses`.
 
 ## Deployment security requirement
 
