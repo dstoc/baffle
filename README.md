@@ -11,71 +11,46 @@ do not match a session policy.
 
 ## Security model and limitations
 
-**HTTPS-only request policy.** Baffle supports HTTPS destinations only. A
-client must use HTTP `CONNECT` to establish the destination connection. Baffle
-rejects ordinary forward-proxy requests outside intercepted TLS, including
-absolute-form `http://` and `https://` requests. It rejects plaintext
-`http://` destinations on every port, including a request made after a client
-follows an HTTPS-to-HTTP redirect. Baffle does not follow redirects itself.
+* **Trust model:** Clients are untrusted and may deliberately try to bypass
+  restrictions. Sites on the allowlist are assumed trustworthy. Baffle permits
+  only explicitly configured hostnames and ports; the default port is 443.
+* **HTTPS-only:** Clients must use HTTP `CONNECT` to reach HTTPS destinations.
+  Baffle rejects plaintext HTTP requests on every port. HTTPS on other
+  explicitly configured ports is supported.
+* **Path restrictions:** When path restrictions apply, Baffle intercepts HTTPS
+  and validates the CONNECT hostname, TLS SNI, and HTTP authority. It checks
+  every intercepted request. If required interception fails, Baffle rejects
+  the connection instead of opening an opaque tunnel.
+* **Credential handling:** Baffle injects daemon-managed credentials only
+  into authorized HTTPS requests after successful interception, upstream TLS
+  identity verification, and policy checks. It does not inject credentials
+  into plaintext requests or opaque tunnels. Baffle forwards upstream
+  responses without filtering credential values, so trust allowlisted sites
+  with injected credentials.
+* **Opaque tunnels:** Explicit tunnel-only rules support destinations without
+  path restrictions or credential injection. Baffle cannot inspect tunnel
+  contents, prove they carry HTTPS, or verify the upstream certificate; the
+  client must verify the upstream TLS identity.
+* **Network limitations:** Baffle does not prevent DNS rebinding or restrict
+  resolved destination IP addresses. An allowlisted hostname may resolve to
+  an internal or otherwise sensitive address.
 
-The proxy client is untrusted and may try to evade policy. Baffle assumes that
-sites on the hostname allowlist behave legitimately. That trust in an allowed
-site does not make the client trusted. A client may send malformed CONNECT data
-or split a TLS ClientHello to try to bypass inspection.
+**Deployment isolation is mandatory.** Sandboxed clients must not reach
+Baffle's internal TCP listeners directly. Only the trusted operator should
+access the control socket, and clients should receive access only to their
+assigned Unix data sockets. Deployments that require destination-IP
+restrictions must also enforce suitable DNS and network-egress controls.
 
-Rules default to destination port 443. A CONNECT request must use an authority
-with an explicit port, such as `api.example.com:443`; the client should map
-the default port from an `https://` origin to `:443`. Port 80 is not reserved:
-a configured port can carry TLS if the destination service supports it. Baffle
-rejects plaintext HTTP based on the request form or scheme, regardless of the
-destination port.
-
-The HTTP request used for `CONNECT` is the proxy protocol. After Baffle
-intercepts TLS, it continues to process HTTP/1.1 or HTTP/2 inside that TLS
-connection when a rule needs URL-path checks or daemon-managed credential
-injection. It checks each request, including requests on a reused HTTP/1.1 or
-HTTP/2 connection. TLS SNI must match the CONNECT hostname. Each inner HTTP
-authority must match the authorized CONNECT host and port. Baffle injects a
-credential only after successful interception and after the configured host,
-port, upstream TLS certificate identity, request authority, and path checks
-pass. It never injects into a plaintext request, a CONNECT request, a denied
-request, or an opaque tunnel.
-
-An explicit `mode = "tunnel"` rule permits an opaque connection and cannot
-carry path or injection rules. Baffle cannot prove that the bytes in an opaque
-tunnel are TLS, inspect HTTP paths, or verify the upstream certificate. The
-client must verify the upstream TLS identity. A rule that requires
-interception remains fail-closed: Baffle rejects unsupported payloads or a
-failed TLS interception instead of opening an opaque fallback. A malformed or
-fragmented ClientHello, unsupported data after CONNECT, or a failed TLS
-handshake must close the connection when inspection is required. Such a
-fallback would bypass path checks and the credential-injection boundary. If a
-client sends its own credentials through a tunnel, Baffle cannot inspect or
-constrain those credentials.
-
-Here, “HTTPS-only” defines supported requests at Baffle's proxy interface. It
-does not guarantee that every established opaque tunnel carries HTTPS.
-
-The policy authorizes exact configured hostnames and ports. Baffle does not
-check the IP addresses returned by DNS. An allowlisted name can
-resolve to a private, loopback, link-local, metadata, or other sensitive
-address, even when the service presents a valid certificate for that name.
-For a threat model that requires address containment, the deployment must
-control DNS and apply default-deny network egress rules with a firewall or
-network namespace.
-Hostname and port rules are sufficient only when those names and the addresses
-they can reach are trusted for the workload.
-
-The runtime leaves DNS and destination-address restrictions to deployment
-controls. Existing session policies that contain `private_addresses` fail
-validation; remove that field and move any address restrictions to DNS and
-network egress policy before upgrading. The runtime enforces the HTTPS-only
-request boundary described above. See the [configuration reference](docs/configuration.md)
-and [security and deployment guide](docs/security-deployment.md).
-The executable is named `baffle`. The Cargo package is named `baffle-proxy`.
-The client library is the separate workspace package `baffle-client`.
+For CA provisioning, configuration, detailed policy behavior, secret storage,
+and isolation requirements, see the [security and deployment guide](docs/security-deployment.md)
+and [configuration reference](docs/configuration.md). Baffle does not create
+the sandbox or install its CA into client trust stores; the deployment must
+arrange those separately.
 
 ## Install
+
+The executable is named `baffle`, the Cargo package is named `baffle-proxy`,
+and the client library is the separate workspace package `baffle-client`.
 
 The release workflow builds the Linux x86-64 GNU binary when a `v<version>`
 tag matches the version in `Cargo.toml`. Download and unpack the
@@ -136,11 +111,8 @@ material. See the
 [architecture guide](docs/architecture.md) for component details and data
 flows.
 
-**Deployment requirement:** sandboxed clients must not be able to reach
-Baffle's internal loopback TCP listeners. Run the daemon in a network
-namespace that clients cannot access, or enforce equivalent isolation. Expose
-the control socket only to the trusted operator. Expose only an assigned
-session socket to its client.
+The deployment must enforce the isolation described in [Security model and
+limitations](#security-model-and-limitations).
 
 ## Development
 
