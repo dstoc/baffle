@@ -66,6 +66,17 @@ pub enum RequestOrResponse {
     Response(Response<Body>),
 }
 
+/// Result of a TLS interception policy check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TlsInterception {
+    /// Terminate TLS locally and process the decrypted HTTP connection.
+    Intercept,
+    /// Forward the TLS bytes to the CONNECT destination without decryption.
+    Tunnel,
+    /// Close the connection without forwarding its TLS bytes.
+    Reject,
+}
+
 impl From<Request<Body>> for RequestOrResponse {
     fn from(req: Request<Body>) -> Self {
         Self::Request(req)
@@ -84,6 +95,9 @@ impl From<Response<Body>> for RequestOrResponse {
 pub struct HttpContext {
     /// Address of the client that is sending the request.
     pub client_addr: SocketAddr,
+    /// CONNECT authority that established this intercepted TLS connection.
+    /// This is `None` for ordinary forward-proxy requests.
+    pub connect_authority: Option<hyper::http::uri::Authority>,
 }
 
 /// Context for websocket messages.
@@ -157,14 +171,16 @@ pub trait HttpHandler: Clone + Send + Sync + 'static {
         async { true }
     }
 
-    /// Whether a TLS connection should be intercepted. Defaults to `true` for
-    /// all connections.
+    /// Select TLS interception after an intercepted CONNECT. Returning
+    /// [`TlsInterception::Reject`] closes the connection without forwarding
+    /// its TLS bytes. Defaults to [`TlsInterception::Intercept`].
     fn should_intercept_tls(
         &mut self,
         _ctx: &HttpContext,
+        _connect_authority: &hyper::http::uri::Authority,
         _client_hello: tokio_rustls::rustls::server::ClientHello<'_>,
-    ) -> impl Future<Output = bool> + Send {
-        async { true }
+    ) -> impl Future<Output = TlsInterception> + Send {
+        async { TlsInterception::Intercept }
     }
 }
 

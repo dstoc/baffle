@@ -12,7 +12,8 @@ use std::{
 };
 
 use hudsucker::{
-    Body, HttpContext, HttpHandler, Proxy, RequestOrResponse, WebSocketContext, WebSocketHandler,
+    Body, HttpContext, HttpHandler, Proxy, RequestOrResponse, TlsInterception, WebSocketContext,
+    WebSocketHandler,
     hyper::{Request, Response, StatusCode},
     rustls::crypto::aws_lc_rs,
     tokio_tungstenite::tungstenite::Message,
@@ -161,20 +162,18 @@ impl ProxyRuntime {
         let policy = Arc::new(SessionPolicy::compile(&session));
 
         let egress = EgressConnector::system(Arc::clone(&policy));
+        let policy_handler = PolicyHandler::with_metrics(
+            runtime_id.clone(),
+            Arc::clone(&policy),
+            Arc::clone(&metrics),
+            cancellation.clone(),
+        );
         let proxy = Proxy::builder()
             .with_listener(listener)
             .with_ca(ca.for_proxy())
             .with_rustls_connector_and_tcp_connector(aws_lc_rs::default_provider(), egress)
-            .with_http_handler(PolicyHandler::with_metrics(
-                runtime_id.clone(),
-                Arc::clone(&policy),
-                Arc::clone(&metrics),
-            ))
-            .with_websocket_handler(PolicyHandler::with_metrics(
-                runtime_id.clone(),
-                policy,
-                Arc::clone(&metrics),
-            ))
+            .with_http_handler(policy_handler.clone())
+            .with_websocket_handler(policy_handler)
             .with_graceful_shutdown(async move {
                 shutdown.cancelled().await;
             })
@@ -908,28 +907,56 @@ pub(crate) struct PolicyHandler {
     runtime_id: RuntimeId,
     policy: Arc<SessionPolicy>,
     metrics: Arc<Metrics>,
+    cancellation: CancellationToken,
 }
 
 impl PolicyHandler {
     #[cfg(test)]
     pub(crate) fn new(runtime_id: RuntimeId, policy: Arc<SessionPolicy>) -> Self {
-        Self::with_metrics(runtime_id, policy, Arc::new(Metrics::default()))
+        Self::with_metrics(
+            runtime_id,
+            policy,
+            Arc::new(Metrics::default()),
+            CancellationToken::new(),
+        )
     }
 
     fn with_metrics(
         runtime_id: RuntimeId,
         policy: Arc<SessionPolicy>,
         metrics: Arc<Metrics>,
+        cancellation: CancellationToken,
     ) -> Self {
         Self {
             runtime_id,
             policy,
             metrics,
+            cancellation,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_policy_request(&self, request: Request<Body>) -> RequestOrResponse {
-        match self.policy.authorize(&request) {
+        self.handle_policy_request_with_context(request, None)
+    }
+
+    fn handle_policy_request_with_context(
+        &self,
+        request: Request<Body>,
+        connect_authority: Option<&hudsucker::hyper::http::uri::Authority>,
+    ) -> RequestOrResponse {
+        let unsupported_upgrade = connect_authority.is_some()
+            && request
+                .headers()
+                .contains_key(hudsucker::hyper::header::UPGRADE);
+        let authorization = if self.cancellation.is_cancelled() || unsupported_upgrade {
+            Err(AuthorizationError::Denied)
+        } else if let Some(connect_authority) = connect_authority {
+            self.policy.authorize_inner(&request, connect_authority)
+        } else {
+            self.policy.authorize(&request)
+        };
+        match authorization {
             Ok(_) => RequestOrResponse::Request(request),
             Err(error) => {
                 let request_count = self.metrics.denied_request();
@@ -960,6 +987,9 @@ impl PolicyHandler {
     }
 
     pub(crate) fn connect_should_intercept(&self, request: &Request<Body>) -> bool {
+        if self.cancellation.is_cancelled() {
+            return true;
+        }
         self.policy
             .authorize(request)
             .map(|mode| mode == RuleMode::Intercept)
@@ -967,15 +997,32 @@ impl PolicyHandler {
             // fallback in interception mode so errors never select a tunnel.
             .unwrap_or(true)
     }
+
+    fn tls_should_intercept(
+        &self,
+        connect_authority: &hudsucker::hyper::http::uri::Authority,
+        server_name: Option<&str>,
+    ) -> TlsInterception {
+        if !self.cancellation.is_cancelled()
+            && self
+                .policy
+                .permits_tls_interception(connect_authority, server_name)
+        {
+            TlsInterception::Intercept
+        } else {
+            TlsInterception::Reject
+        }
+    }
 }
 
 impl HttpHandler for PolicyHandler {
     fn handle_request(
         &mut self,
-        _ctx: &HttpContext,
+        ctx: &HttpContext,
         request: Request<Body>,
     ) -> impl Future<Output = RequestOrResponse> + Send {
-        let response = self.handle_policy_request(request);
+        let response =
+            self.handle_policy_request_with_context(request, ctx.connect_authority.as_ref());
         async move { response }
     }
 
@@ -986,6 +1033,16 @@ impl HttpHandler for PolicyHandler {
     ) -> impl Future<Output = bool> + Send {
         let intercept = self.connect_should_intercept(request);
         async move { intercept }
+    }
+
+    fn should_intercept_tls(
+        &mut self,
+        _ctx: &HttpContext,
+        connect_authority: &hudsucker::hyper::http::uri::Authority,
+        client_hello: hudsucker::rustls::server::ClientHello<'_>,
+    ) -> impl Future<Output = TlsInterception> + Send {
+        let decision = self.tls_should_intercept(connect_authority, client_hello.server_name());
+        async move { decision }
     }
 }
 

@@ -1,25 +1,28 @@
-use std::{fs, net::SocketAddr, sync::Arc, time::Duration};
+use std::{error::Error, fs, net::SocketAddr, sync::Arc, time::Duration};
 
 use baffle_proxy::{
     ca::ManagedCa,
     config::{ControlRequest, SessionConfig},
     proxy_runtime::{ProxyRuntime, ProxyRuntimeEvent, RuntimeId},
 };
-use hudsucker::rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream, UnixStream},
-    sync::mpsc,
-    time::timeout,
-};
-use tokio_rustls::{
-    TlsConnector,
+use hudsucker::{
+    Body,
+    hyper::{Request, Version},
+    hyper_util::rt::{TokioExecutor, TokioIo},
+    rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose},
     rustls::{
         ClientConfig, RootCertStore,
         crypto::aws_lc_rs,
         pki_types::{CertificateDer, ServerName},
     },
 };
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream, UnixStream},
+    sync::mpsc,
+    time::timeout,
+};
+use tokio_rustls::{TlsConnector, client::TlsStream};
 
 fn session_config() -> SessionConfig {
     let request = ControlRequest::from_toml(
@@ -33,6 +36,18 @@ fn session_config() -> SessionConfig {
 }
 
 fn intercept_session_config(port: u16) -> SessionConfig {
+    let toml = format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [{port}]\nprivate_addresses = [\"127.0.0.1\", \"::1\"]\npaths = [\"/allowed\"]\n"
+    );
+    let ControlRequest::Create { session, .. } =
+        ControlRequest::from_toml(&toml).expect("intercept session should be valid")
+    else {
+        panic!("test request should create a session");
+    };
+    session
+}
+
+fn intercept_session_without_private_addresses_config(port: u16) -> SessionConfig {
     let toml = format!(
         "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]\n"
     );
@@ -79,6 +94,77 @@ fn write_test_ca(directory: &std::path::Path) -> Arc<ManagedCa> {
         })
         .expect("test CA should load"),
     )
+}
+
+fn tls_client_config(ca: &ManagedCa, alpn: &[u8]) -> Arc<ClientConfig> {
+    let (_, certificate) = x509_parser::pem::parse_x509_pem(ca.public_certificate_pem())
+        .expect("test CA certificate should be valid PEM");
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(certificate.contents))
+        .expect("test CA certificate should be a valid trust anchor");
+    let mut config = ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("supported TLS versions should be available")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![alpn.to_vec()];
+    Arc::new(config)
+}
+
+async fn open_connect_tunnel(
+    proxy_address: SocketAddr,
+    authority: &str,
+) -> Result<TcpStream, Box<dyn Error + Send + Sync>> {
+    let mut stream = TcpStream::connect(proxy_address).await?;
+    stream
+        .write_all(format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes())
+        .await?;
+    let mut reader = BufReader::new(stream);
+    let mut status = String::new();
+    timeout(Duration::from_secs(2), reader.read_line(&mut status)).await??;
+    if !status.starts_with("HTTP/1.1 200") {
+        return Err(format!("CONNECT failed: {status:?}").into());
+    }
+    loop {
+        let mut header = String::new();
+        timeout(Duration::from_secs(2), reader.read_line(&mut header)).await??;
+        if header == "\r\n" || header.is_empty() {
+            break;
+        }
+    }
+    Ok(reader.into_inner())
+}
+
+async fn connect_intercepted_tls(
+    proxy_address: SocketAddr,
+    authority: &str,
+    server_name: &str,
+    ca: &ManagedCa,
+    alpn: &[u8],
+) -> Result<TlsStream<TcpStream>, Box<dyn Error + Send + Sync>> {
+    let stream = open_connect_tunnel(proxy_address, authority).await?;
+    let server_name = ServerName::try_from(server_name.to_owned())?;
+    let tls = TlsConnector::from(tls_client_config(ca, alpn))
+        .connect(server_name, stream)
+        .await?;
+    Ok(tls)
+}
+
+async fn read_http1_status<S>(stream: &mut BufReader<S>) -> std::io::Result<String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut status = String::new();
+    stream.read_line(&mut status).await?;
+    loop {
+        let mut header = String::new();
+        stream.read_line(&mut header).await?;
+        if header == "\r\n" || header.is_empty() {
+            break;
+        }
+    }
+    Ok(status)
 }
 
 async fn assert_denied(address: SocketAddr, method: &str, target: &str) {
@@ -266,7 +352,7 @@ async fn intercepted_https_rejects_private_upstream_addresses() {
     let id = RuntimeId::new("runtime-intercept-private-upstream");
     let runtime = ProxyRuntime::start(
         id.clone(),
-        intercept_session_config(upstream_port),
+        intercept_session_without_private_addresses_config(upstream_port),
         Arc::clone(&ca),
         directory.path().join("intercept-private.sock"),
         4,
@@ -354,6 +440,287 @@ async fn intercepted_https_rejects_private_upstream_addresses() {
     );
 
     runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
+async fn intercepted_tls_rejects_missing_or_conflicting_sni_before_egress() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-intercept-sni");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(upstream_port),
+        Arc::clone(&ca),
+        directory.path().join("sni.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("intercept runtime should start");
+    let authority = format!("localhost:{upstream_port}");
+
+    let conflicting = timeout(
+        Duration::from_secs(2),
+        connect_intercepted_tls(
+            runtime.local_addr(),
+            &authority,
+            "other.example",
+            &ca,
+            b"http/1.1",
+        ),
+    )
+    .await
+    .expect("conflicting SNI negotiation should finish")
+    .is_err();
+    assert!(conflicting, "SNI must match the CONNECT authority");
+
+    let tunnel = open_connect_tunnel(runtime.local_addr(), &authority)
+        .await
+        .expect("second CONNECT should be accepted before TLS parsing");
+    let missing_sni_name = ServerName::try_from("127.0.0.1".to_owned()).unwrap();
+    let missing_sni = timeout(
+        Duration::from_secs(2),
+        TlsConnector::from(tls_client_config(&ca, b"http/1.1")).connect(missing_sni_name, tunnel),
+    )
+    .await
+    .expect("missing SNI negotiation should finish")
+    .is_err();
+    assert!(missing_sni, "intercepted TLS must include SNI");
+
+    let mut malformed = open_connect_tunnel(runtime.local_addr(), &authority)
+        .await
+        .expect("third CONNECT should be accepted before TLS parsing");
+    malformed
+        .write_all(b"\x16\x03\x03\x00\x01\xff")
+        .await
+        .expect("malformed TLS record should be sent");
+    malformed
+        .shutdown()
+        .await
+        .expect("malformed TLS sender should finish the record");
+    let mut byte = [0; 1];
+    let malformed_read = timeout(Duration::from_secs(2), malformed.read(&mut byte))
+        .await
+        .expect("malformed TLS connection should be rejected")
+        .expect("malformed TLS connection should close cleanly");
+    assert_eq!(malformed_read, 0, "malformed TLS must not receive a tunnel");
+
+    assert!(
+        timeout(Duration::from_millis(200), upstream.accept())
+            .await
+            .is_err(),
+        "invalid intercepted identities must not reach the upstream"
+    );
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
+async fn intercepted_http2_authority_cannot_change_the_connect_destination() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-intercept-http2-authority");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(upstream_port),
+        Arc::clone(&ca),
+        directory.path().join("http2.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("intercept runtime should start");
+    let authority = format!("localhost:{upstream_port}");
+    let tls = connect_intercepted_tls(runtime.local_addr(), &authority, "localhost", &ca, b"h2")
+        .await
+        .expect("matching SNI should establish intercepted TLS");
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+    let (mut sender, connection) =
+        hudsucker::hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls))
+            .await
+            .expect("HTTP/2 client should connect to the intercepted stream");
+    let driver = tokio::spawn(connection);
+    let request = Request::builder()
+        .method("GET")
+        .version(Version::HTTP_2)
+        .uri("https://example.org/allowed")
+        .body(Body::empty())
+        .expect("HTTP/2 request should build");
+    let response = timeout(Duration::from_secs(2), sender.send_request(request))
+        .await
+        .expect("HTTP/2 request should receive a response")
+        .expect("HTTP/2 response should be readable");
+    assert_eq!(response.status(), hudsucker::hyper::StatusCode::BAD_REQUEST);
+    assert!(
+        timeout(Duration::from_millis(200), upstream.accept())
+            .await
+            .is_err(),
+        "conflicting HTTP/2 :authority must not reach the upstream"
+    );
+    drop(sender);
+    driver.abort();
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
+async fn intercepted_http2_http_scheme_is_rejected_before_upstream_connection() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-intercept-http2-http-scheme");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(upstream_port),
+        Arc::clone(&ca),
+        directory.path().join("http2-http-scheme.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("intercept runtime should start");
+    let authority = format!("localhost:{upstream_port}");
+    let tls = connect_intercepted_tls(runtime.local_addr(), &authority, "localhost", &ca, b"h2")
+        .await
+        .expect("matching SNI should establish intercepted TLS");
+    let (mut sender, connection) =
+        hudsucker::hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls))
+            .await
+            .expect("HTTP/2 client should connect to the intercepted stream");
+    let driver = tokio::spawn(connection);
+    let request = Request::builder()
+        .method("GET")
+        .version(Version::HTTP_2)
+        .uri(format!("http://{authority}/allowed"))
+        .body(Body::empty())
+        .expect("HTTP/2 request should build");
+    let response = timeout(Duration::from_secs(2), sender.send_request(request))
+        .await
+        .expect("HTTP/2 request should receive a response")
+        .expect("HTTP/2 response should be readable");
+    assert_eq!(response.status(), hudsucker::hyper::StatusCode::BAD_REQUEST);
+    assert!(
+        timeout(Duration::from_millis(200), upstream.accept())
+            .await
+            .is_err(),
+        "an intercepted HTTP/2 request with :scheme http must not reach the upstream"
+    );
+    drop(sender);
+    driver.abort();
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    assert_exit(&mut events, &id).await;
+}
+
+#[tokio::test]
+async fn revocation_blocks_new_http1_requests_on_an_intercepted_connection() {
+    let directory = tempfile::tempdir().expect("test directory should be created");
+    let ca = write_test_ca(directory.path());
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test upstream should bind");
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let id = RuntimeId::new("runtime-intercept-revocation");
+    let runtime = ProxyRuntime::start(
+        id.clone(),
+        intercept_session_config(upstream_port),
+        Arc::clone(&ca),
+        directory.path().join("revocation.sock"),
+        4,
+        event_sender,
+    )
+    .await
+    .expect("intercept runtime should start");
+    let authority = format!("localhost:{upstream_port}");
+    let tls = connect_intercepted_tls(
+        runtime.local_addr(),
+        &authority,
+        "localhost",
+        &ca,
+        b"http/1.1",
+    )
+    .await
+    .expect("matching SNI should establish intercepted TLS");
+    let mut client = BufReader::new(tls);
+
+    client
+        .get_mut()
+        .write_all(
+            format!("GET /allowed HTTP/1.1\r\nHost: {authority}\r\nConnection: keep-alive\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .expect("first intercepted request should be sent");
+    let (upstream_stream, _) = timeout(Duration::from_secs(2), upstream.accept())
+        .await
+        .expect("first request should attempt one upstream connection")
+        .expect("upstream connection should be accepted");
+    drop(upstream_stream);
+    let first_status = timeout(Duration::from_secs(2), read_http1_status(&mut client))
+        .await
+        .expect("first request should receive a response")
+        .expect("first response should be readable");
+    assert!(first_status.starts_with("HTTP/1.1 502"), "{first_status:?}");
+
+    let socket_path = directory.path().join("revocation.sock");
+    let shutdown = tokio::spawn(runtime.shutdown(Duration::from_secs(2)));
+    timeout(Duration::from_secs(2), async {
+        while socket_path.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("revocation should close the session ingress");
+
+    let second_write = client
+        .get_mut()
+        .write_all(
+            format!("GET /allowed HTTP/1.1\r\nHost: {authority}\r\nConnection: keep-alive\r\n\r\n")
+                .as_bytes(),
+        )
+        .await;
+    if second_write.is_ok() {
+        let second_status = timeout(Duration::from_secs(2), read_http1_status(&mut client)).await;
+        assert!(
+            second_status.is_err()
+                || second_status
+                    .as_ref()
+                    .ok()
+                    .and_then(|result| result.as_ref().ok())
+                    .is_none_or(|status| status.starts_with("HTTP/1.1 403")),
+            "revoked connection must close or reject its next request"
+        );
+    }
+    assert!(
+        timeout(Duration::from_millis(200), upstream.accept())
+            .await
+            .is_err(),
+        "a revoked intercepted connection must not create a new upstream request"
+    );
+
+    drop(client);
+    timeout(Duration::from_secs(3), shutdown)
+        .await
+        .expect("proxy shutdown should finish")
+        .expect("proxy shutdown task should join");
     assert_exit(&mut events, &id).await;
 }
 

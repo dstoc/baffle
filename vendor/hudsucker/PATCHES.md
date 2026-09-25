@@ -11,6 +11,13 @@ payload does not begin with a supported protocol. All outbound CONNECT tunnels
 and WebSocket connections use the configured TCP connector. HTTP requests can
 use a custom DNS resolver through the Rustls connector builder.
 
+TLS policy uses an explicit `Intercept`, `Tunnel`, or `Reject` result so a
+handler can fail closed after CONNECT. The CONNECT authority is passed to the
+TLS hook and the intercepted HTTP context. Intercepted TLS requires SNI that
+matches the CONNECT host, and the handler can bind each decrypted request
+authority to that CONNECT authority. Plaintext HTTP payloads after an
+intercepted CONNECT are rejected.
+
 The upstreaming opportunity is to add these checked-connection hooks to
 Hudsucker's public builder API and to make requested CONNECT interception fail
 closed for unsupported payloads. The DNS resolver hook must feed the exact

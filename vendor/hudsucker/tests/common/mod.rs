@@ -6,6 +6,7 @@ use hudsucker::{
     HttpHandler,
     Proxy,
     RequestOrResponse,
+    TlsInterception,
     WebSocketContext,
     WebSocketHandler,
     certificate_authority::CertificateAuthority,
@@ -364,9 +365,14 @@ impl HttpHandler for TestHandler {
     async fn should_intercept_tls(
         &mut self,
         _ctx: &HttpContext,
+        _connect_authority: &hudsucker::hyper::http::uri::Authority,
         _client_hello: rustls::server::ClientHello<'_>,
-    ) -> bool {
-        self.should_intercept_tls
+    ) -> TlsInterception {
+        if self.should_intercept_tls {
+            TlsInterception::Intercept
+        } else {
+            TlsInterception::Tunnel
+        }
     }
 }
 
