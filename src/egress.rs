@@ -147,6 +147,8 @@ fn is_public_ipv4(address: Ipv4Addr) -> bool {
         && !(a == 198 && (b == 18 || b == 19))
         && !(a == 198 && b == 51 && c == 100)
         && !(a == 203 && b == 0 && c == 113)
+        // Azure WireServer is a VM platform endpoint, despite being in public address space.
+        && address != Ipv4Addr::new(168, 63, 129, 16)
         && a < 240
 }
 
@@ -188,6 +190,19 @@ mod tests {
         }
     }
 
+    struct FailingResolver;
+
+    impl HostResolver for FailingResolver {
+        fn lookup(&self, _host: String) -> LookupFuture {
+            Box::pin(async {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "mock DNS lookup failed",
+                ))
+            })
+        }
+    }
+
     fn policy(host: &str, ports: &str, private_addresses: &str) -> Arc<SessionPolicy> {
         let input = format!(
             "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n{ports}\n{private_addresses}\n"
@@ -220,6 +235,7 @@ mod tests {
             ("100.64.0.1", false),
             ("192.0.2.1", false),
             ("198.18.0.1", false),
+            ("168.63.129.16", false),
             ("224.0.0.1", false),
             ("240.0.0.1", false),
             ("2606:4700:4700::1111", true),
@@ -280,6 +296,85 @@ mod tests {
         let result = connector.connect(authority).await;
 
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn rejects_azure_wireserver_resolution_before_connecting() {
+        let connector = mock_connector(
+            vec![vec!["168.63.129.16".parse().unwrap()]],
+            policy("allowed.example", "ports = [80]", ""),
+        );
+
+        let result = connector
+            .connect("allowed.example:80".parse().unwrap())
+            .await;
+
+        let error = result.expect_err("Azure WireServer resolution must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string(),
+            "DNS returned no permitted destination addresses",
+            "the connector must reject the resolved address before it attempts a TCP dial"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_private_cname_result_unless_that_exact_address_is_allowed() {
+        let mut connector = mock_connector(
+            vec![vec!["10.1.2.4".parse().unwrap()]],
+            policy(
+                "public-alias.example",
+                "ports = [443]",
+                "private_addresses = [\"10.1.2.3\"]",
+            ),
+        );
+        let alias = "public-alias.example"
+            .parse::<Name>()
+            .expect("test CNAME alias should parse");
+
+        let result = connector.call(alias).await;
+
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied,
+            "the resolved CNAME address must be checked against the exact exception"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_ipv6_loopback_for_an_authorized_connect_host() {
+        let connector = mock_connector(
+            vec![vec!["::1".parse().unwrap()]],
+            policy("allowed.example", "ports = [443]", ""),
+        );
+
+        let result = connector
+            .connect("allowed.example:443".parse().unwrap())
+            .await;
+
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied,
+            "an allowed hostname must not tunnel to IPv6 loopback"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_resolution_fails_closed_for_http_and_connect() {
+        let policy = policy("allowed.example", "ports = [443]", "");
+        let mut http_connector =
+            EgressConnector::with_resolver(Arc::clone(&policy), Arc::new(FailingResolver));
+        let name = "allowed.example"
+            .parse::<Name>()
+            .expect("test DNS name should parse");
+        let http_result = http_connector.call(name).await;
+        assert_eq!(http_result.unwrap_err().kind(), io::ErrorKind::NotFound);
+
+        let tcp_connector = EgressConnector::with_resolver(policy, Arc::new(FailingResolver));
+        let connect_result = tcp_connector
+            .connect("allowed.example:443".parse().unwrap())
+            .await;
+        assert_eq!(connect_result.unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 
     #[tokio::test]
@@ -367,5 +462,43 @@ mod tests {
             .await
             .expect_err("a second session must not inherit the private address exception");
         assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn connect_retries_only_the_validated_addresses() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test destination should bind");
+        let port = listener
+            .local_addr()
+            .expect("test destination address should be available")
+            .port();
+        let connector = mock_connector(
+            vec![vec![
+                "127.0.0.2".parse().unwrap(),
+                "127.0.0.1".parse().unwrap(),
+            ]],
+            policy(
+                "internal.example",
+                &format!("ports = [{port}]"),
+                "private_addresses = [\"127.0.0.1\", \"127.0.0.2\"]",
+            ),
+        );
+
+        let stream = connector
+            .connect(format!("internal.example:{port}").parse().unwrap())
+            .await
+            .expect("connector should try the next validated address after a refused dial");
+        let (accepted, _) = listener
+            .accept()
+            .await
+            .expect("the validated fallback address should receive the connection");
+
+        assert_eq!(
+            stream.peer_addr().unwrap().ip(),
+            "127.0.0.1".parse::<IpAddr>().unwrap()
+        );
+        drop(accepted);
+        drop(stream);
     }
 }
