@@ -46,6 +46,8 @@ url = "2.5.8"
 x509-parser = "0.18.1"
 
 [dev-dependencies]
+h2 = "=0.4.19"
+http = "=1.5.0"
 tempfile = "3.27.0"
 tokio-rustls = "0.26.5"
 
@@ -64,7 +66,6 @@ path = "tests/control_protocol.rs"
 [[test]]
 name = "proxy_runtime"
 path = "tests/proxy_runtime.rs"
-required-features = ["backend-hudsucker"]
 
 [[example]]
 name = "cladding_socat"

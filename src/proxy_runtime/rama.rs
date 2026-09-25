@@ -363,31 +363,8 @@ async fn handle_client(
         return handle_tunnel(client, destination, io_timeout, &metrics).await;
     }
 
-    // Establish egress before acknowledging CONNECT. Once acknowledged, every
-    // failure in TLS peeking or negotiation closes the connection; no path
-    // forwards the raw stream.
-    let egress = match tokio::time::timeout(
-        io_timeout,
-        TcpStream::connect((destination.host.as_str(), destination.port)),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(error)) => {
-            metrics.upstream_failure();
-            let _ = client
-                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
-                .await;
-            return Err(ProxyRuntimeError::Run(error.to_string()));
-        }
-        Err(_) => {
-            metrics.upstream_failure();
-            let _ = client
-                .write_all(b"HTTP/1.1 504 Gateway Timeout\r\nConnection: close\r\n\r\n")
-                .await;
-            return Ok(());
-        }
-    };
+    // Read and bind TLS identity before dialing. After CONNECT succeeds, any
+    // malformed or unauthorized ClientHello closes the client connection.
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await
@@ -422,6 +399,23 @@ async fn handle_client(
             "TLS SNI does not match the authorized CONNECT authority".into(),
         ));
     }
+
+    let egress = match tokio::time::timeout(
+        io_timeout,
+        TcpStream::connect((destination.host.as_str(), destination.port)),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            metrics.upstream_failure();
+            return Err(ProxyRuntimeError::Run(error.to_string()));
+        }
+        Err(_) => {
+            metrics.upstream_failure();
+            return Ok(());
+        }
+    };
 
     let (certificate, private_key) = ca.for_rama_proxy();
     // Preserve the inspected ClientHello's ALPN and TLS parameters for the
@@ -1493,6 +1487,17 @@ mod tests {
             "decrypted HTTP authority must remain bound to CONNECT: {mismatched}"
         );
 
+        reader
+            .get_mut()
+            .write_all(b"GET /allowed HTTP/1.1\r\nConnection: close\r\n\r\n")
+            .await?;
+        let missing_host =
+            timeout(Duration::from_secs(3), read_http_response(&mut reader)).await??;
+        assert!(
+            missing_host.starts_with("HTTP/1.1 400"),
+            "an intercepted HTTP/1.1 request without Host must be rejected: {missing_host}"
+        );
+
         drop(reader);
         origin_task.abort();
         runtime.shutdown(Duration::from_secs(2)).await;
@@ -1622,6 +1627,40 @@ mod tests {
         assert_eq!(two.status(), rama::http::StatusCode::OK);
         assert_eq!(denied.status(), rama::http::StatusCode::FORBIDDEN);
         assert_eq!(mismatched.status(), rama::http::StatusCode::BAD_REQUEST);
+
+        for path in ["/allowedness", "/allowed%2fprivate", "/%2e%2e/allowed"] {
+            sender_denied.ready().await?;
+            let request = h2_request(
+                format!("https://{authority}{path}"),
+                authority.clone(),
+                Some("Bearer attacker-path"),
+            );
+            let response =
+                timeout(Duration::from_secs(3), sender_denied.send_request(request)).await??;
+            assert!(
+                response.status() == rama::http::StatusCode::BAD_REQUEST
+                    || response.status() == rama::http::StatusCode::FORBIDDEN,
+                "unsafe path {path:?} must be rejected: {}",
+                response.status()
+            );
+        }
+
+        sender_denied.ready().await?;
+        let wrong_scheme = h2_request(
+            format!("http://{authority}/allowed"),
+            authority.clone(),
+            Some("Bearer attacker-scheme"),
+        );
+        let wrong_scheme = timeout(
+            Duration::from_secs(3),
+            sender_denied.send_request(wrong_scheme),
+        )
+        .await??;
+        assert_eq!(
+            wrong_scheme.status(),
+            rama::http::StatusCode::BAD_REQUEST,
+            "HTTP/2 :scheme http must not enter intercepted HTTPS policy"
+        );
 
         for _ in 0..2 {
             let (path, seen_authority, authorization) =
