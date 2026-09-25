@@ -29,6 +29,8 @@ Run these checks before submitting changes:
 
 GitHub Actions runs the formatting, Clippy, and test checks on pushes and pull requests. The workflow caches Cargo dependencies.
 
+The privileged network namespace integration job runs separately from local Cargo checks. See [integration testing](docs/integration-testing.md) for its GitHub Actions and manual commands, its opt-in local command, and its prerequisites.
+
 ## Certificate authority
 
 The daemon loads the CA certificate and private key from the paths in `[ca]`. The certificate must be current and marked for certificate signing. The private key must match the certificate, be a regular file, and allow read access only to its owner. Use mode `0400` or `0600` for the key file.

@@ -1,0 +1,35 @@
+name: Network namespace isolation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  namespace-integration:
+    name: Privileged network namespace integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install namespace test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes iproute2 openssl
+
+      - name: Build Baffle daemon
+        run: cargo build --locked --bin baffle
+
+      - name: Run privileged namespace integration
+        run: sudo python3 scripts/test-network-namespace-isolation.py --binary target/debug/baffle
