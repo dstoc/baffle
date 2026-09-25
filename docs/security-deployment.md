@@ -3,13 +3,71 @@
 This guide describes the security boundary that Baffle provides and the
 isolation that deployment must provide around it.
 
+## Approved target model (not yet implemented)
+
+Baffle's target policy is HTTPS-only. Clients establish permitted destinations
+with HTTP `CONNECT`. Baffle rejects ordinary forward-proxy requests outside
+intercepted TLS, including absolute-form `http://` and `https://` requests. It
+rejects plaintext `http://` destinations on every port. Port 443 is the
+default. A configured TLS service on port 80 is valid; Baffle decides from the
+request form and scheme, not the port number. After successful TLS
+interception, Baffle continues to process HTTP/1.1 or HTTP/2 for path checks
+and credential injection. A rule that requires interception remains
+fail-closed.
+
+Proxy clients are untrusted and may deliberately try to evade policy. Baffle
+assumes that sites on the hostname allowlist behave legitimately. That site
+trust does not extend to the client.
+
+An explicit tunnel rule permits opaque traffic. Baffle cannot prove that the
+bytes in that tunnel are TLS, inspect its HTTP paths, or verify the upstream
+certificate. The client must verify upstream TLS identity. Baffle does not
+inject credentials into tunnels, but it cannot stop a client from sending its
+own credentials there. Use opaque tunnel rules only when hostname and port
+authorization is sufficient without Baffle-level path or credential checks.
+A fallback to an opaque tunnel on a rule that requires interception would
+bypass its path checks, so Baffle closes those connections when interception
+fails or the payload is unsupported. This includes malformed or fragmented
+ClientHello data and TLS handshake failures. Unsupported data after CONNECT
+must not turn into an opaque tunnel. The CONNECT authority, TLS SNI, and each
+inner HTTP authority must remain bound on reused HTTP/1.1 and HTTP/2
+connections. Baffle checks each request before it forwards the request or adds
+a daemon-managed credential.
+
+The target policy authorizes exact configured hostnames and ports. It defers
+DNS and destination-IP restrictions to deployment controls. An allowlisted
+hostname may resolve to private, loopback, link-local, metadata, or another
+sensitive address, even if the service presents a valid certificate for that
+hostname. A valid certificate verifies TLS identity; it does not make the
+destination address safe. Apply DNS policy and default-deny network egress
+rules when the threat model requires address containment. Ensure sandboxed
+clients cannot bypass Baffle or reach its internal listeners.
+
+These target changes are not runtime behavior yet. The current implementation
+still accepts explicitly configured plaintext HTTP on tunnel rules, filters
+resolved destination IP addresses, and fails closed for unsupported or failed
+interception. It currently rejects port 80 for interception and
+credential-injection rules. baffle/24 tracks plaintext HTTP rejection by
+request form or scheme and permits TLS on configured port 80. baffle/25 tracks
+removal of IP filtering. Keep the current protections and their tests until
+those issues are reviewed and implemented.
+
+“HTTPS-only” describes the supported destination request model. It does not
+prove that every established opaque tunnel carries TLS.
+
 ## Threat model
 
 Baffle trusts the daemon process, the Unix UID configured as
 `trusted_operator_uid`, and any process that can use the private control
-socket. It treats proxy clients, upstream servers, and network responses as
-untrusted. Baffle validates each proxied request against the session's
-immutable policy and filters resolved destination addresses before it dials.
+socket. It treats proxy clients as untrusted, even when their configured
+destinations are trusted sites. The policy assumes that allowlisted sites
+behave legitimately. It does not assume that a client will send valid CONNECT
+or TLS data. Session policy is trusted only after validation and must be
+intersected with immutable daemon-wide secret entitlements. In the current
+runtime, Baffle validates each proxied request against the session's immutable
+policy and filters resolved destination addresses before it dials. The
+approved target policy removes the application-level address filter and
+relies on deployment egress controls.
 
 Baffle can enforce exact host, port, and supported path rules for traffic that
 passes through its data socket. It can tunnel authorized HTTPS without
@@ -161,11 +219,13 @@ the intended workload can reach it. Do not expose a local bridge port to
 other clients unless those clients should share that session's full policy.
 The [Cladding guide](cladding-integration.md) provides a working example.
 
-For a host rule that needs an internal service, list one exact non-public IP
-in `private_addresses` and allow only the required port. Do not add broad
-address ranges. Baffle filters DNS answers and dials only an allowed address,
-but deployment firewalls should still restrict network egress as defense in
-depth.
+In the current runtime, a host rule that needs an internal service can list
+one exact non-public IP in `private_addresses` and allow only the required
+port. Do not add broad address ranges. Baffle filters DNS answers and dials
+only an allowed address, but deployment firewalls should still restrict
+network egress as defense in depth. baffle/25 removes this application-level
+exception. After that change, restrict internal destinations with deployment
+DNS and network egress policy.
 
 ## Logging, errors, and credential handling
 
@@ -199,5 +259,7 @@ before any credential can be added.
 - Do not treat a path allowlist as authorization for data in an allowed
   request body.
 - Give upstream credentials the narrowest practical privileges.
-- Review every `private_addresses` exception and secret entitlement.
+- Until baffle/25 lands, review every `private_addresses` exception and secret
+  entitlement. After that change, review deployment DNS and network egress
+  rules instead.
 - Recheck the Hudsucker patch and its tests before changing its pinned version.

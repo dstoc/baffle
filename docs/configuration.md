@@ -1,5 +1,11 @@
 # Configuration reference
 
+**Current runtime reference.** This page describes configuration accepted by
+the current code. The approved target policy changes are not implemented yet.
+The HTTPS-only request change is tracked in baffle/24. The destination-IP
+filter removal is tracked in baffle/25. Until those changes land, port-80
+rules and `private_addresses` still work as described below.
+
 Baffle reads one daemon TOML file at startup. A client sends a separate session
 TOML document in each `create` request. Both schemas reject unknown fields.
 TOML values are parsed as written; Baffle does not expand environment
@@ -90,17 +96,51 @@ rule per exact host; duplicate normalized hosts are invalid.
 | --- | --- | --- | --- |
 | `host` | string | required | Exact ASCII DNS hostname. Baffle lowercases it and removes one final dot. Wildcards and IP literals are rejected. |
 | `mode` | string | required | `tunnel` or `intercept`. A tunnel passes authorized HTTPS CONNECT traffic without TLS decryption. Intercept mode requires TLS inspection for HTTPS CONNECT. |
-| `ports` | array of integers | `[443]` | Non-empty, unique destination ports from 1 through 65535. Port 80 cannot be used with `intercept`. |
+| `ports` | array of integers | `[443]` | Non-empty, unique destination ports from 1 through 65535. The current runtime does not allow port 80 with `intercept`; the target policy permits TLS on any configured port, including port 80, and does not reserve a port based on its number. |
 | `private_addresses` | array of IP strings | `[]` | Exact IPv4 or IPv6 addresses that this host rule may use if DNS resolves to a non-public address. No CIDR ranges or duplicate addresses. |
 | `paths` | array of strings | `[]` | Exact URL paths or recursive path patterns. When present, Baffle checks paths on plaintext HTTP and on intercepted HTTPS requests. A path-restricted rule cannot tunnel HTTPS CONNECT. |
 | `inject` | array of tables | `[]` | Daemon-managed HTTP header injections. Only intercept rules can inject credentials. |
 
-`tunnel` rules cannot inject headers. A rule that injects headers cannot include
-port 80. An `intercept` rule cannot include port 80. To authorize plaintext
-HTTP, use a `tunnel` rule with port 80; Baffle still checks the host, port, and
-configured paths.
+`tunnel` rules cannot inject headers. In the current runtime, a rule that
+injects headers or uses `intercept` cannot include port 80. A tunnel rule may
+use port 80 for plaintext HTTP, with host, port, and configured path checks.
+Under the target policy, a configured TLS service on port 80 can use either
+mode when the rule's other checks permit it. Port alone does not identify the
+protocol.
 
 ## Host, port, and path rules
+
+In the current runtime, a rule may explicitly allow plaintext HTTP on port 80
+when it uses `mode = "tunnel"`. The current runtime also forbids port 80 on
+`intercept` and injection rules. A rule may list exact non-public DNS answers
+in `private_addresses`. These are current implementation options.
+
+Under the approved target policy, Baffle will reject plaintext HTTP based on
+the request form or scheme, regardless of port. Port 80 is not reserved; a
+configured port may carry TLS if the service supports it. The target policy
+will remove `private_addresses`; see the [authoritative
+proposal](baffle-proposal.md) for the target behavior and migration boundary.
+
+The target session configuration uses HTTPS destination ports and has no
+address exceptions:
+
+```toml
+version = 1
+operation = "create"
+
+[session]
+persistent = false
+
+[[rules]]
+host = "api.example.com"
+mode = "intercept"
+ports = [443]
+paths = ["/v1/**"]
+```
+
+This example shows the approved target shape. The current strict TOML parser
+still accepts `private_addresses` according to the current schema described
+below; baffle/25 removes that field.
 
 Host matching is exact after lowercasing and removal of one trailing dot.
 `example.com` does not match `api.example.com`. Wildcards are not supported.
@@ -128,8 +168,13 @@ Overlapping patterns within a rule are invalid.
 An HTTPS rule with paths must use `intercept`. Baffle rejects a CONNECT request
 for a path-restricted rule because the CONNECT request does not identify the
 later URL path. On an intercepted connection, Baffle checks the CONNECT
-authority, TLS SNI, HTTP authority, port, and each request path. A failed
-inspection never falls back to a tunnel.
+authority, TLS SNI, HTTP authority, port, and each request path. It repeats
+the HTTP authority and path checks for each request on reused HTTP/1.1 and
+HTTP/2 connections. The approved target policy also requires a malformed or
+fragmented ClientHello, unsupported post-CONNECT data, or failed TLS
+interception to close the connection when inspection is required. A client
+must not trigger an opaque fallback by splitting ClientHello data. Inspection
+never falls back to a tunnel.
 
 ## Credential references
 

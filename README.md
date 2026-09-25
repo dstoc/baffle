@@ -1,13 +1,81 @@
 # Baffle
 
-Baffle is a Linux daemon that creates independent, policy-controlled HTTP and
-HTTPS proxies on demand. One daemon can manage multiple sessions. Each session
-has its own policy, Unix data socket, and lifecycle.
+Baffle is a Linux daemon that creates independent, policy-controlled HTTPS
+proxies on demand. One daemon can manage multiple sessions. Each session has
+its own policy, Unix data socket, and lifecycle.
 
 Baffle allows traffic only to exact host and port rules. A rule can tunnel
 HTTPS without decrypting it or intercept HTTPS so Baffle can check paths and
 add daemon-managed credentials. Baffle denies destinations and requests that
 do not match a session policy.
+
+## Security model and limitations
+
+**Approved target policy; implementation follow-ups are pending.** Baffle will
+support HTTPS destinations only. A client must use HTTP `CONNECT` to establish
+the destination connection. Baffle will reject ordinary forward-proxy requests
+outside intercepted TLS, including absolute-form `http://` and `https://`
+requests. It will reject plaintext `http://` destinations on every port,
+including a request made after a client follows an HTTPS-to-HTTP redirect.
+Baffle does not follow redirects itself.
+
+The proxy client is untrusted and may try to evade policy. Baffle assumes that
+sites on the hostname allowlist behave legitimately. That trust in an allowed
+site does not make the client trusted. A client may send malformed CONNECT data
+or split a TLS ClientHello to try to bypass inspection.
+
+Rules default to destination port 443. A CONNECT request must use an authority
+with an explicit port, such as `api.example.com:443`; the client should map
+the default port from an `https://` origin to `:443`. Port 80 is not reserved:
+a configured port can carry TLS if the destination service supports it. Baffle
+rejects plaintext HTTP based on the request form or scheme, regardless of the
+destination port.
+
+The HTTP request used for `CONNECT` is the proxy protocol. After Baffle
+intercepts TLS, it continues to process HTTP/1.1 or HTTP/2 inside that TLS
+connection when a rule needs URL-path checks or daemon-managed credential
+injection. It checks each request, including requests on a reused HTTP/1.1 or
+HTTP/2 connection. TLS SNI must match the CONNECT hostname. Each inner HTTP
+authority must match the authorized CONNECT host and port. Baffle injects a
+credential only after successful interception and after the configured host,
+port, upstream TLS certificate identity, request authority, and path checks
+pass. It never injects into a plaintext request, a CONNECT request, a denied
+request, or an opaque tunnel.
+
+An explicit `mode = "tunnel"` rule permits an opaque connection and cannot
+carry path or injection rules. Baffle cannot prove that the bytes in an opaque
+tunnel are TLS, inspect HTTP paths, or verify the upstream certificate. The
+client must verify the upstream TLS identity. A rule that requires
+interception remains fail-closed: Baffle rejects unsupported payloads or a
+failed TLS interception instead of opening an opaque fallback. A malformed or
+fragmented ClientHello, unsupported data after CONNECT, or a failed TLS
+handshake must close the connection when inspection is required. Such a
+fallback would bypass path checks and the credential-injection boundary. If a
+client sends its own credentials through a tunnel, Baffle cannot inspect or
+constrain those credentials.
+
+Here, “HTTPS-only” defines supported requests at Baffle's proxy interface. It
+does not guarantee that every established opaque tunnel carries HTTPS.
+
+The target policy will authorize exact configured hostnames and ports. It
+will not check the IP addresses returned by DNS. An allowlisted name can
+resolve to a private, loopback, link-local, metadata, or other sensitive
+address, even when the service presents a valid certificate for that name.
+For a threat model that requires address containment, the deployment must
+control DNS and restrict network egress with a firewall or network namespace.
+Hostname and port rules are sufficient only when those names and the addresses
+they can reach are trusted for the workload.
+
+These are target guarantees, not the current runtime behavior. Until
+baffle/24 and baffle/25 are implemented, the current runtime still accepts
+explicitly configured plaintext HTTP on tunnel rules, filters resolved
+destination addresses, and rejects opaque fallback when interception is
+required. The current runtime also rejects port 80 for interception and
+credential-injection rules. The target policy will reject plaintext by request
+form or scheme and will permit TLS on any configured port, including port 80.
+The current behavior is documented in the
+[configuration reference](docs/configuration.md) and [security and deployment
+guide](docs/security-deployment.md).
 
 The executable is named `baffle`. The Cargo package is named `baffle-proxy`.
 The client library is the separate workspace package `baffle-client`.
@@ -44,17 +112,12 @@ installation paths. Then start Baffle:
 baffle daemon --config /etc/baffle/daemon.toml
 ```
 
-In another terminal, build and run the Rust example. It creates an ephemeral
-session, sends one HTTP request through its Unix data socket, then closes the
-lease and removes the session:
-
-```sh
-cargo run --locked --example client
-```
-
-The example expects the control socket at `/run/baffle/control.sock` and allows
-`example.com` on port 80. The daemon's session socket directory defaults to
-`/run/baffle/proxies` in the example configuration. See
+The Rust `client` example creates an ephemeral session and sends CONNECT for
+`example.com:443`. It confirms the tunnel response and then closes the session;
+it does not send a TLS request. For a complete HTTPS request, use the
+[Cladding integration](docs/cladding-integration.md). The daemon's session
+socket directory defaults to `/run/baffle/proxies` in the example
+configuration. See
 [`examples/session.toml`](examples/session.toml) for a direct-protocol policy.
 
 For an HTTPS CONNECT session exposed through a local TCP bridge, use the
@@ -65,13 +128,14 @@ isolation described in the [deployment guide](docs/security-deployment.md).
 ## How it works
 
 The daemon owns a private Unix control socket and a managed certificate
-authority. A trusted client creates a session over the control socket and gets
-the path to that session's Unix data socket. Hudsucker handles HTTP and HTTPS
-traffic. A bounded in-process bridge connects the data socket to a private,
-pre-bound loopback TCP listener used by Hudsucker.
+authority. A trusted orchestrator creates a session over the control socket
+and gets the path to that session's Unix data socket. Hudsucker handles HTTP
+and HTTPS traffic. A bounded in-process bridge connects the data socket to a
+private, pre-bound loopback TCP listener used by Hudsucker.
 
-Every session has a separate immutable policy, Hudsucker runtime, DNS-aware
-outbound connector, credential state, and resource counters. The session
+The current implementation gives every session a separate immutable policy,
+Hudsucker runtime, DNS-aware outbound connector, credential state, and resource
+counters. The session
 manager shares the Tokio runtime and CA material. See the
 [architecture guide](docs/architecture.md) for component details and data
 flows.
@@ -122,7 +186,7 @@ manual namespace test command.
 
 ## Current release scope
 
-Baffle runs on Linux. It is a forward HTTP/HTTPS proxy. It does not install its
+Baffle runs on Linux. It is a forward proxy. It does not install its
 CA into system trust stores, configure client proxy settings, or create the
 network sandbox that isolates its internal TCP listeners. The deployment must
 provide that isolation. Baffle does not change Cladding; a consumer integrates

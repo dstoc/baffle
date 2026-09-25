@@ -28,6 +28,11 @@ Reviewed on 2026-09-25 for the initial Linux release work.
   HTTP, CONNECT, and WebSocket connections. Keep the local diff narrow and
   repeat egress, interception, CONNECT, HTTP/2, and WebSocket coverage before
   changing the pinned version.
+- The approved target policy in baffle/21 defers destination-IP filtering to
+  deployment egress controls. baffle/25 will reassess the connector and
+  resolver hooks; it must preserve fail-closed interception and
+  CONNECT/TLS/HTTP identity checks. The current runtime retains both the IP
+  checks and their tests until that follow-up lands.
 - The dependency versions used by CI and releases come from the committed lock
   file. This repository does not currently run an automated RustSec advisory
   scan; maintainers should add one before adopting a security patch cadence.

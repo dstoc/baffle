@@ -1,5 +1,11 @@
 # Architecture
 
+**Current runtime architecture.** This page describes protections that remain
+in the implementation until baffle/24 and baffle/25 land. In the target model,
+ordinary plaintext HTTP is rejected and DNS/IP filtering moves to deployment
+egress controls. The fail-closed interception behavior described below stays
+in the target model.
+
 Baffle runs one Tokio daemon process. The daemon owns the control listener,
 session registry, CA signing key, secret store, shared CA handle, and runtime.
 Each proxy session has an independent policy, Hudsucker instance, outbound
@@ -23,7 +29,7 @@ connector, data socket, and counters.
 
 The control flow is:
 
-1. The trusted client connects to the private Unix control socket.
+1. The trusted orchestrator connects to the private Unix control socket.
 2. Baffle checks the peer UID with Linux `SO_PEERCRED` before reading a frame.
 3. Baffle reads one bounded TOML request and validates its protocol version,
    schema, and policy.
@@ -53,9 +59,13 @@ request passes all checks can the handler add its configured headers.
 
 For HTTPS, `tunnel` rules permit an opaque CONNECT tunnel only when no path
 restriction or credential injection requires inspection. `intercept` rules
-require supported TLS negotiation and a matching SNI. Unsupported CONNECT
-payloads, missing or mismatched SNI, and TLS interception failures close the
-connection; they do not select an opaque fallback tunnel.
+require supported TLS negotiation and a matching SNI. The current code closes
+unsupported CONNECT payloads, missing or mismatched SNI, and TLS interception
+failures; it does not select an opaque fallback tunnel. The target policy also
+requires malformed or fragmented ClientHello data to fail closed. A client
+must not force an opaque tunnel for a rule that needs inspection. The target
+policy treats proxy clients as untrusted and assumes allowlisted sites behave
+legitimately.
 
 The outbound connector resolves the requested host and filters the complete
 answer set before dialing. Public addresses are eligible. A non-public answer
@@ -68,6 +78,25 @@ These rules protect traffic that reaches Baffle. They do not stop a sandboxed
 process from making a direct network connection. Deployment must force client
 egress through the assigned proxy and must isolate Baffle's internal loopback
 listeners as described in the [security guide](security-deployment.md).
+
+## Approved target boundary
+
+The target policy accepts HTTPS destinations through CONNECT. It rejects
+ordinary forward-proxy requests outside intercepted TLS, including plaintext
+`http://` destinations. HTTP/1.1 and HTTP/2 inside successfully intercepted TLS
+remain available for path checks and credential injection. A rule that
+requires those checks remains fail-closed. Check each request on reused h1/h2
+connections against the CONNECT authority, TLS identity, and path policy
+before forwarding or injecting a credential. Reject plaintext based on request
+form or scheme on every port; a configured TLS service on port 80 is valid.
+
+An explicit tunnel rule remains opaque. Baffle authorizes its configured host
+and port, but cannot prove that tunneled bytes are TLS, inspect paths, or
+verify the upstream certificate. The client must verify TLS identity. The
+target policy also removes Baffle's DNS-answer restrictions; deployment DNS
+and network egress controls must block sensitive addresses where the threat
+model requires it. Until baffle/24 and baffle/25 are implemented, the current
+runtime behavior described above still applies.
 
 ## Session lifecycle
 
@@ -102,17 +131,19 @@ The local patch adds policy hooks for CONNECT and TLS decisions, validates
 CONNECT/TLS host identity, makes unsupported requested interception fail
 closed, and adds outbound connector and resolver hooks. The connector hooks
 cover HTTP, CONNECT tunnels, and WebSocket connections. The resolver hook
-supplies the addresses that the outbound HTTP client dials. These hooks let
-Baffle enforce the same session egress policy on each Hudsucker connection
-path.
+supplies the addresses that the outbound HTTP client dials. baffle/25 may make
+the address-filtering hooks unnecessary. It must retain strict interception
+and CONNECT/SNI/HTTP authority binding unless an upstream replacement proves
+equivalent behavior.
 
 The security rationale, patch inventory, and upstreaming plan are recorded in
 [`vendor/hudsucker/PATCHES.md`](../vendor/hudsucker/PATCHES.md). Keep the
 vendor diff limited to those checks and hooks. Review the diff and rerun
 egress, CONNECT, SNI, HTTP/2, and WebSocket tests before changing Hudsucker.
-Upstream the checked connector, resolver, and fail-closed interception hooks
-through Hudsucker's public builder API. Remove the local copy only after an
-upstream release provides the same guarantees and Baffle tests verify them.
+Reassess the connector and resolver hooks after baffle/25. Keep the
+fail-closed-interception and authority-binding changes until an upstream
+release provides those guarantees and Baffle tests verify them. See the patch
+inventory for the per-change replacement criteria.
 
 ## Failures and logging
 
