@@ -23,8 +23,11 @@ use rama::{
     tcp::TcpStream as RamaTcpStream,
     tls::{
         KeyLogIntent,
-        boring::proxy::{TlsMitmEgressServerAuth, TlsMitmRelay},
-        client::ServerVerifyMode,
+        boring::{
+            client::{BoringClientConfigExt as _, TlsConnectorData},
+            proxy::TlsMitmRelay,
+        },
+        client::{ServerVerifyMode, TlsClientConfig},
         server::peek_client_hello_from_input_with_timeout_policy,
     },
 };
@@ -111,12 +114,15 @@ impl ProxyRuntime {
         let bridge_force_cancellation = CancellationToken::new();
         let mut proxy_task = tokio::spawn(run_proxy(
             listener,
-            policy,
-            secrets,
-            ca,
-            proxy_cancellation.clone(),
-            Arc::clone(&metrics),
-            io_timeout,
+            ProxySettings {
+                policy,
+                secrets,
+                ca,
+                permits: Arc::new(Semaphore::new(max_connections)),
+                cancellation: proxy_cancellation.clone(),
+                metrics: Arc::clone(&metrics),
+                io_timeout,
+            },
         ));
         let mut bridge_task = tokio::spawn(run_bridge(
             unix_listener,
@@ -222,6 +228,18 @@ impl ProxyRuntime {
     }
 }
 
+impl Drop for ProxyRuntime {
+    fn drop(&mut self) {
+        self.bridge_ingress_shutdown.cancel();
+        self.bridge_force_cancellation.cancel();
+        self.proxy_cancellation.cancel();
+        // If the session owner is cancelled while awaiting graceful shutdown,
+        // do not detach active proxy or bridge tasks.
+        self.proxy_abort.abort();
+        self.bridge_abort.abort();
+    }
+}
+
 fn map_proxy_join(
     result: Result<Result<(), ProxyRuntimeError>, tokio::task::JoinError>,
 ) -> Result<(), ProxyRuntimeError> {
@@ -238,15 +256,29 @@ fn map_bridge_join(
     }
 }
 
-async fn run_proxy(
-    listener: TcpListener,
+struct ProxySettings {
     policy: Arc<SessionPolicy>,
     secrets: Arc<ResolvedSecrets>,
     ca: Arc<ManagedCa>,
+    permits: Arc<Semaphore>,
     cancellation: CancellationToken,
     metrics: Arc<Metrics>,
     io_timeout: Duration,
+}
+
+async fn run_proxy(
+    listener: TcpListener,
+    settings: ProxySettings,
 ) -> Result<(), ProxyRuntimeError> {
+    let ProxySettings {
+        policy,
+        secrets,
+        ca,
+        permits,
+        cancellation,
+        metrics,
+        io_timeout,
+    } = settings;
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -259,11 +291,16 @@ async fn run_proxy(
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.map_err(ProxyRuntimeError::Bind)?;
+                let permit = match Arc::clone(&permits).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => continue,
+                };
                 let policy = Arc::clone(&policy);
                 let secrets = Arc::clone(&secrets);
                 let ca = Arc::clone(&ca);
                 let metrics = Arc::clone(&metrics);
                 connections.spawn(async move {
+                    let _permit = permit;
                     metrics.connection_started();
                     let _guard = ConnectionGuard(Arc::clone(&metrics));
                     if let Err(error) = handle_client(stream, policy, secrets, ca, metrics, io_timeout).await {
@@ -387,22 +424,26 @@ async fn handle_client(
     }
 
     let (certificate, private_key) = ca.for_rama_proxy();
-    let server_auth = TlsMitmEgressServerAuth::new()
+    // Preserve the inspected ClientHello's ALPN and TLS parameters for the
+    // upstream connection. Bind the verification identity to the authorized
+    // CONNECT target rather than any client-supplied alternate identity.
+    let egress_config = TlsClientConfig::new_from_client_hello(&client_hello)
         .with_server_name(rama_host(&destination)?)
-        .with_server_verify(ServerVerifyMode::Auto);
+        .with_server_verify(ServerVerifyMode::Auto)
+        .with_keylog(KeyLogIntent::Disabled);
     // Test runtimes can add a private trust anchor through this helper while
     // production keeps Rama's configured system roots.
     #[cfg(test)]
-    let server_auth = if let Some(anchor) = test_upstream_trust_anchor() {
-        server_auth
+    let egress_config = match test_upstream_trust_anchor() {
+        Some(anchor) => egress_config
             .try_with_server_trust_anchors([anchor])
-            .map_err(|error| ProxyRuntimeError::Build(error.to_string()))?
-    } else {
-        server_auth
+            .map_err(|error| ProxyRuntimeError::Build(error.to_string()))?,
+        None => egress_config,
     };
+    let connector_data = TlsConnectorData::try_from(&egress_config)
+        .map_err(|error| ProxyRuntimeError::Build(error.to_string()))?;
     let relay = TlsMitmRelay::new_cached_in_memory(certificate, private_key)
-        .with_keylog_intent(KeyLogIntent::Disabled)
-        .with_egress_server_auth(server_auth);
+        .with_keylog_intent(KeyLogIntent::Disabled);
     let request_policy = RamaPolicyLayer {
         policy: Arc::clone(&policy),
         connect_authority: parsed.authority.clone(),
@@ -410,7 +451,10 @@ async fn handle_client(
         metrics: Arc::clone(&metrics),
     };
     let decrypted = relay
-        .handshake(BridgeIo(client, RamaTcpStream::new(egress)), None)
+        .handshake(
+            BridgeIo(client, RamaTcpStream::new(egress)),
+            Some(connector_data),
+        )
         .await
         .map_err(|error| {
             metrics.interception_error();
@@ -913,7 +957,14 @@ impl Drop for ConnectionGuard {
 #[cfg(test)]
 mod tests {
     use std::{
-        error::Error, fs, io, os::unix::fs::PermissionsExt, path::Path, sync::Arc, time::Duration,
+        error::Error,
+        fs, io,
+        os::unix::fs::PermissionsExt,
+        path::Path,
+        pin::Pin,
+        sync::Arc,
+        task::{Context, Poll},
+        time::Duration,
     };
 
     use rama::crypto::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -922,7 +973,7 @@ mod tests {
         KeyUsagePurpose,
     };
     use tokio::{
-        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+        io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
         net::{TcpListener, TcpStream, UnixStream},
         sync::{mpsc, oneshot},
         time::timeout,
@@ -987,13 +1038,17 @@ mod tests {
         let certificate = params
             .signed_by(&server_key, &issuer)
             .expect("upstream leaf should be signed");
-        rustls::ServerConfig::builder()
+        let mut config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(
                 vec![CertificateDer::from(certificate.der().to_vec())],
                 PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key.serialize_der())),
             )
-            .expect("upstream TLS server should accept its key pair")
+            .expect("upstream TLS server should accept its key pair");
+        // The relay mirrors the client's negotiated ALPN. Advertising h2 lets
+        // the same fixture exercise HTTP/2 on both sides of the live proxy.
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        config
     }
 
     fn upstream_root() -> (String, String, Vec<u8>) {
@@ -1157,6 +1212,17 @@ mod tests {
         server_name: &str,
         ca: &ManagedCa,
     ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, TestError> {
+        open_tls_client_with_alpn(proxy, authority, server_name, ca, &[], &[]).await
+    }
+
+    async fn open_tls_client_with_alpn(
+        proxy: std::net::SocketAddr,
+        authority: &str,
+        server_name: &str,
+        ca: &ManagedCa,
+        alpn: &[&[u8]],
+        extra_roots: &[Vec<u8>],
+    ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, TestError> {
         let mut stream = TcpStream::connect(proxy).await?;
         stream
             .write_all(
@@ -1180,9 +1246,13 @@ mod tests {
         let (_, parsed_ca) = x509_parser::pem::parse_x509_pem(ca.public_certificate_pem())?;
         let mut roots = rustls::RootCertStore::empty();
         roots.add(CertificateDer::from(parsed_ca.contents))?;
-        let config = rustls::ClientConfig::builder()
+        for root in extra_roots {
+            roots.add(CertificateDer::from(root.clone()))?;
+        }
+        let mut config = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
+        config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
         let connector = TlsConnector::from(Arc::new(config));
         Ok(connector
             .connect(
@@ -1190,6 +1260,142 @@ mod tests {
                 reader.into_inner(),
             )
             .await?)
+    }
+
+    async fn start_http2_origin(
+        config: rustls::ServerConfig,
+        seen: tokio::sync::mpsc::UnboundedSender<(String, String, String)>,
+    ) -> Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>), TestError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("origin should accept");
+            let tls = TlsAcceptor::from(Arc::new(config))
+                .accept(stream)
+                .await
+                .expect("origin should establish TLS");
+            assert_eq!(
+                tls.get_ref().1.alpn_protocol(),
+                Some(b"h2".as_slice()),
+                "the proxy must negotiate HTTP/2 with the origin"
+            );
+            let service = rama::service::service_fn(
+                move |request: rama::http::Request<rama::http::core::body::Incoming>| {
+                    let sender = seen.clone();
+                    async move {
+                        let path = request
+                            .uri()
+                            .path()
+                            .map(|path| path.to_string())
+                            .unwrap_or_default();
+                        let authority = request
+                            .uri()
+                            .authority()
+                            .map(|authority| authority.to_string())
+                            .unwrap_or_default();
+                        let authorization = request
+                            .headers()
+                            .get(rama::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned();
+                        let _ = sender.send((path, authority, authorization));
+                        Ok::<_, std::convert::Infallible>(
+                            rama::http::Response::builder()
+                                .status(rama::http::StatusCode::OK)
+                                .body(rama::http::Body::empty())
+                                .expect("origin response should build"),
+                        )
+                    }
+                },
+            );
+            rama::http::core::server::conn::http2::Builder::new(rama::rt::Executor::default())
+                .serve_connection(rama::ServiceInput::new(tls), service)
+                .await
+                .expect("origin HTTP/2 connection should complete");
+        });
+        Ok((address, task))
+    }
+
+    fn h2_request(uri: String, host: String, authorization: Option<&str>) -> rama::http::Request {
+        let mut request = rama::http::Request::builder()
+            .method(rama::http::Method::GET)
+            .version(rama::http::Version::HTTP_2)
+            .uri(uri)
+            .header(rama::http::header::HOST, host);
+        if let Some(authorization) = authorization {
+            request = request.header(rama::http::header::AUTHORIZATION, authorization);
+        }
+        request
+            .body(rama::http::Body::empty())
+            .expect("HTTP/2 request should build")
+    }
+
+    struct FragmentFirstWrite<T> {
+        inner: T,
+        first_byte_written: bool,
+        remainder_delay: Option<Pin<Box<tokio::time::Sleep>>>,
+    }
+
+    impl<T> FragmentFirstWrite<T> {
+        fn new(inner: T) -> Self {
+            Self {
+                inner,
+                first_byte_written: false,
+                remainder_delay: None,
+            }
+        }
+    }
+
+    impl<T: AsyncRead + Unpin> AsyncRead for FragmentFirstWrite<T> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(context, buffer)
+        }
+    }
+
+    impl<T: AsyncWrite + Unpin> AsyncWrite for FragmentFirstWrite<T> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if buffer.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
+            if !self.first_byte_written {
+                match Pin::new(&mut self.inner).poll_write(context, &buffer[..1]) {
+                    Poll::Ready(Ok(written)) => {
+                        self.first_byte_written = true;
+                        self.remainder_delay =
+                            Some(Box::pin(tokio::time::sleep(Duration::from_millis(75))));
+                        return Poll::Ready(Ok(written));
+                    }
+                    result => return result,
+                }
+            }
+            if let Some(delay) = self.remainder_delay.as_mut() {
+                if delay.as_mut().poll(context).is_pending() {
+                    return Poll::Pending;
+                }
+                self.remainder_delay = None;
+            }
+            Pin::new(&mut self.inner).poll_write(context, buffer)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(context)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(context)
+        }
     }
 
     async fn read_http_response<S>(reader: &mut BufReader<S>) -> io::Result<String>
@@ -1280,6 +1486,154 @@ mod tests {
         );
 
         drop(reader);
+        origin_task.abort();
+        runtime.shutdown(Duration::from_secs(2)).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_plaintext_forward_http_before_dialing_the_origin() -> Result<(), TestError> {
+        let directory = tempfile::tempdir()?;
+        let ca = write_managed_ca(directory.path());
+        let upstream = TcpListener::bind("127.0.0.1:0").await?;
+        let port = upstream.local_addr()?.port();
+        let (runtime, _) = start_runtime(
+            directory.path(),
+            intercept_session(port),
+            ca,
+            Duration::from_secs(1),
+        )
+        .await?;
+
+        let mut client = TcpStream::connect(runtime.local_addr()).await?;
+        client
+            .write_all(
+                format!(
+                    "GET http://localhost:{port}/allowed HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await?;
+        let mut reader = BufReader::new(client);
+        let mut status = String::new();
+        timeout(Duration::from_secs(1), reader.read_line(&mut status)).await??;
+        assert!(status.starts_with("HTTP/1.1 400"));
+        assert!(
+            timeout(Duration::from_millis(150), upstream.accept())
+                .await
+                .is_err(),
+            "plaintext forward HTTP must not cause an upstream connection"
+        );
+
+        runtime.shutdown(Duration::from_secs(1)).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn intercepted_http2_streams_apply_path_authority_and_injection_policy()
+    -> Result<(), TestError> {
+        let directory = tempfile::tempdir()?;
+        let ca = write_managed_ca(directory.path());
+        let (seen_sender, mut seen) = mpsc::unbounded_channel();
+        let (origin_address, origin_task) =
+            start_http2_origin(upstream_tls_config("localhost"), seen_sender).await?;
+        let port = origin_address.port();
+        let authority = format!("localhost:{port}");
+        let (runtime, _) = start_runtime(
+            directory.path(),
+            intercept_session(port),
+            Arc::clone(&ca),
+            Duration::from_secs(2),
+        )
+        .await?;
+        let tls = open_tls_client_with_alpn(
+            runtime.local_addr(),
+            &authority,
+            "localhost",
+            &ca,
+            &[b"h2"],
+            &[],
+        )
+        .await?;
+        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+        let (mut sender, connection) =
+            rama::http::core::client::conn::http2::handshake::<_, rama::http::Body>(
+                rama::rt::Executor::default(),
+                rama::ServiceInput::new(tls),
+            )
+            .await?;
+        let driver = tokio::spawn(connection);
+
+        let request_one = h2_request(
+            format!("https://{authority}/allowed"),
+            authority.clone(),
+            Some("Bearer attacker-one"),
+        );
+        let request_two = h2_request(
+            format!("https://{authority}/allowed"),
+            authority.clone(),
+            Some("Bearer attacker-two"),
+        );
+        let request_denied = h2_request(
+            format!("https://{authority}/blocked"),
+            authority.clone(),
+            Some("Bearer attacker-denied"),
+        );
+        let request_mismatched = h2_request(
+            format!("https://example.org:{port}/allowed"),
+            authority.clone(),
+            Some("Bearer attacker-mismatched"),
+        );
+
+        sender.ready().await?;
+        let mut sender_one = sender.clone();
+        let mut sender_two = sender.clone();
+        let mut sender_denied = sender.clone();
+        let mut sender_mismatched = sender.clone();
+        sender_one.ready().await?;
+        sender_two.ready().await?;
+        sender_denied.ready().await?;
+        sender_mismatched.ready().await?;
+        let (one, two, denied, mismatched) = tokio::join!(
+            timeout(Duration::from_secs(3), sender_one.send_request(request_one)),
+            timeout(Duration::from_secs(3), sender_two.send_request(request_two)),
+            timeout(
+                Duration::from_secs(3),
+                sender_denied.send_request(request_denied)
+            ),
+            timeout(
+                Duration::from_secs(3),
+                sender_mismatched.send_request(request_mismatched)
+            ),
+        );
+        let one = one??;
+        let two = two??;
+        let denied = denied??;
+        let mismatched = mismatched??;
+        assert_eq!(one.status(), rama::http::StatusCode::OK);
+        assert_eq!(two.status(), rama::http::StatusCode::OK);
+        assert_eq!(denied.status(), rama::http::StatusCode::FORBIDDEN);
+        assert_eq!(mismatched.status(), rama::http::StatusCode::BAD_REQUEST);
+
+        for _ in 0..2 {
+            let (path, seen_authority, authorization) =
+                timeout(Duration::from_secs(2), seen.recv())
+                    .await?
+                    .ok_or_else(|| io::Error::other("origin event channel should remain open"))?;
+            assert_eq!(path, "/allowed");
+            assert_eq!(seen_authority, authority);
+            assert_eq!(authorization, "Bearer test-credential");
+            assert!(!authorization.contains("attacker"));
+        }
+        assert!(
+            timeout(Duration::from_millis(150), seen.recv())
+                .await
+                .is_err(),
+            "denied paths and mismatched authorities must not reach the origin"
+        );
+
+        drop(sender);
+        driver.abort();
         origin_task.abort();
         runtime.shutdown(Duration::from_secs(2)).await;
         Ok(())
@@ -1418,6 +1772,251 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loopback_listener_enforces_the_configured_connection_limit() -> Result<(), TestError> {
+        let directory = tempfile::tempdir()?;
+        let ca = write_managed_ca(directory.path());
+        let (runtime, _) = start_runtime_limited(
+            directory.path(),
+            tunnel_session(443),
+            ca,
+            "rama-loopback-limited",
+            1,
+            Duration::from_secs(2),
+        )
+        .await?;
+
+        let mut admitted = TcpStream::connect(runtime.local_addr()).await?;
+        admitted.write_all(b"C").await?;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let mut over_limit = TcpStream::connect(runtime.local_addr()).await?;
+        let mut byte = [0; 1];
+        let read = timeout(Duration::from_secs(1), over_limit.read(&mut byte)).await??;
+        assert_eq!(read, 0, "over-limit loopback clients must be closed");
+
+        drop(admitted);
+        runtime.shutdown(Duration::from_secs(1)).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_an_existing_socket_path_without_replacing_it() -> Result<(), TestError>
+    {
+        let directory = tempfile::tempdir()?;
+        let ca = write_managed_ca(directory.path());
+        let socket_path = directory.path().join("occupied.sock");
+        fs::write(&socket_path, b"owned by another process")?;
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let result = ProxyRuntime::start_with_metrics(
+            RuntimeId::new("rama-startup-conflict"),
+            tunnel_session(443),
+            Arc::new(ResolvedSecrets::default()),
+            ca,
+            socket_path.clone(),
+            4,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Arc::new(crate::telemetry::Metrics::default()),
+            events,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "startup must fail when the configured socket path already exists"
+        );
+        assert_eq!(fs::read(socket_path)?, b"owned by another process");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bridge_task_failure_is_reported_to_the_session_event_channel() -> Result<(), TestError>
+    {
+        let directory = tempfile::tempdir()?;
+        let ca = write_managed_ca(directory.path());
+        let (runtime, mut events) = start_runtime(
+            directory.path(),
+            tunnel_session(443),
+            ca,
+            Duration::from_secs(1),
+        )
+        .await?;
+        let id = runtime.runtime_id().clone();
+
+        runtime.bridge_abort.abort();
+        let event = timeout(Duration::from_secs(2), events.recv())
+            .await?
+            .ok_or_else(|| io::Error::other("session event channel should remain open"))?;
+        assert_eq!(event.runtime_id, id);
+        assert!(
+            event.result.is_err(),
+            "bridge failure must reach the supervisor"
+        );
+        runtime.shutdown(Duration::from_secs(1)).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_shutdown_with_an_active_tunnel_aborts_tasks_and_cleans_up()
+    -> Result<(), TestError> {
+        let directory = tempfile::tempdir()?;
+        let ca = write_managed_ca(directory.path());
+        let origin = TcpListener::bind("127.0.0.1:0").await?;
+        let port = origin.local_addr()?.port();
+        let origin_task = tokio::spawn(async move {
+            let (mut stream, _) = origin.accept().await.expect("origin should accept");
+            let mut byte = [0; 1];
+            let _ = stream.read(&mut byte).await;
+        });
+        let (runtime, mut events) = start_runtime_named(
+            directory.path(),
+            tunnel_session(port),
+            ca,
+            "rama-cancel-shutdown",
+            Duration::from_secs(30),
+        )
+        .await?;
+        let local_address = runtime.local_addr();
+        let socket_path = runtime.socket_path().to_path_buf();
+        let runtime_id = runtime.runtime_id().clone();
+        let mut tunnel = UnixStream::connect(&socket_path).await?;
+        tunnel
+            .write_all(
+                format!("CONNECT localhost:{port} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await?;
+        let mut tunnel = BufReader::new(tunnel);
+        let mut status = String::new();
+        timeout(Duration::from_secs(2), tunnel.read_line(&mut status)).await??;
+        assert!(status.starts_with("HTTP/1.1 200"));
+        loop {
+            let mut line = String::new();
+            tunnel.read_line(&mut line).await?;
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+        }
+
+        let shutdown = tokio::spawn(runtime.shutdown(Duration::from_secs(10)));
+        tokio::task::yield_now().await;
+        shutdown.abort();
+        let _ = shutdown.await;
+
+        timeout(Duration::from_secs(2), async {
+            while socket_path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(TcpStream::connect(local_address).await.is_err());
+        let mut byte = [0; 1];
+        let read = timeout(Duration::from_secs(1), tunnel.read(&mut byte)).await?;
+        assert!(
+            matches!(read, Ok(0) | Err(_)),
+            "active tunnel should close when its session owner is cancelled"
+        );
+        let event = timeout(Duration::from_secs(2), events.recv())
+            .await?
+            .ok_or_else(|| io::Error::other("session event channel should remain open"))?;
+        assert_eq!(event.runtime_id, runtime_id);
+        assert!(
+            event.result.is_err(),
+            "cancelled proxy task failure must propagate to the session registry"
+        );
+        origin_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_shutdown_with_an_inflight_intercepted_request_closes_it()
+    -> Result<(), TestError> {
+        let directory = tempfile::tempdir()?;
+        let ca = write_managed_ca(directory.path());
+        let origin = TcpListener::bind("127.0.0.1:0").await?;
+        let port = origin.local_addr()?.port();
+        let (request_seen_sender, request_seen) = oneshot::channel();
+        let (release_origin, release_origin_rx) = oneshot::channel::<()>();
+        let origin_task = tokio::spawn(async move {
+            let (stream, _) = origin.accept().await.expect("origin should accept");
+            let tls = TlsAcceptor::from(Arc::new(upstream_tls_config("localhost")))
+                .accept(stream)
+                .await
+                .expect("origin should establish TLS");
+            let mut reader = BufReader::new(tls);
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .await
+                .expect("origin request line should be readable");
+            loop {
+                let mut header = String::new();
+                reader
+                    .read_line(&mut header)
+                    .await
+                    .expect("origin request headers should be readable");
+                if header == "\r\n" || header.is_empty() {
+                    break;
+                }
+            }
+            let _ = request_seen_sender.send(request_line);
+            let _ = release_origin_rx.await;
+            let _ = reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        });
+        let (runtime, mut events) = start_runtime_named(
+            directory.path(),
+            intercept_session(port),
+            Arc::clone(&ca),
+            "rama-cancel-intercept",
+            Duration::from_secs(30),
+        )
+        .await?;
+        let local_address = runtime.local_addr();
+        let socket_path = runtime.socket_path().to_path_buf();
+        let runtime_id = runtime.runtime_id().clone();
+        let mut client = open_tls_client(local_address, &format!("localhost:{port}"), &ca).await?;
+        client
+            .write_all(
+                format!("GET /allowed HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").as_bytes(),
+            )
+            .await?;
+        let request_line = timeout(Duration::from_secs(2), request_seen)
+            .await?
+            .map_err(|_| io::Error::other("origin did not receive the intercepted request"))?;
+        assert!(request_line.starts_with("GET /allowed HTTP/1.1"));
+
+        let shutdown = tokio::spawn(runtime.shutdown(Duration::from_secs(10)));
+        tokio::task::yield_now().await;
+        shutdown.abort();
+        let _ = shutdown.await;
+
+        timeout(Duration::from_secs(2), async {
+            while socket_path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(TcpStream::connect(local_address).await.is_err());
+        let mut byte = [0; 1];
+        match timeout(Duration::from_secs(1), client.read(&mut byte)).await? {
+            Ok(0) | Err(_) => (),
+            other => panic!("cancelled intercepted connection remained open: {other:?}"),
+        }
+        let event = timeout(Duration::from_secs(2), events.recv())
+            .await?
+            .ok_or_else(|| io::Error::other("session event channel should remain open"))?;
+        assert_eq!(event.runtime_id, runtime_id);
+        assert!(
+            event.result.is_err(),
+            "cancelled proxy task failure must propagate to the session registry"
+        );
+        drop(release_origin);
+        origin_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn proxy_task_failure_is_reported_to_the_session_event_channel() -> Result<(), TestError>
     {
         let directory = tempfile::tempdir()?;
@@ -1515,6 +2114,96 @@ mod tests {
             }
         }
 
+        runtime.shutdown(Duration::from_secs(2)).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn valid_client_hello_split_after_one_byte_is_inspected_before_forwarding()
+    -> Result<(), TestError> {
+        let directory = tempfile::tempdir()?;
+        let ca = write_managed_ca(directory.path());
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let upstream_address = upstream_listener.local_addr()?;
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = upstream_listener
+                .accept()
+                .await
+                .expect("upstream should accept the proxy connection");
+            let tls = TlsAcceptor::from(Arc::new(upstream_tls_config("localhost")))
+                .accept(stream)
+                .await
+                .expect("upstream TLS should complete");
+            let mut tls = tls;
+            let mut request = [0; 512];
+            match timeout(Duration::from_millis(500), tls.read(&mut request)).await {
+                Ok(Ok(read)) if read > 0 => Some(request[..read].to_vec()),
+                _ => None,
+            }
+        });
+        let (runtime, _) = start_runtime(
+            directory.path(),
+            intercept_session(upstream_address.port()),
+            Arc::clone(&ca),
+            Duration::from_secs(2),
+        )
+        .await?;
+
+        let authority = format!("localhost:{}", upstream_address.port());
+        let mut connect = TcpStream::connect(runtime.local_addr()).await?;
+        connect
+            .write_all(
+                format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes(),
+            )
+            .await?;
+        let mut connect = BufReader::new(connect);
+        let mut status = String::new();
+        timeout(Duration::from_secs(2), connect.read_line(&mut status)).await??;
+        assert!(status.starts_with("HTTP/1.1 200"));
+        loop {
+            let mut line = String::new();
+            connect.read_line(&mut line).await?;
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+        }
+
+        let (_, parsed_ca) = x509_parser::pem::parse_x509_pem(ca.public_certificate_pem())?;
+        let (_, _, upstream_root) = upstream_root();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from(parsed_ca.contents))?;
+        roots.add(CertificateDer::from(upstream_root))?;
+        let mut client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let tls = TlsConnector::from(Arc::new(client_config))
+            .connect(
+                rustls::pki_types::ServerName::try_from("localhost".to_owned())?,
+                FragmentFirstWrite::new(connect.into_inner()),
+            )
+            .await;
+
+        if let Ok(mut tls) = tls {
+            tls.write_all(
+                format!("GET /blocked HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await?;
+            let mut reader = BufReader::new(tls);
+            let mut response = String::new();
+            timeout(Duration::from_secs(2), reader.read_line(&mut response)).await??;
+            assert!(
+                response.starts_with("HTTP/1.1 403"),
+                "a valid fragmented ClientHello must reach path policy: {response:?}"
+            );
+        }
+
+        let origin_request = timeout(Duration::from_secs(2), upstream_task).await??;
+        assert!(
+            origin_request.is_none(),
+            "an interception-required fragmented ClientHello must not turn into an opaque tunnel"
+        );
         runtime.shutdown(Duration::from_secs(2)).await;
         Ok(())
     }
