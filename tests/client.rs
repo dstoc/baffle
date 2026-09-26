@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::PathBuf,
     process::{Child, Command, Stdio},
     thread,
@@ -22,6 +22,7 @@ struct DaemonProcess {
     child: Child,
     _directory: TempDir,
     control_socket: PathBuf,
+    session_config_dir: Option<PathBuf>,
 }
 
 impl Drop for DaemonProcess {
@@ -129,6 +130,67 @@ async fn client_returns_typed_policy_and_capacity_errors() {
         .expect("test session should stop");
 }
 
+#[tokio::test]
+async fn typed_client_creates_from_a_daemon_managed_file_and_holds_the_lease() {
+    let daemon = start_file_only_daemon(4);
+    let config_dir = daemon
+        .session_config_dir
+        .as_ref()
+        .expect("file-only daemon should have a config directory");
+    let nested_dir = config_dir.join("cladding");
+    fs::create_dir(&nested_dir).expect("nested config directory should be created");
+    fs::set_permissions(&nested_dir, fs::Permissions::from_mode(0o700))
+        .expect("nested config directory should be private");
+    let config_path = nested_dir.join("github.toml");
+    fs::write(
+        &config_path,
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = false\n\n[[rules]]\nhost = \"github.com\"\nmode = \"tunnel\"\n",
+    )
+    .expect("session config should be written");
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
+        .expect("session config should be private");
+
+    let client = Client::new(&daemon.control_socket);
+    let session = client
+        .create_from_file("cladding/github.toml")
+        .await
+        .expect("typed file create should succeed");
+    assert!(!session.is_persistent());
+    let socket_path = session.socket_path().to_path_buf();
+    assert!(socket_path.exists());
+    assert_eq!(client.list().await.expect("list should succeed").len(), 1);
+    request_through_proxy(&socket_path).await;
+
+    let missing = client
+        .create_from_file("missing.toml")
+        .await
+        .expect_err("missing config should fail");
+    assert!(matches!(
+        missing,
+        baffle_client::ClientError::SessionConfigNotFound(_)
+    ));
+    let disabled_inline = client
+        .create(SessionConfig::new().with_rule(HostRule::tunnel("example.com")))
+        .await
+        .expect_err("inline create must be rejected in file-only mode");
+    assert!(matches!(
+        disabled_inline,
+        baffle_client::ClientError::OperationNotAllowed(_)
+    ));
+    let malformed_name = client
+        .create_from_file("../outside.toml")
+        .await
+        .expect_err("unsafe names should fail in the client");
+    assert!(matches!(
+        malformed_name,
+        baffle_client::ClientError::InvalidPolicy(_)
+    ));
+
+    session.close();
+    wait_for_count(&client, 0).await;
+    assert!(!socket_path.exists());
+}
+
 async fn request_through_proxy(socket_path: &std::path::Path) {
     let mut socket = UnixStream::connect(socket_path)
         .await
@@ -166,16 +228,39 @@ async fn wait_for_count(client: &Client, expected: usize) {
 }
 
 fn start_daemon(max_sessions: usize) -> DaemonProcess {
+    start_daemon_with_mode(max_sessions, false)
+}
+
+fn start_file_only_daemon(max_sessions: usize) -> DaemonProcess {
+    start_daemon_with_mode(max_sessions, true)
+}
+
+fn start_daemon_with_mode(max_sessions: usize, file_only: bool) -> DaemonProcess {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let control_socket = directory.path().join("run/control.sock");
     let socket_dir = directory.path().join("proxies");
     let config_path = directory.path().join("daemon.toml");
+    let session_config_dir = file_only.then(|| directory.path().join("session-configs"));
+    if let Some(session_config_dir) = &session_config_dir {
+        fs::create_dir(session_config_dir).expect("session config directory should be created");
+        fs::set_permissions(session_config_dir, fs::Permissions::from_mode(0o700))
+            .expect("session config directory should be private");
+    }
     let (certificate_path, private_key_path) = write_test_ca(directory.path());
     let trusted_uid = fs::metadata(directory.path())
         .expect("temporary directory should have metadata")
         .uid();
+    let file_settings = session_config_dir
+        .as_ref()
+        .map(|path| {
+            format!(
+                "create_mode = \"file_only\"\nsession_config_dir = \"{}\"\n",
+                path.display()
+            )
+        })
+        .unwrap_or_default();
     let config = format!(
-        "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\nmax_sessions = {max_sessions}\n\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"unused-secrets\"\n",
+        "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\nmax_sessions = {max_sessions}\n{file_settings}\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"unused-secrets\"\n",
         control_socket.display(),
         socket_dir.display(),
         certificate_path.display(),
@@ -194,6 +279,7 @@ fn start_daemon(max_sessions: usize) -> DaemonProcess {
         child,
         _directory: directory,
         control_socket,
+        session_config_dir,
     };
 
     let deadline = Instant::now() + Duration::from_secs(3);

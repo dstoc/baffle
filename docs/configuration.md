@@ -12,6 +12,7 @@ TOML values are parsed as written; Baffle does not expand environment
 variables. Use absolute file paths for service deployments.
 
 The checked-in examples are [`examples/daemon.toml`](../examples/daemon.toml),
+[`examples/daemon-file-only.toml`](../examples/daemon-file-only.toml),
 [`examples/session.toml`](../examples/session.toml),
 [`examples/session-credentials.toml`](../examples/session-credentials.toml),
 and [`examples/session-port-80-tls.toml`](../examples/session-port-80-tls.toml).
@@ -35,6 +36,9 @@ control_read_timeout_ms = 5000
 max_provisioning_requests = 8
 connection_timeout_ms = 5000
 io_timeout_ms = 30000
+# Optional. Required only when create_mode is "file_only".
+session_config_dir = "/etc/baffle/sessions"
+create_mode = "file_only"
 
 [ca]
 certificate = "/var/lib/baffle/ca.pem"
@@ -57,6 +61,8 @@ allowed = ["example-api"]
 | `daemon.max_provisioning_requests` | positive integer | `8` | Maximum concurrent session creation requests. Additional requests receive `busy`. Zero is invalid. |
 | `daemon.connection_timeout_ms` | positive integer | `5000` | Maximum time to connect from a data socket bridge to its internal Rama listener. Zero is invalid. |
 | `daemon.io_timeout_ms` | positive integer | `30000` | Maximum idle time for bridge reads, writes, and half-closes. A bridge closes when either direction makes no progress for this period. Zero is invalid. |
+| `daemon.create_mode` | `inline` or `file_only` | `inline` | Selects how clients create sessions. The default preserves inline TOML requests. `file_only` accepts only `create_from_file`. |
+| `daemon.session_config_dir` | absolute path | required in `file_only` mode | Directory containing administrator-managed session request TOML files. It is invalid in `inline` mode. The daemon refuses symlinks, unsafe ownership, and group- or other-writable directories and files. |
 | `ca.certificate` | path | required | One current PEM CA certificate with `CA:TRUE` and `keyCertSign`. |
 | `ca.private_key` | path | required | Matching PEM private key. It must be a regular, non-symlink file. Only the owner may access it, and the owner must have read permission. Use mode `0400` or `0600`. |
 | `secrets.directory` | path | required | Private directory containing secret files. It must be a real directory owned by the trusted UID, with mode `0700` or stricter. |
@@ -65,6 +71,32 @@ allowed = ["example-api"]
 The CA certificate and private key must match. The daemon checks certificate
 validity and signing use at startup. The secret store is checked when a
 session references a secret.
+
+In `file_only` mode, the configured directory and its parent path must
+already exist. The daemon opens each path component without following
+symlinks and keeps an open descriptor to the configured directory. The
+configured directory and nested directories must be owned by root or the
+trusted operator UID, and must not be writable by group or other users.
+Session files must be regular files owned by root or the trusted operator UID.
+They must not be writable by group or other users, and must have read
+permission. The daemon opens nested paths relative to directory descriptors,
+refuses symlinks in every component, and reads at most 262,144 bytes per file.
+
+Use a layout such as this:
+
+```text
+/etc/baffle/sessions/
+└── cladding/
+    └── github.toml
+```
+
+The file contains the same versioned `create` request used by inline mode.
+The checked-in [`examples/sessions/cladding/github.toml`](../examples/sessions/cladding/github.toml)
+is an example. Publish changes by writing a new file and renaming it into
+place. Each create reads and validates a fresh snapshot. A live session keeps
+the policy and resolved secrets that were validated at its creation time.
+`persistent` defaults to `false`; a file can set it to `true` to use the
+existing persistent-session behavior.
 
 The daemon creates missing control and socket directories with mode `0700`.
 Existing target directories must have the required owner and permissions.
