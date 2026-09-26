@@ -1,6 +1,13 @@
 import unittest
 
-from measure_backend_code import line_kinds, mask_rust, rust_structure, test_item_spans
+from measure_backend_code import (
+    ca_test_groups,
+    feature_item_spans,
+    line_kinds,
+    mask_rust,
+    rust_structure,
+    test_item_spans,
+)
 
 
 class RustLineCountTests(unittest.TestCase):
@@ -42,6 +49,46 @@ fn gated_test() {}
 
     def test_empty_lines_inside_raw_strings_are_literal_code(self):
         self.assertEqual(line_kinds('let body = r#"\n\n"#;\n'), (3, 0, 0))
+
+    def test_feature_ownership_includes_a_complete_function_body(self):
+        source = '''#[cfg(feature = "backend-hudsucker")]
+fn hudsucker() {
+    let value = (1, 2);
+    assert_eq!(value.0, 1);
+}
+fn shared() {}
+'''
+        self.assertEqual(feature_item_spans(source, "backend-hudsucker"), [(0, 5)])
+
+    def test_feature_ownership_stops_at_a_gated_struct_field(self):
+        source = '''struct Ca {
+    #[cfg(feature = "backend-rama")]
+    rama_key: Key,
+    shared: Vec<u8>,
+}
+'''
+        self.assertEqual(feature_item_spans(source, "backend-rama"), [(1, 3)])
+
+    def test_ca_test_split_counts_shared_validation_once(self):
+        source = '''#[cfg(all(test, feature = "backend-hudsucker"))]
+mod tests {
+    use crate::config::CaConfig;
+    fn ca_config() {}
+    #[test]
+    fn validates_ca_material_and_keeps_public_export_separate_from_the_key() {}
+    #[tokio::test]
+    async fn proxy_handles_one_shared_hudsucker_certificate_cache() {}
+}
+'''
+        groups = ca_test_groups(source, test_item_spans(source))
+        shared = groups["Shared CA validation unit tests (currently Hudsucker-gated)"]
+        hudsucker = groups["Hudsucker-specific CA runtime unit tests"]
+        self.assertGreater(shared[0], 0)
+        self.assertGreater(hudsucker[0], 0)
+        self.assertEqual(
+            tuple(shared[index] + hudsucker[index] for index in range(3)),
+            line_kinds(source),
+        )
 
 
 if __name__ == "__main__":

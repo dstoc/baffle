@@ -32,8 +32,8 @@ CORE_FILES = (
 SHARED_FILES = (
     "src/proxy_runtime.rs",
     "src/policy.rs",
-    "src/ca.rs",
 )
+CA_FILE = "src/ca.rs"
 HUDSUCKER_FILES = ("src/proxy_runtime/hudsucker.rs",)
 RAMA_FILES = ("src/proxy_runtime/rama.rs",)
 HUDSUCKER_EXTERNAL_TESTS = (
@@ -285,6 +285,125 @@ def rust_structure(text: str, spans: list[tuple[int, int, str]]) -> tuple[int, i
     return sum(bool(function.search(line)) for line in masked), sum(bool(module.search(line)) for line in masked)
 
 
+def item_span_end(masked: list[str], start: int) -> int:
+    """Return the exclusive line after a Rust item starting at `start`."""
+    depth = 0
+    opened = False
+    for index in range(start, len(masked)):
+        for char in masked[index]:
+            if char in "({[":
+                depth += 1
+                opened = True
+            elif char in ")}]" and opened:
+                depth -= 1
+                if depth == 0 and char == "}":
+                    return index + 1
+            elif char in ";," and depth == 0:
+                return index + 1
+    return len(masked)
+
+
+def feature_item_spans(text: str, feature: str) -> list[tuple[int, int]]:
+    """Find cfg(feature = ...) attributes and the Rust items they gate."""
+    original = text.splitlines()
+    masked = mask_rust(text)
+    cfg = re.compile(r"#\s*\[\s*cfg\(([^]]*)\)\s*\]")
+    spans = []
+    for index, line in enumerate(original):
+        match = cfg.search(line)
+        if not match or not re.search(rf'\bfeature\s*=\s*["\']{re.escape(feature)}["\']', match[1]):
+            continue
+        item_start = index + 1
+        while item_start < len(masked) and not masked[item_start].strip():
+            item_start += 1
+        spans.append((index, item_span_end(masked, item_start)))
+    return spans
+
+
+def selected_lines(text: str, selected: set[int]) -> str:
+    """Keep selected source lines and preserve line positions with blank lines."""
+    return "".join(
+        line if index in selected else "\n"
+        for index, line in enumerate(text.splitlines(keepends=True))
+    )
+
+
+def selected_line_kinds(text: str, selected: set[int]) -> tuple[int, int, int]:
+    masked = mask_rust(text)
+    original = text.splitlines()
+    code = comment = blank = 0
+    for index in selected:
+        if index >= len(masked):
+            continue
+        if not masked[index].strip():
+            if original[index].strip():
+                comment += 1
+            else:
+                blank += 1
+        else:
+            code += 1
+    return code, comment, blank
+
+
+def structure_for_selected(text: str, selected: set[int]) -> tuple[int, int]:
+    masked = mask_rust(selected_lines(text, selected))
+    function = re.compile(
+        r"^\s*(?:(?:pub(?:\([^)]*\))?|async|unsafe|const|extern\s+\"[^\"]+\")\s+)*fn\s+[A-Za-z_][A-Za-z_0-9]*\b"
+    )
+    module = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z_0-9]*\b")
+    return sum(bool(function.search(line)) for line in masked), sum(bool(module.search(line)) for line in masked)
+
+
+def named_function_spans(text: str, names: set[str]) -> list[tuple[int, int, str]]:
+    """Find named functions, including their directly preceding attributes."""
+    original = text.splitlines()
+    masked = mask_rust(text)
+    spans = []
+    for index, line in enumerate(masked):
+        match = re.search(r"\bfn\s+([A-Za-z_][A-Za-z_0-9]*)\b", line)
+        if not match or match[1] not in names:
+            continue
+        start = index
+        while start > 0 and original[start - 1].lstrip().startswith("#["):
+            start -= 1
+        spans.append((start, item_span_end(masked, index), match[1]))
+    return spans
+
+
+def ca_test_groups(text: str, spans: list[tuple[int, int, str]]) -> dict[str, tuple[int, int, int]]:
+    """Split common CA validation test code from Hudsucker CA runtime tests."""
+    if not spans:
+        return {}
+    common_names = {
+        "ca_config",
+        "write_ca",
+        "set_private_key_mode",
+        "validates_ca_material_and_keeps_public_export_separate_from_the_key",
+        "rejects_private_keys_readable_by_group_or_other_users",
+        "rejects_a_private_key_that_does_not_match_the_certificate",
+        "rejects_certificates_without_ca_signing_usage",
+    }
+    function_spans = named_function_spans(text, common_names)
+    common = {line for start, end, _ in function_spans for line in range(start, end)}
+    module_start, module_end, _ = spans[0]
+    lines = text.splitlines()
+    # Keep the harness boundary and imports with common tests. The full test
+    # module is Hudsucker-gated today because it also contains Hudsucker TLS tests.
+    common.update({module_start, module_start + 1, module_end - 1})
+    common.update(
+        index
+        for index, line in enumerate(lines)
+        if index in range(module_start, module_end)
+        and line.lstrip().startswith(("use std::", "use super::", "use crate::config::"))
+    )
+    all_test_lines = set(range(module_start, module_end))
+    hudsucker = all_test_lines - common
+    return {
+        "Shared CA validation unit tests (currently Hudsucker-gated)": selected_line_kinds(text, common),
+        "Hudsucker-specific CA runtime unit tests": selected_line_kinds(text, hudsucker),
+    }
+
+
 def vendor_paths(revision: str) -> list[str]:
     raw = subprocess.run(
         ["git", "ls-tree", "-r", "--name-only", revision, VENDOR_PREFIX],
@@ -324,6 +443,7 @@ def vendor_change_counts(old: dict[str, str], new: dict[str, str]) -> tuple[int,
 def count_project(revision: str) -> dict:
     totals = {name: [0, 0, 0, 0, 0] for name in CATEGORIES}
     tests = defaultdict(lambda: [0, 0, 0])
+    ca_source = {}
     for category, paths in CATEGORIES.items():
         for path in paths:
             if not in_revision(revision, path):
@@ -346,11 +466,45 @@ def count_project(revision: str) -> dict:
                 elif path in RAMA_FILES:
                     target = "Rama-specific unit tests"
                 elif "backend-hudsucker" in cfg:
-                    target = "Hudsucker-specific shared-policy/CA/control unit tests"
+                    target = "Hudsucker-specific shared-policy/control unit tests"
                 else:
                     target = "Backend-neutral unit tests"
                 for index, value in enumerate((test_code, test_comments, test_blanks)):
                     tests[target][index] += value
+
+    if in_revision(revision, CA_FILE):
+        text = source_text(revision, CA_FILE)
+        test_spans = test_item_spans(text)
+        test_lines = {line for start, end, _ in test_spans for line in range(start, end)}
+        hud_spans = feature_item_spans(text, "backend-hudsucker")
+        rama_spans = feature_item_spans(text, "backend-rama")
+        hud_lines = {line for start, end in hud_spans for line in range(start, end)} - test_lines
+        rama_lines = {line for start, end in rama_spans for line in range(start, end)} - test_lines
+        production_lines = set(range(len(text.splitlines()))) - test_lines
+        ca_owners = {
+            "Shared adapters and policy abstractions": production_lines - hud_lines - rama_lines,
+            "Hudsucker adapter/runtime": hud_lines,
+            "Rama adapter/runtime": rama_lines,
+        }
+        for owner, selected in ca_owners.items():
+            code, comments, blanks = selected_line_kinds(text, selected)
+            functions, modules = structure_for_selected(text, selected)
+            ca_source[owner] = {
+                "code": code,
+                "comments": comments,
+                "blank": blanks,
+                "functions": functions,
+                "modules": modules,
+            }
+            row = totals[owner]
+            row[0] += code
+            row[1] += comments
+            row[2] += blanks
+            row[3] += functions
+            row[4] += modules
+        for name, values in ca_test_groups(text, test_spans).items():
+            for index, value in enumerate(values):
+                tests[name][index] += value
 
     external_files = []
     for group, paths in (
@@ -385,6 +539,7 @@ def count_project(revision: str) -> dict:
             name: {"code": row[0], "comments": row[1], "blank": row[2]}
             for name, row in sorted(tests.items())
         },
+        "ca_source": ca_source,
         "test_files": external_files,
         "vendor_paths": vendor_paths(revision),
     }
@@ -424,16 +579,30 @@ def markdown(result: dict, vendor: dict | None) -> str:
             "Backend-neutral unit tests", "Backend-neutral external documentation tests"
         ),
         "Shared adapters and policy abstractions": tests_for(
-            "Hudsucker-specific shared-policy/CA/control unit tests"
+            "Hudsucker-specific shared-policy/control unit tests",
+            "Shared CA validation unit tests (currently Hudsucker-gated)",
         ),
         "Hudsucker adapter/runtime": tests_for(
-            "Hudsucker adapter unit tests", "Hudsucker-gated external integration tests"
+            "Hudsucker adapter unit tests",
+            "Hudsucker-specific CA runtime unit tests",
+            "Hudsucker-gated external integration tests",
         ),
         "Rama adapter/runtime": tests_for("Rama-specific unit tests"),
     }
     for category, values in result["source"].items():
         rows.append(
             f"| {category} | {values['code']} | {tests_by_category[category]} | {values['functions']} | {values['modules']} |"
+        )
+    if result.get("ca_source"):
+        rows.extend(
+            [
+                "",
+                "| `src/ca.rs` production ownership | Rust code LOC | Functions |",
+                "| --- | ---: | ---: |",
+                f"| Common CA loading, validation, and export | {result['ca_source']['Shared adapters and policy abstractions']['code']} | {result['ca_source']['Shared adapters and policy abstractions']['functions']} |",
+                f"| Hudsucker signing handle and cache | {result['ca_source']['Hudsucker adapter/runtime']['code']} | {result['ca_source']['Hudsucker adapter/runtime']['functions']} |",
+                f"| Rama BoringSSL material and accessor | {result['ca_source']['Rama adapter/runtime']['code']} | {result['ca_source']['Rama adapter/runtime']['functions']} |",
+            ]
         )
     rows.extend(
         [
