@@ -27,9 +27,10 @@ open or update a release pull request and to write `CHANGELOG.md`.
   Release Please updates the root `baffle-proxy` version, workspace member
   versions, and `Cargo.lock` together. The client crate stays in the same
   workspace release.
-- Merge the release pull request only after its required checks pass. The
-  merge creates the `vX.Y.Z` tag and GitHub Release. Release Please handles
-  versions and release notes; it does not build or upload the Linux archive.
+- Merge the release pull request only after the generated-candidate metadata
+  check below succeeds. The merge creates the `vX.Y.Z` tag and GitHub Release.
+  Release Please handles versions and release notes; it does not build or
+  upload the Linux archive.
 
 If a release is needed but merged commit messages do not imply the intended
 version, include a `Release-As: X.Y.Z` footer in the body of a commit that lands
@@ -73,8 +74,9 @@ skips its own changelog so the repository keeps one `CHANGELOG.md`. With
 Review each generated release pull request. Both `Cargo.toml` package
 versions, the `baffle-client` dependency version in the root manifest,
 `.release-please-manifest.json`, and both local package entries in `Cargo.lock`
-must match. The `Format, lint, and test` required check runs Cargo with
-`--locked` and verifies the Release Please package and plugin configuration.
+must match. The `Format, lint, and test` required check runs on regular pull
+requests and verifies the Release Please package and plugin configuration.
+The generated release pull request is checked separately as described below.
 
 Crate names are allocated on a first-come basis. As of 2026-09-26,
 `cargo search baffle-client` and `cargo search baffle-proxy` returned no
@@ -114,21 +116,26 @@ The action uses the repository's `GITHUB_TOKEN` with `contents: write`,
 `issues: write`, and `pull-requests: write`. No PAT or GitHub App secret is
 required.
 
-## CI for generated release pull requests
+## Validate generated release pull requests
 
 GitHub does not start ordinary workflow runs for most events caused by
-`GITHUB_TOKEN`. Release Please uses that token to create and update its pull
-request. GitHub may hold the resulting pull request checks for approval, and a
-tag created with that token does not trigger the tag-push packaging workflow.
-`workflow_dispatch` is an exception to this suppression.
+`GITHUB_TOKEN`. Release Please uses that token to create or update its pull
+request, so the pull request does not start the Rust CI workflow.
 
-If the generated release pull request has no CI run, dispatch the existing Rust
-CI workflow against its head branch. In GitHub Actions, open **Rust CI**, choose
-**Run workflow**, select the release pull request's head branch, then run it.
-The dispatch executes the same Rust, namespace integration, and required-check
-jobs as the pull request event. The stable required job remains
-`Format, lint, and test`. The CLI equivalent is
-`gh workflow run ci.yml --ref <release-pr-head-branch>`.
+When Release Please creates or updates a pull request, the `Release Please`
+workflow checks out the generated head branch and runs
+`cargo metadata --locked --format-version 1` against it. It then runs the
+Release Please regression tests on that branch. Cargo metadata checks that the
+candidate resolves without changing `Cargo.lock`. The regression tests check
+that both crate versions, the `baffle-client` dependency version, the manifest
+entries, and the lockfile entries stay in sync. Before merging, confirm that
+the `Release Please` workflow run completed both checks successfully for the
+latest candidate commit. These checks do not replace the Rust CI checks,
+including the `Format, lint, and test` job on regular pull requests.
+
+A tag created with `GITHUB_TOKEN` does not trigger the tag-push packaging
+workflow. Use the manual Linux release workflow described below after the
+Release Please pull request is merged.
 
 ## Manually package a release
 

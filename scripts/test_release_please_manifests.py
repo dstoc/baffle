@@ -11,6 +11,21 @@ DEPENDENCY_SECTIONS = {"dependencies", "dev-dependencies", "build-dependencies"}
 
 
 class ReleasePleaseManifestTests(unittest.TestCase):
+    def test_release_workflow_validates_generated_pull_request(self):
+        workflow = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
+
+        self.assertIn("id: release", workflow)
+        self.assertIn(
+            "if: ${{ steps.release.outputs.prs_created == 'true' }}", workflow
+        )
+        self.assertIn(
+            "ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}", workflow
+        )
+        self.assertIn("cargo metadata --locked --format-version 1", workflow)
+        self.assertIn(
+            "python3 -m unittest scripts.test_release_please_manifests", workflow
+        )
+
     def test_workspace_versions_and_local_client_dependency_stay_in_lockstep(self):
         root = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
         client = tomllib.loads((REPO_ROOT / "crates/baffle-client/Cargo.toml").read_text())

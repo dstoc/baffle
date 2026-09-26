@@ -15,7 +15,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Create or update the release pull request
+        id: release
         uses: googleapis/release-please-action@v4
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      - name: Check out generated release pull request
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+
+      - name: Install Rust
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        uses: dtolnay/rust-toolchain@1.96
+
+      - name: Validate generated Cargo workspace
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        run: cargo metadata --locked --format-version 1
+
+      - name: Check synchronized release versions
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        run: python3 -m unittest scripts.test_release_please_manifests
