@@ -14,10 +14,11 @@ workflows.
   `x86_64-unknown-linux-gnu`, packages the binary and documentation, and
   publishes a SHA-256 checksum with the GitHub release. Before packaging, it
   requires a non-empty top-level `LICENSE` file and Cargo license metadata.
-  It includes `LICENSE` in the release archive. This repository currently has
-  no root `LICENSE` file, and `baffle-proxy` has no Cargo license declaration,
-  so the release gate is not satisfied. The project owner must select and
-  approve the distribution terms before either value is added; see baffle/37.
+  It includes `LICENSE` in the release archive. The root `LICENSE` applies the
+  MIT License to Baffle's original code, and `baffle-proxy` declares the `MIT`
+  SPDX identifier. Third-party dependencies retain their own license terms.
+  The archive also includes the CDLA-Permissive-2.0 agreement for the Mozilla
+  root certificate data from `webpki-root-certs`.
 - The package targets Linux x86-64 with the GNU C library. Other Linux
   architectures and static linking are not included in this release job.
 
@@ -73,8 +74,5 @@ workflows.
 
 ## Release-readiness actions
 
-- **Distribution license:** The project owner must select the terms. Then add
-  the approved root `LICENSE` file and Cargo metadata. Tracked in baffle/37; no
-  license has been inferred from dependency terms.
 - **Dependency advisories:** Add an automated RustSec scan and define how
   maintainers handle its findings. Tracked in baffle/38.

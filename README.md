@@ -169,3 +169,10 @@ CA into system trust stores, configure client proxy settings, or create the
 network sandbox that isolates its internal TCP listeners. The deployment must
 provide that isolation. Baffle does not change Cladding; a consumer integrates
 through the public control protocol or `baffle-client` crate.
+
+## License
+
+Baffle's original code is licensed under the MIT License. See [LICENSE](LICENSE).
+Third-party dependencies remain under their respective licenses. The release
+archive includes the CDLA-Permissive-2.0 agreement for the bundled Mozilla root
+certificate data.
