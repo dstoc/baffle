@@ -14,6 +14,21 @@ mod backend;
 #[cfg(any(feature = "backend-hudsucker", feature = "backend-rama"))]
 pub use backend::ProxyRuntime;
 
+#[cfg(any(test, all(feature = "benchmark-tcp-nodelay", feature = "backend-rama")))]
+pub(crate) fn benchmark_tcp_nodelay_mode() -> String {
+    if cfg!(feature = "benchmark-tcp-nodelay") {
+        std::env::var("BAFFLE_BENCH_TCP_NODELAY").unwrap_or_else(|_| "off".to_owned())
+    } else {
+        "off".to_owned()
+    }
+}
+
+#[cfg(any(test, all(feature = "benchmark-tcp-nodelay", feature = "backend-rama")))]
+pub(crate) fn benchmark_tcp_nodelay_enabled(socket_leg: &str) -> bool {
+    let mode = benchmark_tcp_nodelay_mode();
+    mode == socket_leg || mode == "all"
+}
+
 #[cfg(all(feature = "backend-hudsucker", test))]
 pub(crate) use backend::PolicyHandler;
 

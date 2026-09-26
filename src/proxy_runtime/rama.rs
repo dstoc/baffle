@@ -13,6 +13,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "benchmark-tcp-nodelay")]
+use super::benchmark_tcp_nodelay_enabled;
 use super::{ProxyRuntimeError, ProxyRuntimeEvent, RuntimeId};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rama::{
@@ -291,6 +293,10 @@ async fn run_proxy(
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.map_err(ProxyRuntimeError::Bind)?;
+                #[cfg(feature = "benchmark-tcp-nodelay")]
+                if benchmark_tcp_nodelay_enabled("proxy-ingress") {
+                    stream.set_nodelay(true).map_err(ProxyRuntimeError::Bind)?;
+                }
                 let permit = match Arc::clone(&permits).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => continue,
@@ -416,6 +422,12 @@ async fn handle_client(
             return Ok(());
         }
     };
+    #[cfg(feature = "benchmark-tcp-nodelay")]
+    if benchmark_tcp_nodelay_enabled("proxy-egress") {
+        egress
+            .set_nodelay(true)
+            .map_err(|error| ProxyRuntimeError::Run(error.to_string()))?;
+    }
 
     let (certificate, private_key) = ca.for_rama_proxy();
     // Preserve the inspected ClientHello's ALPN and TLS parameters for the

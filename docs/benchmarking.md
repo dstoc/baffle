@@ -183,3 +183,93 @@ taskset -c 0 env CARGO_BUILD_JOBS=1 \
 ```
 
 These commands are opt-in. They do not run as part of the required checks.
+
+## Issue 32: HTTP/1.1 latency follow-up
+
+The earlier sequential release samples remain in
+[`hudsucker-runtime-release.csv`](../bench/results/hudsucker-runtime-release.csv)
+and [`rama-runtime-release.csv`](../bench/results/rama-runtime-release.csv).
+The follow-up writes separate raw request and trial rows to files named
+`issue32-*.csv` in the [results directory](../bench/results/).
+
+`benchmark_http1.py` runs five trials at 1, 4, and 16 concurrent clients. Each
+client warms one keep-alive TLS connection with 16 requests, then sends 80
+measured requests per trial. The request and response bodies match the earlier
+benchmark: 4 KiB and 32 KiB. The script pins the test, client, and local origin
+to CPU 0. It records the backend, origin, `TCP_NODELAY` mode, CPU, Rust version,
+request latencies, trial percentiles, wall time, and request rate.
+
+The `rust` origin is the in-process TLS server used by the earlier benchmark.
+The `python` origin is an independent Python standard-library HTTPS server. It
+uses the same pinned certificate, returns the same response body, and checks
+that the proxy injected the benchmark credential. Each Python-origin run
+verified all 10,080 warm-up and measured requests.
+
+The table reports median and p95 request latency across all five trials. The
+`all` mode enables `TCP_NODELAY` on the client, proxy accepted socket, proxy
+outbound socket, and origin accepted socket. `proxy-ingress` and `proxy-egress`
+enable it on only the named Rama socket leg.
+
+| Backend | Origin | `TCP_NODELAY` | 1 client, median / p95 | 4 clients, median / p95 | 16 clients, median / p95 |
+| --- | --- | --- | ---: | ---: | ---: |
+| Hudsucker | Rust | off | 0.148 / 0.171 ms | 0.149 / 0.678 ms | 1.363 / 2.196 ms |
+| Hudsucker | Rust | all | 0.108 / 0.127 ms | 0.114 / 0.420 ms | 1.365 / 1.765 ms |
+| Hudsucker | Python | off | 41.012 / 42.013 ms | 41.163 / 42.397 ms | 41.609 / 43.871 ms |
+| Hudsucker | Python | all | 0.226 / 0.301 ms | 0.732 / 1.276 ms | 2.711 / 5.394 ms |
+| Rama | Rust | off | 41.987 / 42.015 ms | 41.073 / 42.427 ms | 41.032 / 42.292 ms |
+| Rama | Rust | all | 0.142 / 0.213 ms | 0.129 / 0.472 ms | 1.707 / 2.268 ms |
+| Rama | Rust | proxy-ingress | 0.152 / 0.265 ms | 0.137 / 0.487 ms | 1.723 / 2.147 ms |
+| Rama | Rust | proxy-egress | 41.003 / 42.006 ms | 41.009 / 42.020 ms | 41.015 / 42.266 ms |
+| Rama | Python | off | 41.005 / 42.015 ms | 41.042 / 42.150 ms | 41.691 / 43.465 ms |
+| Rama | Python | all | 0.274 / 0.313 ms | 0.782 / 1.442 ms | 2.778 / 5.355 ms |
+
+The original Rama result reproduces against the Rust origin at all three client
+counts. Its per-request median stays near 41 ms while throughput increases from
+about 24 to 96 to 385 requests per second. Hudsucker stays below 1.4 ms against
+the same origin. The independent Python origin produces a roughly 41 ms result
+for both backends when `TCP_NODELAY` is off. This shows that the result depends
+on the origin and socket path as well as the backend.
+
+On the original Rama/Rust-origin workload, enabling `TCP_NODELAY` only on
+Rama’s accepted client socket is sufficient to reduce the median to 0.14–1.72
+ms across the tested client counts. Enabling it only on Rama’s outbound origin
+socket leaves the median near 41 ms. The Python-origin runs did not isolate
+each socket leg, so they do not identify which leg produces their delay. The
+16-client measurements also do not identify the component that limits this
+single-CPU workload.
+
+The socket profile uses `strace -T` on the HTTP/1.1 characterization. The CSVs
+record call counts, returned bytes, and syscall durations by TCP read/write
+call. Times below are summed syscall durations across the full characterization
+and its 10,080 warm-up and measured requests.
+
+| Backend | `recvfrom`: calls / bytes / time | `sendto`: calls / bytes / time | `writev`: calls / bytes / time | Longest call |
+| --- | --- | --- | --- | ---: |
+| Rama | 120,671 / 433.8 MB / 1.484 s | 27,487 / 233.6 MB / 0.588 s | 14,713 / 282.0 MB / 0.330 s | 3.222 ms; 9 calls over 1 ms |
+| Hudsucker | 11,965 / 55.8 MB / 0.189 s | 32 / 1.9 KB / 1.438 ms | 3,044 / 54.4 MB / 0.081 s | 0.109 ms; none over 1 ms |
+
+No single socket call accounts for the roughly 42 ms request latency. These
+traced durations include `strace` overhead and are diagnostic; use the
+untraced CSVs for latency.
+
+The runner was Linux `7.0.0-31-generic`, x86-64, an AMD Ryzen 9 5900X, and Rust
+`1.98.1`. The benchmark-only `benchmark-tcp-nodelay` feature enables these
+socket toggles for the experiment. It does not change the default runtime
+socket settings. This investigation does not make a backend migration
+decision.
+
+Reproduce the two-origin and all-socket comparison, the one-leg Rama runs, and
+the socket profile with:
+
+```sh
+python3 scripts/benchmark_http1.py \
+  --backends hudsucker,rama --origins rust,python \
+  --tcp-nodelay off,all --cpu 0
+
+python3 scripts/benchmark_http1.py \
+  --backends rama --origins rust \
+  --tcp-nodelay proxy-ingress,proxy-egress --cpu 0
+
+python3 scripts/profile_http1_sockets.py \
+  --backends hudsucker,rama --cpu 0
+```

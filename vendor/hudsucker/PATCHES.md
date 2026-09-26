@@ -28,6 +28,14 @@ fragmented ClientHello regression is tracked separately in baffle/24. Keep the
 local patch until an upstream release provides the same behavior and Baffle's
 tests verify it.
 
+## Benchmark-only TCP_NODELAY control
+
+The local `benchmark-tcp-nodelay` feature supports baffle/32 measurements. It
+can set `TCP_NODELAY` on accepted proxy sockets and on Hudsucker's outbound HTTP
+connector when `BAFFLE_BENCH_TCP_NODELAY` selects `proxy-ingress`,
+`proxy-egress`, or `all`. The feature is opt-in. Normal builds keep Hudsucker's
+upstream socket defaults.
+
 ## Removed: address-filtering connector and resolver
 
 The prior local TCP connector covered CONNECT and WebSocket connections. The

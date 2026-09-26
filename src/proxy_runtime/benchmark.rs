@@ -21,13 +21,16 @@ use rcgen::KeyPair;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    sync::mpsc,
+    sync::{Barrier, mpsc},
     task::JoinSet,
     time::sleep,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector, rustls};
 
-use super::{ProxyRuntime, ProxyRuntimeEvent, RuntimeId, set_test_upstream_trust_anchor};
+use super::{
+    ProxyRuntime, ProxyRuntimeEvent, RuntimeId, benchmark_tcp_nodelay_enabled,
+    benchmark_tcp_nodelay_mode, set_test_upstream_trust_anchor,
+};
 use crate::{
     ca::ManagedCa,
     config::{CaConfig, ControlRequest, SessionConfig},
@@ -40,6 +43,7 @@ type BenchError = Box<dyn std::error::Error + Send + Sync>;
 const TRIALS: usize = 5;
 const WARMUP_REQUESTS: usize = 16;
 const MEASURED_REQUESTS: usize = 80;
+const CHARACTERIZATION_CONCURRENCY: [usize; 3] = [1, 4, 16];
 const REQUEST_BODY_BYTES: usize = 4096;
 const RESPONSE_BODY_BYTES: usize = 32768;
 
@@ -533,6 +537,237 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "opt-in HTTP/1.1 latency characterization; see docs/benchmarking.md"]
+async fn runtime_http1_characterization() -> Result<(), BenchError> {
+    let output = BenchOutput::new()?;
+    let tcp_nodelay_mode = benchmark_tcp_nodelay_mode();
+    let client_tcp_nodelay = benchmark_tcp_nodelay_enabled("client");
+    let concurrency_levels = benchmark_concurrency_levels()?;
+    let external_origin = std::env::var("BAFFLE_BENCH_ORIGIN_ADDR").ok();
+    let origin_name = if external_origin.is_some() {
+        "python"
+    } else {
+        "rust"
+    };
+
+    output.row("meta", 0, 0, "backend", BACKEND)?;
+    output.row("meta", 0, 0, "profile", PROFILE)?;
+    output.row("meta", 0, 0, "rustc", &rustc_version())?;
+    output.row("meta", 0, 0, "origin", origin_name)?;
+    output.row(
+        "meta",
+        0,
+        0,
+        "cpu_affinity",
+        &std::env::var("BAFFLE_BENCH_CPU").unwrap_or_else(|_| "unrecorded".to_owned()),
+    )?;
+    output.row("meta", 0, 0, "tcp_nodelay", &tcp_nodelay_mode)?;
+    output.row(
+        "meta",
+        0,
+        0,
+        "concurrency_levels",
+        &concurrency_levels
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(";"),
+    )?;
+
+    let ca_dir = tempfile::tempdir()?;
+    let ca = managed_ca(ca_dir.path())?;
+    let (baffle_ca_der, origin_material) = tls_material(&ca)?;
+    set_test_upstream_trust_anchor(origin_material.root_der.clone());
+
+    let (origin_address, embedded_origin) = match external_origin {
+        Some(address) => {
+            let address = address.parse::<std::net::SocketAddr>()?;
+            if !address.ip().is_loopback() {
+                return Err("benchmark origin must use a loopback address".into());
+            }
+            (address, None)
+        }
+        None => {
+            let origin = start_http1_origin(origin_material.tls.clone()).await?;
+            (origin.address, Some(origin))
+        }
+    };
+    let authority = format!("localhost:{}", origin_address.port());
+    let runtime = start_runtime(
+        "bench-http1-characterization".to_owned(),
+        intercept_session(origin_address.port()),
+        ca,
+        ca_dir.path().join("http1-characterization.sock"),
+    )
+    .await?;
+
+    for concurrency in concurrency_levels.iter().copied() {
+        let metric = format!("http1_{origin_name}_nodelay_{tcp_nodelay_mode}_c{concurrency}");
+        let mut all_latencies = Vec::with_capacity(TRIALS * concurrency * MEASURED_REQUESTS);
+        for trial in 0..TRIALS {
+            let mut opening = JoinSet::new();
+            for _ in 0..concurrency {
+                let authority = authority.clone();
+                let root = baffle_ca_der.clone();
+                let proxy = runtime.local_addr();
+                opening.spawn(async move {
+                    http1_client_with_nodelay(proxy, &authority, &root, client_tcp_nodelay).await
+                });
+            }
+            let mut clients = Vec::with_capacity(concurrency);
+            while let Some(client) = opening.join_next().await {
+                clients.push(client??);
+            }
+
+            let mut warming = JoinSet::new();
+            for mut client in clients {
+                let authority = authority.clone();
+                warming.spawn(async move {
+                    for _ in 0..WARMUP_REQUESTS {
+                        send_http1_request(&mut client, &authority, REQUEST_BODY_BYTES).await?;
+                    }
+                    Ok::<_, BenchError>(client)
+                });
+            }
+            let mut warmed_clients = Vec::with_capacity(concurrency);
+            while let Some(client) = warming.join_next().await {
+                warmed_clients.push(client??);
+            }
+
+            let barrier = Arc::new(Barrier::new(concurrency));
+            let started = Instant::now();
+            let mut requests = JoinSet::new();
+            for (client_index, mut client) in warmed_clients.into_iter().enumerate() {
+                let barrier = Arc::clone(&barrier);
+                let authority = authority.clone();
+                requests.spawn(async move {
+                    barrier.wait().await;
+                    let mut latencies = Vec::with_capacity(MEASURED_REQUESTS);
+                    for _ in 0..MEASURED_REQUESTS {
+                        let request_started = Instant::now();
+                        send_http1_request(&mut client, &authority, REQUEST_BODY_BYTES).await?;
+                        latencies.push(request_started.elapsed().as_secs_f64() * 1_000.0);
+                    }
+                    Ok::<_, BenchError>((client_index, latencies))
+                });
+            }
+
+            let mut trial_latencies = Vec::with_capacity(concurrency * MEASURED_REQUESTS);
+            while let Some(result) = requests.join_next().await {
+                let (client_index, latencies) = result??;
+                for (request_index, latency) in latencies.into_iter().enumerate() {
+                    let index = client_index * MEASURED_REQUESTS + request_index;
+                    output.row(
+                        "latency",
+                        trial,
+                        index,
+                        &format!("{metric}_keepalive_ms"),
+                        &format!("{latency:.6}"),
+                    )?;
+                    trial_latencies.push(latency);
+                }
+            }
+            let elapsed = started.elapsed();
+            let median = percentile(&trial_latencies, 0.50);
+            let p95 = percentile(&trial_latencies, 0.95);
+            let request_count = concurrency * MEASURED_REQUESTS;
+            output.row(
+                "trial",
+                trial,
+                request_count,
+                &format!("{metric}_median_ms"),
+                &format!("{median:.6}"),
+            )?;
+            output.row(
+                "trial",
+                trial,
+                request_count,
+                &format!("{metric}_p95_ms"),
+                &format!("{p95:.6}"),
+            )?;
+            output.row(
+                "trial",
+                trial,
+                request_count,
+                &format!("{metric}_requests_per_second"),
+                &format!("{:.3}", request_count as f64 / elapsed.as_secs_f64()),
+            )?;
+            output.row(
+                "trial",
+                trial,
+                request_count,
+                &format!("{metric}_wall_ms"),
+                &format!("{:.3}", elapsed.as_secs_f64() * 1_000.0),
+            )?;
+            all_latencies.extend(trial_latencies);
+        }
+        output.summary(&format!("{metric}_keepalive_ms"), &all_latencies)?;
+    }
+
+    if let Some(origin) = embedded_origin {
+        let expected = TRIALS
+            * concurrency_levels.iter().sum::<usize>()
+            * (WARMUP_REQUESTS + MEASURED_REQUESTS);
+        let requests = origin.requests.load(Ordering::Relaxed);
+        let credentials = origin.valid_credentials.load(Ordering::Relaxed);
+        output.row(
+            "meta",
+            0,
+            expected,
+            "origin_requests_expected",
+            &expected.to_string(),
+        )?;
+        output.row(
+            "meta",
+            0,
+            requests,
+            "origin_requests_seen",
+            &requests.to_string(),
+        )?;
+        output.row(
+            "meta",
+            0,
+            credentials,
+            "credentialed_origin_requests_seen",
+            &credentials.to_string(),
+        )?;
+        if requests != expected || credentials != expected {
+            return Err(format!(
+                "expected {expected} embedded origin requests with injected credentials; saw {requests} requests and {credentials} credentials"
+            )
+            .into());
+        }
+        origin.task.abort();
+    }
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    Ok(())
+}
+
+fn benchmark_concurrency_levels() -> Result<Vec<usize>, BenchError> {
+    let Some(value) = std::env::var_os("BAFFLE_BENCH_CONCURRENCY") else {
+        return Ok(CHARACTERIZATION_CONCURRENCY.to_vec());
+    };
+    let levels = value
+        .to_string_lossy()
+        .split(',')
+        .map(str::parse::<usize>)
+        .collect::<Result<Vec<_>, _>>()?;
+    if levels.is_empty()
+        || levels
+            .iter()
+            .any(|level| !CHARACTERIZATION_CONCURRENCY.contains(level))
+        || levels
+            .iter()
+            .enumerate()
+            .any(|(index, level)| levels[..index].contains(level))
+    {
+        return Err("benchmark concurrency must use 1, 4, and/or 16".into());
+    }
+    Ok(levels)
+}
+
 fn managed_ca(directory: &Path) -> Result<Arc<ManagedCa>, BenchError> {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/fixtures");
     let certificate_path = directory.join("baffle-bench-ca.pem");
@@ -636,6 +871,12 @@ async fn start_http1_origin(config: Arc<rustls::ServerConfig>) -> Result<Origin,
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
+            if benchmark_tcp_nodelay_enabled("origin")
+                && let Err(error) = stream.set_nodelay(true)
+            {
+                tracing::debug!(%error, "benchmark origin could not set TCP_NODELAY");
+                return;
+            }
             let acceptor = acceptor.clone();
             let requests = Arc::clone(&request_counter);
             let credentials = Arc::clone(&credential_counter);
@@ -809,7 +1050,20 @@ async fn tls_over_connect(
     root_der: &[u8],
     alpn: &[&[u8]],
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, BenchError> {
+    tls_over_connect_with_nodelay(proxy, authority, root_der, alpn, false).await
+}
+
+async fn tls_over_connect_with_nodelay(
+    proxy: std::net::SocketAddr,
+    authority: &str,
+    root_der: &[u8],
+    alpn: &[&[u8]],
+    tcp_nodelay: bool,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, BenchError> {
     let mut stream = TcpStream::connect(proxy).await?;
+    if tcp_nodelay {
+        stream.set_nodelay(true)?;
+    }
     stream
         .write_all(format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes())
         .await?;
@@ -849,6 +1103,18 @@ async fn http1_client(
 ) -> Result<BufReader<tokio_rustls::client::TlsStream<TcpStream>>, BenchError> {
     Ok(BufReader::new(
         tls_over_connect(proxy, authority, root_der, &[b"http/1.1"]).await?,
+    ))
+}
+
+async fn http1_client_with_nodelay(
+    proxy: std::net::SocketAddr,
+    authority: &str,
+    root_der: &[u8],
+    tcp_nodelay: bool,
+) -> Result<BufReader<tokio_rustls::client::TlsStream<TcpStream>>, BenchError> {
+    Ok(BufReader::new(
+        tls_over_connect_with_nodelay(proxy, authority, root_der, &[b"http/1.1"], tcp_nodelay)
+            .await?,
     ))
 }
 

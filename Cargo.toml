@@ -13,6 +13,7 @@ resolver = "3"
 default = ["backend-hudsucker"]
 backend-hudsucker = ["dep:hudsucker", "dep:rcgen"]
 backend-rama = ["dep:rama", "dep:rcgen"]
+benchmark-tcp-nodelay = ["hudsucker?/benchmark-tcp-nodelay"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(baffle_integration_test)'] }

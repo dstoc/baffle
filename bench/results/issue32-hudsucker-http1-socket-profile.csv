@@ -1,0 +1,4 @@
+backend,cpu_affinity,scope,syscall,calls,bytes,total_ms,calls_over_1ms,max_ms
+hudsucker,0,http1_characterization,tcp_recvfrom,11965,55831712,189.425,0,0.109
+hudsucker,0,http1_characterization,tcp_sendto,32,1888,1.438,0,0.096
+hudsucker,0,http1_characterization,tcp_writev,3044,54370224,80.833,0,0.106

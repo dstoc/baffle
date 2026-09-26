@@ -5,11 +5,15 @@ use crate::{
     WebSocketHandler,
     certificate_authority::CertificateAuthority,
 };
+#[cfg(feature = "benchmark-tcp-nodelay")]
+use super::benchmark_tcp_nodelay_enabled;
 use hyper_util::{
     client::legacy::{Builder as ClientBuilder, connect::Connect},
     rt::TokioExecutor,
     server::conn::auto::Builder as ServerBuilder,
 };
+#[cfg(feature = "benchmark-tcp-nodelay")]
+use hyper_util::client::legacy::connect::HttpConnector;
 use std::{
     future::{Pending, pending},
     net::SocketAddr,
@@ -192,6 +196,17 @@ impl<CA> ProxyBuilder<WantsClient<CA>> {
         #[cfg(feature = "http2")]
         let https = https.enable_http2();
 
+        #[cfg(feature = "benchmark-tcp-nodelay")]
+        let https = if benchmark_tcp_nodelay_enabled("proxy-egress") {
+            let mut tcp = HttpConnector::new();
+            tcp.enforce_http(false);
+            tcp.set_nodelay(true);
+            https.wrap_connector(tcp)
+        } else {
+            https.build()
+        };
+
+        #[cfg(not(feature = "benchmark-tcp-nodelay"))]
         let https = https.build();
 
         ProxyBuilder(WantsHandlers {
