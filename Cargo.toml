@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.96"
 description = "A standalone daemon for policy-controlled HTTP and HTTPS proxies"
 license = "MIT"
+repository = "https://github.com/dstoc/baffle"
+readme = "README.md"
+documentation = "https://docs.rs/baffle-proxy"
+include = ["src/**", "tests/**", "examples/**", "docs/**", "README.md", "LICENSE", "!bench/**"]
 
 [workspace]
 members = ["crates/baffle-client"]
@@ -22,7 +26,7 @@ name = "baffle"
 path = "src/main.rs"
 
 [dependencies]
-baffle-client = { path = "crates/baffle-client" }
+baffle-client = { version = "0.1.0", path = "crates/baffle-client" }
 anyhow = "1.0.104"
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
