@@ -167,8 +167,8 @@ required DNS or address restrictions through deployment controls.
 Host matching is exact after lowercasing and removal of one trailing dot.
 `example.com` does not match `api.example.com`. Wildcards are not supported.
 Each request must use a permitted destination port. Rama resolves and dials the
-authorized hostname. Baffle does not limit the DNS answer set or the resulting
-destination IP address.
+authorized hostname. Baffle does not inspect or restrict DNS answers or the
+resulting destination IP address.
 
 Paths are case-sensitive and match the URL path without its query string.
 Queries are forwarded unchanged. A path entry must start with `/` and cannot

@@ -1,6 +1,7 @@
 # Release review record
 
-Reviewed on 2026-09-25 for the initial Linux release work.
+Reviewed on 2026-09-26 against the repository and current GitHub Actions
+workflows.
 
 ## Package and CI
 
@@ -13,8 +14,10 @@ Reviewed on 2026-09-25 for the initial Linux release work.
   `x86_64-unknown-linux-gnu`, packages the binary and documentation, and
   publishes a SHA-256 checksum with the GitHub release. Before packaging, it
   requires a non-empty top-level `LICENSE` file and Cargo license metadata.
-  It includes `LICENSE` in the release archive. The project owner must approve
-  the terms recorded in both places.
+  It includes `LICENSE` in the release archive. This repository currently has
+  no root `LICENSE` file, and `baffle-proxy` has no Cargo license declaration,
+  so the release gate is not satisfied. The project owner must select and
+  approve the distribution terms before either value is added; see baffle/37.
 - The package targets Linux x86-64 with the GNU C library. Other Linux
   architectures and static linking are not included in this release job.
 
@@ -31,9 +34,10 @@ Reviewed on 2026-09-25 for the initial Linux release work.
 - The daemon-facing runtime boundary is documented in `docs/architecture.md`.
   It keeps policy, CA ownership, secrets, the control protocol, and session
   lifecycle independent of Rama networking types.
-- The dependency versions used by CI and releases come from the committed lock
-  file. This repository does not currently run an automated RustSec advisory
-  scan; maintainers should add one before adopting a security patch cadence.
+- CI and release builds use the committed lock file with `--locked`. This keeps
+  dependency resolution reproducible; it does not check dependencies against
+  security advisories. No automated RustSec advisory scan is configured in the
+  repository or CI. baffle/38 tracks adding that release-readiness check.
 
 ## Logging and error handling
 
@@ -58,16 +62,19 @@ Reviewed on 2026-09-25 for the initial Linux release work.
 - Internal Rama listeners bind to loopback in Baffle's network namespace.
   Sandboxed clients must not share that namespace or otherwise reach those
   listeners.
-- The privileged Linux namespace fixture runs in a separate CI workflow on
-  pull requests and main-branch pushes. Operators must validate their actual
-  deployment topology as well.
+- `.github/workflows/ci.yml` runs the privileged Linux namespace fixture on
+  pull requests and main-branch pushes. The separate
+  `.github/workflows/network-namespace.yml` workflow runs the same fixture only
+  when manually dispatched. Operators must validate their actual deployment
+  topology as well.
 - Only the trusted operator may access the control socket. Expose only the
   assigned mode-`0600` session socket to each client. Never expose the CA
   private key or secret directory to a sandbox.
 
-## Maintainer follow-up
+## Release-readiness actions
 
-The repository has no top-level `LICENSE` file and the Cargo package metadata
-does not declare a license. The release workflow stops until the project owner
-selects and records the distribution terms in both places. No license has been
-inferred from a dependency.
+- **Distribution license:** The project owner must select the terms. Then add
+  the approved root `LICENSE` file and Cargo metadata. Tracked in baffle/37; no
+  license has been inferred from dependency terms.
+- **Dependency advisories:** Add an automated RustSec scan and define how
+  maintainers handle its findings. Tracked in baffle/38.

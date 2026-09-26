@@ -1,11 +1,14 @@
 # Baffle: Ephemeral policy-driven HTTPS proxy daemon
 
-> Historical v1 proposal. Its Hudsucker implementation plan and status predate
-> baffle/34 and do not describe the current runtime. See the current
+> **Historical v1 proposal.** This document preserves the original design and
+> Hudsucker implementation plan; it does not describe the current runtime.
+> baffle/25 removed destination-IP filtering and its `private_addresses` field.
+> Deployment DNS and network egress controls now own address restrictions.
+> baffle/34 made Rama the sole supported runtime. See the current
 > [architecture](architecture.md), [deployment security](security-deployment.md),
-> and [runtime migration note](runtime-migration.md).
+> [configuration](configuration.md), and [runtime migration note](runtime-migration.md).
 
-- **Status:** Approved; HTTPS-only request policy implemented, destination-IP follow-up pending
+- **Status:** Approved as the original v1 proposal; later decisions and implementation status are documented below and in the current guides.
 - **Project:** New standalone Rust repository, independent of Cladding
 - **Executable:** `baffle`
 - **Suggested Cargo package:** `baffle-proxy` (`baffle` already exists on crates.io)
@@ -230,26 +233,30 @@ Baffle's Unix-to-TCP bridge should use Tokio's `copy_bidirectional`, track activ
 
 At the time of this proposal's last update, the implementation pinned Hudsucker 0.25.0 to `vendor/hudsucker`. The local patch bound TLS and inner HTTP identity to the CONNECT authority, and closed unsupported payloads instead of falling back to an opaque tunnel when interception was required. baffle/25 removed `src/egress.rs`, Baffle's DNS-answer classification and address pinning, and the custom Hudsucker connector and resolver hooks. Hudsucker's default connectors then resolved and dialed the hostname after exact host and port authorization. baffle/34 later removed Hudsucker from the shipped implementation.
 
-The approved policy removes application-level DNS/IP filtering. baffle/25 removed the `private_addresses` field and client API, compiled address rules, destination classification and pinning, related connector/resolver hooks, and tests whose purpose was to enforce those address restrictions. Existing policies that include `private_addresses` now fail strict validation. Operators must remove that field and move intended internal-service restrictions to DNS and network egress policy before upgrading. Host and port authorization before outbound dialing remains.
+The decision implemented in baffle/25 removed application-level DNS/IP filtering. baffle/25 removed the `private_addresses` field and client API, compiled address rules, destination classification and pinning, related connector/resolver hooks, and tests whose purpose was to enforce those address restrictions. Existing policies that include `private_addresses` now fail strict validation. Operators must remove that field and move intended internal-service restrictions to DNS and network egress policy before upgrading. Host and port authorization before outbound dialing remains.
 
 Do not remove fail-closed interception for rules that require path checks or credential injection. Do not remove CONNECT-authority, TLS-SNI and inner-HTTP-authority checks. They keep path and injection rules tied to the authorized origin. Keep normal upstream certificate and hostname verification when Baffle terminates TLS. Explicit tunnel rules remain opaque; the client must verify upstream TLS identity. The tunnel's CONNECT host and port are authorized, but Baffle cannot verify the encrypted protocol or inspect its HTTP content.
 
 As reviewed on 2026-09-25, upstream Hudsucker 0.25.0 exposed boolean CONNECT and TLS decisions and supported custom HTTP and WebSocket connectors. Its API did not provide the explicit `Intercept`/`Tunnel`/`Reject` TLS result, CONNECT-bound TLS context, or inner HTTP authority binding used by the local patch. Its CONNECT handling could turn an unsupported payload into an opaque tunnel. baffle/25 removed the address-filtering connector and resolver but retained these security changes. baffle/34 removed the vendored crate after the Rama runtime and its security coverage were ready.
 
-The historical Hudsucker security patch is no longer shipped. Baffle no longer performs IP
-classification or filtering. An allowed name can resolve to a sensitive
-address even when the certificate is valid for that hostname. See the
-The historical patch inventory was removed with the vendored source tree.
+The historical Hudsucker security patch and vendored source are no longer
+shipped. Baffle does not classify DNS answers, filter destination IP addresses,
+or pin destination addresses. An allowed name can resolve to a sensitive
+address even when the certificate is valid for that hostname. See the current
+[security and deployment guide](security-deployment.md) and
+[architecture guide](architecture.md) for this limitation and its deployment
+mitigations. The archived [backend comparison](backend-comparison.md) records
+the patch inventory before the vendored source was removed.
 
 ## 9. Security model
 
-**Trusted:** the Baffle daemon, the trusted orchestrator holding its control socket, and the sites named by the hostname allowlist, which are assumed to behave legitimately. **Untrusted:** proxy clients, including clients that deliberately manipulate CONNECT or TLS to evade policy. Trusting an allowlisted site does not make its client trusted. Destination IP address containment is outside Baffle's target policy; DNS answers and network routes require deployment controls when the deployment needs that boundary. Session policy is trusted only after validation and must be intersected with immutable daemon-wide secret entitlements. The initial deployment assumes a trusted single owner; this does not isolate mutually malicious programs that already share that owner's unrestricted host account.
+**Trusted:** the Baffle daemon, the trusted orchestrator holding its control socket, and the sites named by the hostname allowlist, which are assumed to behave legitimately. **Untrusted:** proxy clients, including clients that deliberately manipulate CONNECT or TLS to evade policy. Trusting an allowlisted site does not make its client trusted. Baffle does not contain traffic by destination IP address; DNS answers and network routes require deployment controls when that boundary is needed. Session policy is trusted only after validation and must be intersected with immutable daemon-wide secret entitlements. The initial deployment assumes a trusted single owner; this does not isolate mutually malicious programs that already share that owner's unrestricted host account.
 
 Keep the control socket, private CA key and secret files outside sandbox mounts. Mount only the specific session's data socket and, for intercepted HTTPS, the public CA certificate. An agent must not read another session's socket or use its internal TCP port. Store runtime sockets in a private directory, use restrictive modes/ownership, and provision paths atomically. Never log plaintext secrets, `Authorization`, `Proxy-Authorization`, cookies, URL query strings or sensitive body content by default; emit session-scoped structured decision metadata (request method, normalized host, matched rule, allowed/denied status, timing), with optional carefully redacted diagnostic logging.
 
 Treat TLS failures for rules that require inspection as denied, not as a reason to open an opaque tunnel. The upstream TLS client that Baffle uses for intercepted HTTPS must validate server certificates and hostnames normally. Clients must opt in to trusting Baffle's dedicated CA; certificate-pinned applications might be incompatible. For an explicit opaque tunnel, the client must validate the upstream certificate and hostname because Baffle cannot do so. Only credentials with the narrowest practical upstream permissions should be injected. Baffle injects only after successful interception and path checks. It cannot inspect or constrain credentials supplied by a client inside a tunnel. URL allowlists do not substitute for server-side authorization: for example, GitHub `/graphql` cannot safely constrain repositories by path alone.
 
-The target policy does not prevent an allowed hostname from resolving to a sensitive address. A valid certificate for the allowlisted hostname does not block a connection to a private or metadata address. If this matters to a deployment, restrict resolver answers and network egress outside Baffle. Hostname and port allowlisting is sufficient only when the deployment trusts the names, their DNS answers, and the workload's permitted network reach.
+Baffle's hostname and port policy does not prevent an allowed hostname from resolving to a sensitive address. A valid certificate for the allowlisted hostname does not block a connection to a private or metadata address. If this matters to a deployment, restrict resolver answers and network egress outside Baffle. Hostname and port allowlisting is sufficient only when the deployment trusts the names, their DNS answers, and the workload's permitted network reach.
 
 ## 10. Observability and resource controls
 
@@ -283,7 +290,11 @@ baffle/
 
 This split is illustrative. Begin with one crate if separate crates would slow delivery; stabilize the protocol and policy model first. The binary name is `baffle`, independent of the Cargo package's eventual published name.
 
-## 13. Delivery plan and acceptance criteria
+## 13. Original delivery plan and acceptance criteria
+
+This section preserves the v1 proposal's original milestone sequence. It is a
+historical plan, not a list of current work. See the current guides linked above
+for implemented behavior and documented limitations.
 
 **Milestone A — Daemon and leases.** Implement the Unix control protocol, daemon TOML, multi-session registry, per-session Unix/TCP bridge, Hudsucker task lifecycle, unique socket names and graceful cleanup. A test creates two concurrent proxies with different configurations, verifies separate sockets, closes only one lease and observes only its proxy terminate; a persistent proxy survives its creator disconnect and is explicitly stopped.
 
@@ -291,12 +302,16 @@ This split is illustrative. Begin with one crate if separate crates would slow d
 
 **Milestone C — Secret injection.** Add daemon-only secret resolution and per-session entitlements, bearer/Basic/custom header formats, header overwrite/reject semantics and redacted logging. Test that a credential cannot reach an unauthorized host, path, port, scheme, redirected origin or WebSocket upgrade. Test GitHub's REST and Git smart-HTTP flows against representative fixtures without relying on live secrets.
 
-**Milestone D — Hardening and integration.** Enforce session limits, bounded shutdown and task-failure propagation. Retain the Hudsucker safeguards that prevent interception-required traffic from becoming an opaque tunnel and bind intercepted TLS/HTTP identities to CONNECT authority. Use deployment DNS and network egress controls for destination-address restrictions. Reassess the Hudsucker pin and remove only hooks made unnecessary by the approved target policy. Validate confinement of internal TCP listeners by deployment network namespaces. Integrate a small Baffle client into Cladding separately and exercise command completion, cancellation, crashes and concurrent commands.
+**Milestone D — Hardening and integration.** Enforce session limits, bounded shutdown and task-failure propagation. Retain the Hudsucker safeguards that prevent interception-required traffic from becoming an opaque tunnel and bind intercepted TLS/HTTP identities to CONNECT authority. Use deployment DNS and network egress controls for destination-address restrictions. Reassess the Hudsucker pin and remove only hooks made unnecessary by the approved policy decisions. Validate confinement of internal TCP listeners by deployment network namespaces. Integrate a small Baffle client into Cladding separately and exercise command completion, cancellation, crashes and concurrent commands.
 
 A v1 release is acceptable when all four milestones pass automated integration tests, all identified bypasses either have a tested fix or a documented deployment-enforced mitigation, and the daemon can create, operate and clean up multiple leased and persistent proxies without leaking sockets, tasks or credentials.
 
-## 14. Decisions and remaining implementation questions
+## 14. Historical decisions and implementation questions
 
 **Original v1 decisions:** standalone Rust project; Hudsucker backend at that time; Tokio; TOML daemon and session policies; Unix control and per-session data sockets; one multi-proxy daemon process; ephemeral lease by default; opt-in persistent sessions; HTTPS-only destination requests through CONNECT; exact hostname and port authorization; optional path constraints on intercepted TLS; secret-backed header injection; initial Unix-to-loopback bridge; Cladding as an independent consumer. baffle/34 later made Rama the sole runtime. Destination-IP restrictions belong to deployment egress controls. Interception-required rules fail closed; an explicit opaque tunnel leaves TLS verification to the client.
 
-**Implementation questions:** retain the smallest Hudsucker patch set that preserves fail-closed interception and identity binding until upstream adds equivalent safeguards; confirm the exact per-session secret entitlement mechanism; settle first-release Linux runtime installation conventions; select a published Cargo package name because `baffle` is already occupied; decide whether v1 needs wildcard host patterns and `list` beyond the minimal `create`/`stop` protocol. None of these should relax interception safeguards or control-socket separation.
+The questions below are preserved from the original proposal. They are not a
+current implementation backlog; consult the current configuration, security,
+and runtime guides for the decisions now in effect.
+
+**Original implementation questions:** retain the smallest Hudsucker patch set that preserves fail-closed interception and identity binding until upstream adds equivalent safeguards; confirm the exact per-session secret entitlement mechanism; settle first-release Linux runtime installation conventions; select a published Cargo package name because `baffle` is already occupied; decide whether v1 needs wildcard host patterns and `list` beyond the minimal `create`/`stop` protocol. None of these should relax interception safeguards or control-socket separation.
