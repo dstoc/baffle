@@ -52,8 +52,9 @@ arrange those separately.
 The executable is named `baffle`, the Cargo package is named `baffle-proxy`,
 and the client library is the separate workspace package `baffle-client`.
 
-The release workflow builds the Linux x86-64 GNU binary when a `v<version>`
-tag matches the version in `Cargo.toml`. Download and unpack the
+Release Please maintains version and changelog pull requests. The Linux x86-64
+GNU binary is packaged separately after an owner dispatches the release workflow
+for the matching `v<version>` tag. Download and unpack the
 `baffle-proxy-v<version>-x86_64-unknown-linux-gnu.tar.gz` asset from the
 [GitHub releases](https://github.com/dstoc/baffle/releases), then install the
 binary in a directory on `PATH`. The archive includes Baffle's root `LICENSE`
@@ -75,7 +76,9 @@ cargo install --path . --locked --bin baffle
 ```
 
 These native packages are needed only when compiling from source. A prebuilt
-release binary does not require them at runtime.
+release binary does not require them at runtime. See the
+[release process](docs/releasing.md) for versioning, review, CI, and packaging
+instructions.
 
 ## Quick start
 
