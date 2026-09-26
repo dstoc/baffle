@@ -129,8 +129,8 @@ cargo check --locked --examples --no-default-features --features backend-hudsuck
 ```
 
 The default feature is `backend-hudsucker`. The experimental Rama feature uses
-Rama 0.4.0 with `http-full` and `boring`; it requires Rust 1.96 or newer,
-`libclang`, CMake, and a C++ toolchain. See the
+Rama 0.4.0 with `http-full` and `boring`. See the Rama matrix entry in
+`.github/workflows/ci.yml` for its build prerequisites, and the
 [Rama prototype report](docs/rama-prototype.md) for the current security gap
 and build measurements.
 

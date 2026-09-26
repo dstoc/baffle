@@ -440,6 +440,14 @@ async fn handle_client(
             .map_err(|error| ProxyRuntimeError::Build(error.to_string()))?,
         None => egress_config,
     };
+    #[cfg(baffle_integration_test)]
+    let egress_config = match super::integration_test_upstream_root() {
+        Ok(Some(anchor)) => egress_config
+            .try_with_server_trust_anchors([rama::crypto::pki_types::CertificateDer::from(anchor)])
+            .map_err(|error| ProxyRuntimeError::Build(error.to_string()))?,
+        Ok(None) => egress_config,
+        Err(error) => return Err(ProxyRuntimeError::Build(error)),
+    };
     let connector_data = TlsConnectorData::try_from(&egress_config)
         .map_err(|error| ProxyRuntimeError::Build(error.to_string()))?;
     let relay = TlsMitmRelay::new_cached_in_memory(certificate, private_key)
