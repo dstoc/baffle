@@ -24,9 +24,41 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         config = json.loads((REPO_ROOT / "release-please-config.json").read_text())
         manifest = json.loads((REPO_ROOT / ".release-please-manifest.json").read_text())
         self.assertEqual(config["release-type"], "rust")
-        self.assertEqual(config["plugins"], [{"type": "cargo-workspace", "merge": True}])
-        self.assertEqual(config["packages"]["."]["package-name"], "baffle-proxy")
-        self.assertEqual(manifest["."], root["package"]["version"])
+        self.assertFalse(config["include-component-in-tag"])
+        self.assertEqual(
+            config["packages"],
+            {
+                ".": {
+                    "package-name": "baffle-proxy",
+                    "component": "baffle-proxy",
+                    "changelog-path": "CHANGELOG.md",
+                },
+                "crates/baffle-client": {
+                    "package-name": "baffle-client",
+                    "component": "baffle-client",
+                    "skip-changelog": True,
+                },
+            },
+        )
+        self.assertEqual(
+            config["plugins"],
+            [
+                {"type": "cargo-workspace", "merge": False},
+                {
+                    "type": "linked-versions",
+                    "groupName": "baffle",
+                    "components": ["baffle-proxy", "baffle-client"],
+                },
+            ],
+        )
+        self.assertEqual(
+            manifest,
+            {
+                ".": root["package"]["version"],
+                "crates/baffle-client": client["package"]["version"],
+            },
+        )
+        self.assertEqual(manifest["."], manifest["crates/baffle-client"])
         self.assertIn("crates/baffle-client", root["workspace"]["members"])
 
         lockfile = tomllib.loads((REPO_ROOT / "Cargo.lock").read_text())

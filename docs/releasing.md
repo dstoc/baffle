@@ -62,19 +62,19 @@ notice files for its bundled dependencies.
 `baffle-proxy` keeps a local path to `baffle-client` and also declares the
 matching registry version. The path supports workspace development. The
 version lets Cargo resolve the client crate after `baffle-proxy` is published.
-Keep the root package, workspace member, local dependency version, and lockfile
-in sync. The existing Release Please `cargo-workspace` plugin merges the Rust
-workspace updates into one release pull request. The current generated release
-pull request was checked: it updates both package versions and `Cargo.lock`
-together. The Release Please Cargo updater rewrites a local dependency's
-version only when its entry has both `path` and `version`; this manifest
-declares both. See the [Cargo workspace plugin
-guide](https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md#cargo-workspace)
-and [Cargo manifest
-updater](https://github.com/googleapis/release-please/blob/main/src/updaters/rust/cargo-toml.ts).
-Review each generated release pull request to confirm that the
-`baffle-client` dependency version also matches the new member version and that
-the tag remains `vX.Y.Z`.
+The Release Please manifest tracks both crates at their current versions. The
+`linked-versions` plugin keeps them at the same version. The
+`cargo-workspace` plugin runs with `merge: false`, then `linked-versions`
+combines the crate updates into one release pull request. The client package
+skips its own changelog so the repository keeps one `CHANGELOG.md`. With
+`include-component-in-tag: false`, the shared release keeps the existing
+`vX.Y.Z` tag convention. See the [Cargo workspace plugin](https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md#cargo-workspace), [linked versions plugin](https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md#linked-versions), and [Cargo manifest updater](https://github.com/googleapis/release-please/blob/main/src/updaters/rust/cargo-toml.ts) documentation.
+
+Review each generated release pull request. Both `Cargo.toml` package
+versions, the `baffle-client` dependency version in the root manifest,
+`.release-please-manifest.json`, and both local package entries in `Cargo.lock`
+must match. The `Format, lint, and test` required check runs Cargo with
+`--locked` and verifies the Release Please package and plugin configuration.
 
 Crate names are allocated on a first-come basis. As of 2026-09-26,
 `cargo search baffle-client` and `cargo search baffle-proxy` returned no
@@ -95,6 +95,7 @@ Before a release, run these package checks from the repository root:
 
 ```sh
 cargo metadata --locked
+python3 -m unittest scripts.test_release_please_manifests
 cargo package --list --package baffle-client
 cargo package --list --package baffle-proxy
 cargo publish --dry-run --locked --package baffle-client
