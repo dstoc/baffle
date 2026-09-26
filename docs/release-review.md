@@ -16,9 +16,16 @@ workflows.
   requires a non-empty top-level `LICENSE` file and Cargo license metadata.
   It includes `LICENSE` in the release archive. The root `LICENSE` applies the
   MIT License to Baffle's original code, and `baffle-proxy` declares the `MIT`
-  SPDX identifier. Third-party dependencies retain their own license terms.
-  The archive also includes the CDLA-Permissive-2.0 agreement for the Mozilla
-  root certificate data from `webpki-root-certs`.
+  SPDX identifier. `scripts/generate-third-party-notices.py` uses the locked
+  Linux release dependency graph to collect each package's license and notice
+  files. The archive includes that bundle at
+  `share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt`; the release workflow
+  checks that it contains representative dependency notices. The script uses
+  pinned upstream license files when a Cargo crate archive omits them. It
+  checks the crate's VCS revision and each bundled file's SHA-256 hash.
+  Third-party dependencies retain their own license terms. The archive also
+  includes the CDLA-Permissive-2.0 agreement for the Mozilla root certificate
+  data from `webpki-root-certs`.
 - The package targets Linux x86-64 with the GNU C library. Other Linux
   architectures and static linking are not included in this release job.
 

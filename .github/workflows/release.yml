@@ -57,6 +57,8 @@ jobs:
           install -m 0755 target/release/baffle "$stage/baffle"
           install -m 0644 LICENSE "$stage/LICENSE"
           install -m 0644 README.md "$stage/share/doc/baffle/README.md"
+          python3 scripts/generate-third-party-notices.py \
+            --output "$stage/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt"
           install -D -m 0644 licenses/webpki-root-certs-CDLA-Permissive-2.0.txt \
             "$stage/share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt"
           cp -R docs "$stage/share/doc/baffle/docs"
@@ -66,6 +68,12 @@ jobs:
           tar -tzf "dist/$asset" | grep -Fx './LICENSE'
           tar -tzf "dist/$asset" | grep -Fx \
             './share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt'
+          tar -tzf "dist/$asset" | grep -Fx \
+            './share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt'
+          tar -xOf "dist/$asset" './share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt' | \
+            grep -F 'Package: tokio '
+          tar -xOf "dist/$asset" './share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt' | \
+            grep -F 'Package: rama-core '
           (cd dist && sha256sum "$asset" > SHA256SUMS)
 
       - name: Publish GitHub release assets

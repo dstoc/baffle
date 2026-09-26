@@ -56,7 +56,9 @@ The release workflow builds the Linux x86-64 GNU binary when a `v<version>`
 tag matches the version in `Cargo.toml`. Download and unpack the
 `baffle-proxy-v<version>-x86_64-unknown-linux-gnu.tar.gz` asset from the
 [GitHub releases](https://github.com/dstoc/baffle/releases), then install the
-binary in a directory on `PATH`:
+binary in a directory on `PATH`. The archive includes Baffle's root `LICENSE`
+and the locked release dependencies' license and notice texts at
+`share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt`.
 
 ```sh
 tar -xzf baffle-proxy-v<version>-x86_64-unknown-linux-gnu.tar.gz
@@ -174,5 +176,6 @@ through the public control protocol or `baffle-client` crate.
 
 Baffle's original code is licensed under the MIT License. See [LICENSE](LICENSE).
 Third-party dependencies remain under their respective licenses. The release
-archive includes the CDLA-Permissive-2.0 agreement for the bundled Mozilla root
-certificate data.
+archive includes their license and notice texts at
+`share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt`. It also includes the
+CDLA-Permissive-2.0 agreement for the bundled Mozilla root certificate data.
