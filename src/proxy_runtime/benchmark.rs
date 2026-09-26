@@ -640,10 +640,10 @@ async fn start_http1_origin(config: Arc<rustls::ServerConfig>) -> Result<Origin,
             let requests = Arc::clone(&request_counter);
             let credentials = Arc::clone(&credential_counter);
             tokio::spawn(async move {
-                if let Err(error) = serve_http1(stream, acceptor, requests, credentials).await {
-                    if error.kind() != io::ErrorKind::UnexpectedEof {
-                        tracing::debug!(%error, "benchmark origin connection closed");
-                    }
+                if let Err(error) = serve_http1(stream, acceptor, requests, credentials).await
+                    && error.kind() != io::ErrorKind::UnexpectedEof
+                {
+                    tracing::debug!(%error, "benchmark origin connection closed");
                 }
             });
         }

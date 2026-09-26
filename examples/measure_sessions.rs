@@ -163,6 +163,7 @@ async fn sequential_trial(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn concurrent_trial(
     client: &Client,
     policy: &SessionConfig,
