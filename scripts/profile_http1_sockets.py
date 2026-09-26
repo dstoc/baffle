@@ -15,16 +15,14 @@ TRACE_SYSCALLS = "read,write,readv,writev,recvfrom,sendto,recvmsg,sendmsg"
 CPU = 0
 
 
-def test_binary(backend: str) -> Path:
-    features = f"backend-{backend},benchmark-tcp-nodelay"
+def test_binary() -> Path:
     command = [
         "cargo",
         "test",
         "--locked",
         "--release",
-        "--no-default-features",
         "--features",
-        features,
+        "benchmark-tcp-nodelay",
         "--lib",
         "runtime_http1_characterization",
         "--no-run",
@@ -48,9 +46,9 @@ def test_binary(backend: str) -> Path:
     raise RuntimeError("Cargo did not report the baffle-proxy test executable")
 
 
-def run(backend: str) -> None:
-    binary = test_binary(backend)
-    stem = f"issue32-{backend}-http1-socket"
+def run() -> None:
+    binary = test_binary()
+    stem = "issue32-rama-http1-socket"
     summary_output = ROOT / "bench" / "results" / f"{stem}-profile.csv"
     environment = os.environ.copy()
     environment["BAFFLE_BENCH_TCP_NODELAY"] = "off"
@@ -79,14 +77,12 @@ def run(backend: str) -> None:
             "--nocapture",
             "--test-threads=1",
         ]
-        print(f"Tracing {backend} HTTP/1.1 sockets under strace...", flush=True)
+        print("Tracing Rama HTTP/1.1 sockets under strace...", flush=True)
         subprocess.run(command, cwd=ROOT, env=environment, check=True)
         subprocess.run(
             [
                 "python3",
                 str(ROOT / "scripts" / "summarize_socket_trace.py"),
-                "--backend",
-                backend,
                 "--cpu",
                 str(CPU),
                 "--trace",
@@ -102,19 +98,14 @@ def run(backend: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backends", default="hudsucker,rama")
     parser.add_argument("--cpu", type=int, default=0)
     args = parser.parse_args()
-    backends = [value.strip() for value in args.backends.split(",") if value.strip()]
-    if not backends or any(value not in ("hudsucker", "rama") for value in backends):
-        parser.error("--backends must contain hudsucker and/or rama")
     if not hasattr(os, "sched_getaffinity") or args.cpu not in os.sched_getaffinity(0):
         parser.error(f"CPU {args.cpu} is not available to this process")
     os.sched_setaffinity(0, {args.cpu})
     global CPU
     CPU = args.cpu
-    for backend in backends:
-        run(backend)
+    run()
 
 
 if __name__ == "__main__":

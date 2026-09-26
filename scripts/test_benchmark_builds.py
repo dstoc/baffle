@@ -7,21 +7,8 @@ from unittest.mock import patch
 
 from benchmark_builds import (
     native_versions,
-    paired_backend_order,
     unique_dependency_entries,
 )
-
-
-class PairedBackendOrderTests(unittest.TestCase):
-    def test_alternates_backend_order_between_repeats(self):
-        backends = ["hudsucker", "rama"]
-        self.assertEqual(paired_backend_order(backends, 0), ["hudsucker", "rama"])
-        self.assertEqual(paired_backend_order(backends, 1), ["rama", "hudsucker"])
-        self.assertEqual(paired_backend_order(backends, 2), ["hudsucker", "rama"])
-        self.assertEqual(backends, ["hudsucker", "rama"])
-
-    def test_one_backend_keeps_its_order(self):
-        self.assertEqual(paired_backend_order(["rama"], 1), ["rama"])
 
 
 class DependencyEntryTests(unittest.TestCase):

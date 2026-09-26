@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run matched session provisioning benchmarks against both local backends."""
+"""Run a session provisioning benchmark against the supported Rama runtime."""
 
 from __future__ import annotations
 
@@ -15,9 +15,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BACKENDS = {"hudsucker": "backend-hudsucker", "rama": "backend-rama"}
-
-
 def run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True, check=False)
     if check and result.returncode:
@@ -84,7 +81,6 @@ def stop_daemon(process: subprocess.Popen[bytes]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backends", default="hudsucker,rama")
     parser.add_argument("--profile", choices=["debug", "release"], default="release")
     parser.add_argument("--repeats", type=int, default=7)
     parser.add_argument("--counts", default="1,2,4,8")
@@ -92,12 +88,9 @@ def main() -> None:
     parser.add_argument("--cpu", type=int, help="pin all build/runtime processes to this CPU")
     parser.add_argument("--output-dir", type=Path, default=Path("bench/results"))
     args = parser.parse_args()
-    backends = [value.strip() for value in args.backends.split(",")]
     counts = [int(value) for value in args.counts.split(",")]
     if args.repeats < 1 or not counts or min(counts) < 1:
         parser.error("repeats and all session counts must be positive")
-    if any(backend not in BACKENDS for backend in backends):
-        parser.error("--backends accepts hudsucker,rama")
     if args.cpu is not None:
         try:
             os.sched_setaffinity(0, {args.cpu})
@@ -137,50 +130,49 @@ def main() -> None:
         (args.output_dir / "sessions-environment.json").write_text(
             json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-        for backend in backends:
-            feature = BACKENDS[backend]
-            build = [
-                "cargo", "build", "--locked", "--no-default-features", "--features", feature,
-                "--bin", "baffle", "--example", "measure_sessions",
-            ]
-            if args.profile == "release":
-                build.append("--release")
-            run(build)
-            profile_dir = "release" if args.profile == "release" else "debug"
-            daemon_bin = ROOT / "target" / profile_dir / "baffle"
-            measure_bin = ROOT / "target" / profile_dir / "examples" / "measure_sessions"
-            config = daemon_config(root / backend, cert, key, os.getuid())
-            log_path = args.output_dir / f"{backend}-daemon.log"
-            raw_path = args.output_dir / f"{backend}-sessions.csv"
-            log = log_path.open("wb")
-            daemon = subprocess.Popen(
-                [str(daemon_bin), "daemon", "--config", str(config)],
-                cwd=ROOT,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
-            try:
-                control_socket = root / backend / "runtime" / "control.sock"
-                wait_for_socket(daemon, control_socket, log_path)
-                env = os.environ.copy()
-                env.update({
-                    "BAFFLE_CONTROL_SOCKET": str(control_socket),
-                    "BAFFLE_DAEMON_PID": str(daemon.pid),
-                    "BAFFLE_MEASURE_REPEATS": str(args.repeats),
-                    "BAFFLE_MEASURE_COUNTS": ",".join(map(str, counts)),
-                    "BAFFLE_MEASURE_SETTLE_MS": str(args.settle_ms),
-                    "BAFFLE_BENCH_RAW": str(raw_path),
-                })
-                result = subprocess.run([str(measure_bin)], cwd=ROOT, env=env, text=True, capture_output=True)
-                if result.returncode:
-                    raise RuntimeError(
-                        f"{backend} session benchmark failed:\n{result.stdout[-3000:]}\n{result.stderr[-3000:]}\n"
-                        f"daemon log:\n{log_path.read_text()[-3000:]}"
-                    )
-                print(f"{backend}: wrote {raw_path}", flush=True)
-            finally:
-                stop_daemon(daemon)
-                log.close()
+        backend = "rama"
+        build = [
+            "cargo", "build", "--locked",
+            "--bin", "baffle", "--example", "measure_sessions",
+        ]
+        if args.profile == "release":
+            build.append("--release")
+        run(build)
+        profile_dir = "release" if args.profile == "release" else "debug"
+        daemon_bin = ROOT / "target" / profile_dir / "baffle"
+        measure_bin = ROOT / "target" / profile_dir / "examples" / "measure_sessions"
+        config = daemon_config(root / "rama", cert, key, os.getuid())
+        log_path = args.output_dir / "rama-daemon.log"
+        raw_path = args.output_dir / "rama-sessions.csv"
+        log = log_path.open("wb")
+        daemon = subprocess.Popen(
+            [str(daemon_bin), "daemon", "--config", str(config)],
+            cwd=ROOT,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            control_socket = root / "rama" / "runtime" / "control.sock"
+            wait_for_socket(daemon, control_socket, log_path)
+            env = os.environ.copy()
+            env.update({
+                "BAFFLE_CONTROL_SOCKET": str(control_socket),
+                "BAFFLE_DAEMON_PID": str(daemon.pid),
+                "BAFFLE_MEASURE_REPEATS": str(args.repeats),
+                "BAFFLE_MEASURE_COUNTS": ",".join(map(str, counts)),
+                "BAFFLE_MEASURE_SETTLE_MS": str(args.settle_ms),
+                "BAFFLE_BENCH_RAW": str(raw_path),
+            })
+            result = subprocess.run([str(measure_bin)], cwd=ROOT, env=env, text=True, capture_output=True)
+            if result.returncode:
+                raise RuntimeError(
+                    f"rama session benchmark failed:\n{result.stdout[-3000:]}\n{result.stderr[-3000:]}\n"
+                    f"daemon log:\n{log_path.read_text()[-3000:]}"
+                )
+            print(f"rama: wrote {raw_path}", flush=True)
+        finally:
+            stop_daemon(daemon)
+            log.close()
 
 
 if __name__ == "__main__":

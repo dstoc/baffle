@@ -8,44 +8,18 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-#[cfg(feature = "backend-hudsucker")]
-use hudsucker::{
-    certificate_authority::{CertificateAuthority, RcgenAuthority},
-    hyper::http::uri::Authority,
-    rustls::{ServerConfig, crypto::aws_lc_rs},
-};
 use rcgen::{CertificateParams, Issuer, KeyPair};
 use x509_parser::{parse_x509_certificate, pem::parse_x509_pem};
 
 use crate::config::CaConfig;
 
-#[cfg(feature = "backend-rama")]
 use rama::tls::boring::core::{pkey::PKey, pkey::Private, x509::X509};
 
-#[cfg(feature = "backend-hudsucker")]
-const CERTIFICATE_CACHE_CAPACITY: u64 = 4096;
-
-/// A CA whose signing key is held by Hudsucker and never returned to a session.
+/// A validated CA owned by the daemon. Runtime use only clones native key handles.
 pub struct ManagedCa {
-    #[cfg(feature = "backend-hudsucker")]
-    authority: Arc<RcgenAuthority>,
-    #[cfg(feature = "backend-rama")]
-    rama_certificate: X509,
-    #[cfg(feature = "backend-rama")]
-    rama_private_key: PKey<Private>,
+    certificate: X509,
+    private_key: PKey<Private>,
     public_certificate_pem: Arc<[u8]>,
-}
-
-/// A cloneable Hudsucker CA handle with shared signing state and certificate cache.
-#[derive(Clone)]
-#[cfg(feature = "backend-hudsucker")]
-pub struct SharedCaAuthority(Arc<RcgenAuthority>);
-
-#[cfg(feature = "backend-hudsucker")]
-impl CertificateAuthority for SharedCaAuthority {
-    async fn gen_server_config(&self, authority: &Authority) -> Arc<ServerConfig> {
-        self.0.gen_server_config(authority).await
-    }
 }
 
 impl ManagedCa {
@@ -72,50 +46,29 @@ impl ManagedCa {
         let issuer = Issuer::from_ca_cert_pem(certificate_pem, key_pair)
             .context("CA certificate cannot be used as an issuer")?;
 
-        #[cfg(feature = "backend-rama")]
-        let (rama_certificate, rama_private_key) = (
-            X509::from_pem(&certificate.pem).context("could not load CA certificate for Rama")?,
+        let (runtime_certificate, runtime_private_key) = (
+            X509::from_pem(&certificate.pem)
+                .context("could not load CA certificate for proxy runtime")?,
             PKey::private_key_from_pem(&key_bytes)
-                .context("could not load CA private key for Rama")?,
+                .context("could not load CA private key for proxy runtime")?,
         );
 
-        // Hudsucker generates leaves lazily. Sign a probe now so unsupported or
-        // unusable signing keys fail daemon startup instead of the first request.
+        // Sign a probe now so unusable issuer keys fail at daemon startup.
         CertificateParams::default()
             .signed_by(issuer.key(), &issuer)
             .context("CA private key cannot sign certificates")?;
 
-        #[cfg(feature = "backend-hudsucker")]
-        let authority = RcgenAuthority::new(
-            issuer,
-            CERTIFICATE_CACHE_CAPACITY,
-            aws_lc_rs::default_provider(),
-        );
-
         Ok(Self {
-            #[cfg(feature = "backend-hudsucker")]
-            authority: Arc::new(authority),
-            #[cfg(feature = "backend-rama")]
-            rama_certificate,
-            #[cfg(feature = "backend-rama")]
-            rama_private_key,
+            certificate: runtime_certificate,
+            private_key: runtime_private_key,
             public_certificate_pem: certificate.pem.into(),
         })
     }
 
-    /// Return a Hudsucker CA handle for a proxy builder.
-    #[cfg(feature = "backend-hudsucker")]
-    pub fn for_proxy(&self) -> SharedCaAuthority {
-        SharedCaAuthority(Arc::clone(&self.authority))
-    }
-
-    /// Return Rama's BoringSSL issuer material to the backend runtime.
-    ///
-    /// The managed CA remains the daemon-owned source of truth. The Rama
-    /// backend only clones the in-memory key handle needed to sign leaves.
-    #[cfg(feature = "backend-rama")]
-    pub(crate) fn for_rama_proxy(&self) -> (X509, PKey<Private>) {
-        (self.rama_certificate.clone(), self.rama_private_key.clone())
+    /// Return cloned native handles for certificate generation in the runtime.
+    /// The daemon-owned CA remains the source of truth.
+    pub(crate) fn runtime_signing_material(&self) -> (X509, PKey<Private>) {
+        (self.certificate.clone(), self.private_key.clone())
     }
 
     /// Return the public certificate PEM. The private signing key is not exposed.
@@ -220,24 +173,13 @@ fn validate_private_key_permissions(_metadata: &fs::Metadata) -> Result<()> {
     bail!("CA private key permissions cannot be validated on this platform")
 }
 
-#[cfg(all(test, feature = "backend-hudsucker"))]
+#[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, sync::Arc};
+    use std::{fs, path::Path};
 
-    use hudsucker::{
-        Proxy,
-        certificate_authority::CertificateAuthority,
-        hyper::http::uri::Authority,
-        rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose},
-        rustls::{
-            ClientConfig, RootCertStore, ServerConfig,
-            crypto::aws_lc_rs,
-            pki_types::{CertificateDer, ServerName},
-        },
-    };
-    use tokio_rustls::{TlsAcceptor, TlsConnector};
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 
-    use super::{ManagedCa, export_public_certificate, parse_x509_pem};
+    use super::{ManagedCa, export_public_certificate};
     use crate::config::CaConfig;
 
     fn ca_config(directory: &Path) -> CaConfig {
@@ -247,7 +189,7 @@ mod tests {
         }
     }
 
-    fn write_ca(config: &CaConfig) -> KeyPair {
+    fn write_ca(config: &CaConfig) {
         let key_pair = KeyPair::generate().expect("CA key should be generated");
         let mut parameters = CertificateParams::default();
         parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -258,7 +200,6 @@ mod tests {
         fs::write(&config.certificate, certificate.pem()).expect("CA certificate should be saved");
         fs::write(&config.private_key, key_pair.serialize_pem()).expect("CA key should be saved");
         set_private_key_mode(&config.private_key, 0o600);
-        key_pair
     }
 
     #[cfg(unix)]
@@ -339,133 +280,5 @@ mod tests {
         set_private_key_mode(&config.private_key, 0o600);
 
         assert!(ManagedCa::load(&config).is_err());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn proxy_handles_use_one_shared_hudsucker_certificate_cache() {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let config = ca_config(directory.path());
-        write_ca(&config);
-        let ca = ManagedCa::load(&config).expect("valid CA should load");
-
-        let first = ca.for_proxy();
-        let second = ca.for_proxy();
-        let host = Authority::from_static("shared.example");
-        let first_config = first.gen_server_config(&host).await;
-        let second_config = second.gen_server_config(&host).await;
-
-        assert!(Arc::ptr_eq(&first_config, &second_config));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn separate_hudsucker_proxies_build_with_shared_ca_and_standard_rustls_connector() {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let config = ca_config(directory.path());
-        write_ca(&config);
-        let ca = ManagedCa::load(&config).expect("valid CA should load");
-
-        let first_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("first listener should bind");
-        let second_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("second listener should bind");
-        let first_proxy = Proxy::builder()
-            .with_listener(first_listener)
-            .with_ca(ca.for_proxy())
-            .with_rustls_connector(aws_lc_rs::default_provider())
-            .build()
-            .expect("first proxy should use the shared CA");
-        let second_proxy = Proxy::builder()
-            .with_listener(second_listener)
-            .with_ca(ca.for_proxy())
-            .with_rustls_connector(aws_lc_rs::default_provider())
-            .build()
-            .expect("second proxy should use the shared CA");
-
-        drop((first_proxy, second_proxy));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn concurrent_proxy_handles_support_trusted_clients_and_reject_untrusted_names() {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let config = ca_config(directory.path());
-        write_ca(&config);
-        let ca = ManagedCa::load(&config).expect("valid CA should load");
-
-        let first = ca.for_proxy();
-        let second = ca.for_proxy();
-        let first_host = Authority::from_static("first.example");
-        let second_host = Authority::from_static("second.example");
-        let (first_server, second_server) = tokio::join!(
-            first.gen_server_config(&first_host),
-            second.gen_server_config(&second_host),
-        );
-        let trusted_client = client_config(Some(ca.public_certificate_pem()));
-
-        let (first_handshake, second_handshake) = tokio::join!(
-            tls_handshake(
-                first_server.clone(),
-                trusted_client.clone(),
-                "first.example"
-            ),
-            tls_handshake(
-                second_server.clone(),
-                trusted_client.clone(),
-                "second.example"
-            ),
-        );
-        assert!(first_handshake.is_ok());
-        assert!(second_handshake.is_ok());
-
-        let untrusted_client = client_config(None);
-        assert!(
-            tls_handshake(first_server, untrusted_client, "first.example")
-                .await
-                .is_err()
-        );
-        assert!(
-            tls_handshake(second_server, trusted_client, "wrong.example")
-                .await
-                .is_err()
-        );
-    }
-
-    fn client_config(certificate_pem: Option<&[u8]>) -> Arc<ClientConfig> {
-        let mut roots = RootCertStore::empty();
-        if let Some(certificate_pem) = certificate_pem {
-            let (_, certificate) =
-                parse_x509_pem(certificate_pem).expect("CA public certificate should be valid PEM");
-            roots
-                .add(CertificateDer::from(certificate.contents))
-                .expect("CA public certificate should be a valid trust anchor");
-        }
-
-        Arc::new(
-            ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-                .with_safe_default_protocol_versions()
-                .expect("supported TLS protocol versions should be available")
-                .with_root_certificates(roots)
-                .with_no_client_auth(),
-        )
-    }
-
-    async fn tls_handshake(
-        server_config: Arc<ServerConfig>,
-        client_config: Arc<ClientConfig>,
-        server_name: &str,
-    ) -> std::io::Result<()> {
-        let server_name =
-            ServerName::try_from(server_name.to_owned()).expect("test server name should be valid");
-        let (server_stream, client_stream) = tokio::io::duplex(4096);
-        let server = TlsAcceptor::from(server_config).accept(server_stream);
-        let client = TlsConnector::from(client_config).connect(server_name, client_stream);
-        let (server, client) = tokio::join!(server, client);
-        server?;
-        client?;
-        Ok(())
     }
 }

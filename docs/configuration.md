@@ -55,7 +55,7 @@ allowed = ["example-api"]
 | `daemon.shutdown_grace_seconds` | integer | `5` | Grace period for each session during shutdown. Zero requests immediate forced shutdown. |
 | `daemon.control_read_timeout_ms` | positive integer | `5000` | Timeout for control request frame reads. Zero is invalid. |
 | `daemon.max_provisioning_requests` | positive integer | `8` | Maximum concurrent session creation requests. Additional requests receive `busy`. Zero is invalid. |
-| `daemon.connection_timeout_ms` | positive integer | `5000` | Maximum time to connect from a data socket bridge to its internal Hudsucker listener. Zero is invalid. |
+| `daemon.connection_timeout_ms` | positive integer | `5000` | Maximum time to connect from a data socket bridge to its internal Rama listener. Zero is invalid. |
 | `daemon.io_timeout_ms` | positive integer | `30000` | Maximum idle time for bridge reads, writes, and half-closes. A bridge closes when either direction makes no progress for this period. Zero is invalid. |
 | `ca.certificate` | path | required | One current PEM CA certificate with `CA:TRUE` and `keyCertSign`. |
 | `ca.private_key` | path | required | Matching PEM private key. It must be a regular, non-symlink file. Only the owner may access it, and the owner must have read permission. Use mode `0400` or `0600`. |
@@ -166,9 +166,9 @@ required DNS or address restrictions through deployment controls.
 
 Host matching is exact after lowercasing and removal of one trailing dot.
 `example.com` does not match `api.example.com`. Wildcards are not supported.
-Each request must use a permitted destination port. Hudsucker's default
-connectors resolve and dial the authorized hostname. Baffle does not limit the
-DNS answer set or the resulting destination IP address.
+Each request must use a permitted destination port. Rama resolves and dials the
+authorized hostname. Baffle does not limit the DNS answer set or the resulting
+destination IP address.
 
 Paths are case-sensitive and match the URL path without its query string.
 Queries are forwarded unchanged. A path entry must start with `/` and cannot

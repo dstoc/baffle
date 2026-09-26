@@ -1,102 +1,77 @@
 # Integration test suite
 
-The backend matrix runs the same control-protocol, client, daemon-lifecycle,
-Unix-socket, tunnel, HTTPS-policy, and secret-injection scenarios against
-`backend-hudsucker` and `backend-rama`. Each matrix entry disables default
-features and selects exactly one backend.
+Rama is the only supported runtime. The normal `cargo test` suite and the CI
+workflows build and test it without backend feature flags. The suite keeps
+real-daemon and direct-runtime coverage; adapter unit tests do not replace the
+daemon and Unix data-socket tests.
 
 `.github/workflows/ci.yml` runs formatting, Clippy, debug tests, release tests,
-examples, and the privileged namespace fixture. The `checks` job has separate
-Hudsucker and Rama results. The exact required check, `Format, lint, and test`,
-fails unless both the backend checks and both namespace matrix entries pass.
-The `Network namespace isolation` workflow is manually dispatchable and also
-has separate backend entries. Its matrix entry records Rama's Rust minimum and
-native build packages.
+examples, and the privileged network-namespace fixture. The required status
+check remains exactly `Format, lint, and test`. The manually dispatched
+`.github/workflows/network-namespace.yml` runs the same privileged fixture.
 
-| Area | Shared daemon coverage | Backend-specific coverage |
-| --- | --- | --- |
-| Client and control protocol | `tests/client.rs` and `tests/control_protocol.rs` run for both features. They cover the typed client, real framed requests, errors, leases, persistence, concurrent independent sessions, and response redaction. | Control and secret-store unit tests inspect internal state. They do not count as daemon parity. |
-| Daemon lifecycle | `tests/daemon_lifecycle.rs` runs for both features. It starts the executable and checks startup, graceful shutdown, and missing CA handling. | None. |
-| Proxy policy through the daemon | `tests/daemon_proxy.rs` starts the executable, creates sessions over the framed control socket, and uses each assigned Unix socket. It checks authorized and denied hosts and ports, tunnel-only traffic, plaintext HTTP rejection, session separation, lease revocation, capacity errors, daemon-held secret entitlements, HTTP/1.1 credential replacement, HTTP/2 stream policy, per-session secret isolation, path denial, redaction, and inode-safe socket cleanup. | None. The local upstream CA is available only in the integration-test build; normal daemon builds retain the default trust roots. |
-| Direct proxy runtime | Not counted as end-to-end daemon parity. | `tests/proxy_runtime.rs` runs shared live CONNECT, TLS, one-byte ClientHello fragmentation with a bounded close, tunnel-only, and upstream TLS denial fixtures under both features. Hudsucker-only runtime cases cover HTTP/1.1 reuse and HTTP/2 path and authority checks. Rama has live HTTP/2, path, credential, certificate, fragmentation, and resource-limit tests in `src/proxy_runtime/rama.rs`; these test the adapter without launching the daemon. |
-| Secret and policy internals | The real-daemon target verifies entitlement, injection, path denial, HTTP/2 stream enforcement, session secret isolation, and control-response redaction under both features. | `src/control.rs`, `src/secrets.rs`, and each backend runtime have unit tests for internal checks. Unit tests alone do not establish parity. |
-| Documentation examples | `tests/documentation.rs` parses the checked-in TOML examples. `cargo check --examples` compiles client examples under both backend selections. | None. |
+| Area | Required coverage |
+| --- | --- |
+| Client and control protocol | `tests/client.rs` and `tests/control_protocol.rs` cover typed client calls, framed requests, errors, leases, persistence, independent sessions, and response redaction. |
+| Daemon lifecycle | `tests/daemon_lifecycle.rs` starts the executable and checks startup, graceful shutdown, and missing CA handling. |
+| Policy through the daemon | `tests/daemon_proxy.rs` starts the real daemon, provisions sessions over the control socket, and sends traffic through assigned Unix sockets. It checks destination and port policy, tunnel-only traffic, plaintext denial, session separation, lease revocation, capacity, secret entitlements, HTTP/1.1 and HTTP/2 credential isolation, path denial, redaction, and inode-safe cleanup. |
+| Direct proxy runtime | `tests/proxy_runtime.rs` checks HTTPS-only admission, exact CONNECT host and port, CONNECT/SNI/HTTP authority binding, fragmented valid ClientHello handling, upstream TLS verification, required interception, explicit tunnel mode, HTTP/1.1 and HTTP/2 reused-connection policy, and resource limits. |
+| Shared policy and lifecycle | `src/policy.rs`, `src/control.rs`, `src/secrets.rs`, and `src/proxy_runtime/rama.rs` test canonical paths, session ownership, secret handling, socket cleanup, cancellation, fatal runtime reporting, accepted-socket `TCP_NODELAY`, and bounded shutdown. |
+| Documentation examples | `tests/documentation.rs` parses checked-in TOML examples. `cargo check --examples` compiles all Rust examples. |
 
-The `proxy_runtime` integration target runs under both backend features. Its
-shared CONNECT, TLS, and fragmentation fixtures exercise each live proxy. The
-Hudsucker-specific protocol cases are feature-gated, and Rama has backend
-runtime tests in `src/proxy_runtime/rama.rs`. The `client`, `daemon_lifecycle`,
-`control_protocol`, and `daemon_proxy` targets run for both backends. The three
-Rust examples also compile for both backends. The Rama runtime tests inspect
-the accepted client socket's `TCP_NODELAY` setting in production feature builds.
-Adapter unit tests do not replace the shared real-daemon target.
+The runtime admits only CONNECT. Required path or credential interception
+fails closed when ClientHello parsing or TLS setup fails. Tests exercise a
+fragmented valid ClientHello and verify that the proxy does not fall back to an
+opaque tunnel. Intercepted upstream TLS verifies the authorized hostname.
+Reused HTTP/1.1 and HTTP/2 connections recheck request authority, path, and
+credential rules per request or stream.
 
-The backends use different denial status codes for plaintext forward requests.
-Hudsucker returns 403. Rama rejects the non-CONNECT request with 400. Shared
-tests accept either denial status and also check that the request does not
-reach the upstream.
+## Run checks locally
 
-## Run the backend matrix locally
-
-Use the integration-test build flag to run the local TLS upstream scenario.
-It enables a temporary trust anchor only in this test build. The fixture passes
-the generated test CA to the child daemon. The production build has no such
+The integration build flag gives the child daemon a private local-origin CA for
+the real-daemon TLS fixture. Production builds do not include this trust-anchor
 hook.
 
 ```sh
-RUSTFLAGS='--cfg baffle_integration_test' cargo test --locked --no-default-features --features backend-hudsucker
-RUSTFLAGS='--cfg baffle_integration_test' cargo test --locked --no-default-features --features backend-rama
-cargo clippy --locked --all-targets --no-default-features --features backend-hudsucker -- -D warnings
-cargo clippy --locked --all-targets --no-default-features --features backend-rama -- -D warnings
-cargo check --locked --examples --no-default-features --features backend-hudsucker
-cargo check --locked --examples --no-default-features --features backend-rama
+sudo apt-get install build-essential cmake libclang-dev
+RUSTFLAGS='--cfg baffle_integration_test' cargo test --locked
 cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo check --locked --examples
+RUSTFLAGS='--cfg baffle_integration_test' cargo test --locked --release
 ```
 
-Without the `RUSTFLAGS` value, `tests/daemon_proxy.rs` still checks control
-protocol entitlement and redaction. It skips the local-origin TLS requests
-that need the test trust anchor. The ordinary developer commands in the
-README remain unchanged.
+Without the `RUSTFLAGS` value, the real-daemon tests still cover control
+protocol entitlement and redaction. They skip local-origin TLS requests that
+need the test trust anchor. The native packages are required to compile Rama
+from source. A prebuilt release binary does not need them at runtime.
 
 ## Privileged network namespace integration
 
-The `Network namespace integration` job in `.github/workflows/ci.yml` runs on
-GitHub-hosted Ubuntu VMs for both backend features. It builds with
-`--no-default-features --features backend-hudsucker` or
-`--no-default-features --features backend-rama`, then runs the privileged
-fixture as root. The separate `Network namespace isolation` workflow supports
-manual dispatch with the same two feature entries.
+The CI namespace job builds the default Rama daemon and runs
+`scripts/test-network-namespace-isolation.py` as root. The fixture creates
+daemon and client network namespaces joined by a veth pair. The client uses its
+assigned Unix data socket to reach an allowed HTTPS upstream. A route canary
+proves that the client can reach the daemon namespace. A second probe targets
+the daemon's actual internal TCP listener through the daemon veth address and
+requires `ECONNREFUSED`. The checker also verifies that Baffle's TCP listeners
+bind only to loopback.
 
-The fixture creates daemon and client network namespaces joined by a veth pair.
-The client uses its assigned Unix data socket to fetch an HTTPS response from
-an allowed upstream. A route canary proves that the client can reach the daemon
-namespace. A second probe targets the daemon's actual internal TCP listener
-through the daemon veth address and requires `ECONNREFUSED`. The checker also
-verifies that Baffle's TCP listeners bind only to loopback.
+The negative cases remain active. The checker rejects two processes in the same
+namespace and a listener bound to `0.0.0.0`. The fixture cleans up processes and
+namespaces after a failed assertion.
 
-The negative cases remain active. The checker must reject two processes in the
-same namespace and a listener bound to `0.0.0.0`. The fixture cleans up
-processes and namespaces after a failed assertion.
-
-Run this privileged test locally only when you want to test namespace
-creation. It is separate from `cargo test` and requires Linux root access with
-permission to create network namespaces and veth devices, Python 3, `iproute2`,
-`nsenter`, and OpenSSL. Build one backend, then run the fixture:
+Run this privileged test only when you want to test namespace creation. It is
+separate from `cargo test` and requires Linux root access with permission to
+create network namespaces and veth devices, Python 3, `iproute2`, `nsenter`, and
+OpenSSL.
 
 ```sh
-cargo build --locked --bin baffle --no-default-features --features backend-hudsucker
-sudo python3 scripts/test-network-namespace-isolation.py --binary target/debug/baffle
-
-cargo build --locked --bin baffle --no-default-features --features backend-rama
+sudo apt-get install build-essential cmake libclang-dev iproute2 openssl
+cargo build --locked --bin baffle
 sudo python3 scripts/test-network-namespace-isolation.py --binary target/debug/baffle
 ```
 
-See the Rama matrix entry in `.github/workflows/ci.yml` for its build
-prerequisites. The namespace job verifies the topology created by the fixture.
-A deployment with a different namespace, mount, route, or socket setup still
-needs its own isolation validation.
-
-The standalone Cladding example is [`examples/cladding_socat.rs`](../examples/cladding_socat.rs).
-It uses Cladding's existing `socat` bridge to expose the assigned Unix socket
-as a local TCP proxy. It does not depend on Cladding code. Use
-`cargo run --example cladding_socat -- github.com` to run it.
+The namespace job verifies the topology created by the fixture. A deployment
+with a different namespace, mount, route, or socket setup still needs its own
+isolation validation.

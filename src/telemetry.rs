@@ -48,23 +48,19 @@ impl Metrics {
         self.active_sessions.fetch_sub(1, Ordering::Relaxed) - 1
     }
 
-    #[cfg_attr(feature = "backend-rama", allow(dead_code))]
     pub(crate) fn connection_started(&self) {
         self.accepted_connections.fetch_add(1, Ordering::Relaxed);
         self.active_connections.fetch_add(1, Ordering::Relaxed);
     }
 
-    #[cfg_attr(feature = "backend-rama", allow(dead_code))]
     pub(crate) fn connection_stopped(&self) {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
-    #[cfg_attr(feature = "backend-rama", allow(dead_code))]
     pub(crate) fn denied_request(&self) -> u64 {
         self.denied_requests.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    #[cfg_attr(feature = "backend-rama", allow(dead_code))]
     pub(crate) fn upstream_failure(&self) -> u64 {
         self.upstream_failures.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -76,12 +72,10 @@ impl Metrics {
         self.interception_errors.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    #[cfg_attr(feature = "backend-rama", allow(dead_code))]
     pub(crate) fn forced_shutdown(&self) -> u64 {
         self.forced_shutdowns.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    #[cfg_attr(feature = "backend-rama", allow(dead_code))]
     pub(crate) fn bridge_failure(&self) -> u64 {
         self.bridge_failures.fetch_add(1, Ordering::Relaxed) + 1
     }

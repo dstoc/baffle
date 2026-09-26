@@ -1,7 +1,7 @@
-//! Opt-in live runtime benchmark shared by the two proxy backend builds.
+//! Opt-in live benchmark for the supported Rama runtime.
 //!
-//! Run with `cargo test --lib --no-default-features --features <backend>
-//! runtime_benchmark -- --ignored --nocapture --test-threads=1`. The test uses
+//! Run with `cargo test --release --lib runtime_benchmark -- --ignored
+//! --nocapture --test-threads=1`. The test uses
 //! local TLS origins and records request-level latency rows when
 //! `BAFFLE_BENCH_RAW` names an output file.
 
@@ -57,9 +57,6 @@ const PROFILE: &str = "debug";
 #[cfg(not(debug_assertions))]
 const PROFILE: &str = "release";
 
-#[cfg(feature = "backend-hudsucker")]
-const BACKEND: &str = "hudsucker";
-#[cfg(feature = "backend-rama")]
 const BACKEND: &str = "rama";
 
 #[derive(Clone)]
@@ -982,15 +979,9 @@ async fn start_http2_origin(config: Arc<rustls::ServerConfig>) -> Result<Origin,
             Some(b"h2".as_slice()),
             "origin should negotiate HTTP/2"
         );
-        #[cfg(feature = "backend-hudsucker")]
-        {
-            use hudsucker::hyper_util::rt::{TokioExecutor, TokioIo};
-            use hudsucker::{
-                Body,
-                hyper::{Response, StatusCode, body::Incoming, service::service_fn},
-            };
 
-            let service = service_fn(move |request: hudsucker::hyper::Request<Incoming>| {
+        let service = rama::service::service_fn(
+            move |request: rama::http::Request<rama::http::core::body::Incoming>| {
                 let requests = Arc::clone(&request_counter);
                 let credentials = Arc::clone(&credential_counter);
                 async move {
@@ -1004,48 +995,18 @@ async fn start_http2_origin(config: Arc<rustls::ServerConfig>) -> Result<Origin,
                         credentials.fetch_add(1, Ordering::Relaxed);
                     }
                     Ok::<_, std::convert::Infallible>(
-                        Response::builder()
-                            .status(StatusCode::OK)
-                            .body(Body::empty())
+                        rama::http::Response::builder()
+                            .status(rama::http::StatusCode::OK)
+                            .body(rama::http::Body::empty())
                             .expect("HTTP/2 origin response should build"),
                     )
                 }
-            });
-            hudsucker::hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-                .serve_connection(TokioIo::new(tls), service)
-                .await
-                .expect("HTTP/2 origin connection should complete");
-        }
-        #[cfg(feature = "backend-rama")]
-        {
-            let service = rama::service::service_fn(
-                move |request: rama::http::Request<rama::http::core::body::Incoming>| {
-                    let requests = Arc::clone(&request_counter);
-                    let credentials = Arc::clone(&credential_counter);
-                    async move {
-                        requests.fetch_add(1, Ordering::Relaxed);
-                        if request
-                            .headers()
-                            .get("x-bench-token")
-                            .and_then(|value| value.to_str().ok())
-                            == Some("fixed-benchmark-credential")
-                        {
-                            credentials.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Ok::<_, std::convert::Infallible>(
-                            rama::http::Response::builder()
-                                .status(rama::http::StatusCode::OK)
-                                .body(rama::http::Body::empty())
-                                .expect("HTTP/2 origin response should build"),
-                        )
-                    }
-                },
-            );
-            rama::http::core::server::conn::http2::Builder::new(rama::rt::Executor::default())
-                .serve_connection(rama::ServiceInput::new(tls), service)
-                .await
-                .expect("HTTP/2 origin connection should complete");
-        }
+            },
+        );
+        rama::http::core::server::conn::http2::Builder::new(rama::rt::Executor::default())
+            .serve_connection(rama::ServiceInput::new(tls), service)
+            .await
+            .expect("HTTP/2 origin connection should complete");
     });
     Ok(Origin {
         address,
@@ -1215,107 +1176,6 @@ async fn send_http1_request(
     Ok(())
 }
 
-#[cfg(feature = "backend-hudsucker")]
-async fn benchmark_http2(
-    output: &BenchOutput,
-    proxy: std::net::SocketAddr,
-    authority: &str,
-    baffle_ca_der: &[u8],
-) -> Result<Vec<f64>, BenchError> {
-    use hudsucker::{
-        Body,
-        hyper::{Request, Version, client::conn::http2},
-        hyper_util::rt::{TokioExecutor, TokioIo},
-    };
-
-    let tls = tls_over_connect(proxy, authority, baffle_ca_der, &[b"h2"]).await?;
-    let (mut sender, connection) =
-        http2::handshake(TokioExecutor::new(), TokioIo::new(tls)).await?;
-    let driver = tokio::spawn(connection);
-    let (cpu_before, rss_before) = (cpu_time_us()?, read_rss_kib()?);
-    let mut latencies = Vec::with_capacity(TRIALS * MEASURED_REQUESTS);
-    for _ in 0..WARMUP_REQUESTS {
-        let request = Request::builder()
-            .method("GET")
-            .version(Version::HTTP_2)
-            .uri(format!("https://{authority}/allowed"))
-            .header("host", authority)
-            .header("x-bench-token", "attacker-value")
-            .body(Body::empty())?;
-        sender.ready().await?;
-        let response = sender.send_request(request).await?;
-        if response.status() != hudsucker::hyper::StatusCode::OK {
-            return Err(format!("HTTP/2 warm-up returned {}", response.status()).into());
-        }
-    }
-    for trial in 0..TRIALS {
-        let started = Instant::now();
-        let trial_cpu_before = cpu_time_us()?;
-        for request_index in 0..MEASURED_REQUESTS {
-            let request = Request::builder()
-                .method("GET")
-                .version(Version::HTTP_2)
-                .uri(format!("https://{authority}/allowed"))
-                .header("host", authority)
-                .header("x-bench-token", "attacker-value")
-                .body(Body::empty())?;
-            sender.ready().await?;
-            let request_started = Instant::now();
-            let response = match sender.send_request(request).await {
-                Ok(response) => response,
-                Err(error) => {
-                    output.row("failure", trial, request_index, "http2", &error.to_string())?;
-                    driver.abort();
-                    return Err(error.into());
-                }
-            };
-            if response.status() != hudsucker::hyper::StatusCode::OK {
-                return Err(format!("HTTP/2 request returned {}", response.status()).into());
-            }
-            let elapsed = request_started.elapsed();
-            latencies.push(elapsed.as_secs_f64() * 1_000.0);
-            output.row(
-                "latency",
-                trial,
-                request_index,
-                "http2_keepalive_ms",
-                &format!("{:.6}", elapsed.as_secs_f64() * 1_000.0),
-            )?;
-        }
-        record_h2_trial(
-            output,
-            trial,
-            &latencies[trial * MEASURED_REQUESTS..],
-            started.elapsed(),
-        )?;
-        output.row(
-            "trial",
-            trial,
-            MEASURED_REQUESTS,
-            "http2_process_cpu_us",
-            &cpu_time_us()?.saturating_sub(trial_cpu_before).to_string(),
-        )?;
-    }
-    drop(sender);
-    driver.abort();
-    output.row(
-        "meta",
-        TRIALS,
-        MEASURED_REQUESTS * TRIALS,
-        "http2_process_cpu_us",
-        &cpu_time_us()?.saturating_sub(cpu_before).to_string(),
-    )?;
-    output.row(
-        "meta",
-        TRIALS,
-        MEASURED_REQUESTS * TRIALS,
-        "http2_process_rss_delta_kib",
-        &read_rss_kib()?.saturating_sub(rss_before).to_string(),
-    )?;
-    Ok(latencies)
-}
-
-#[cfg(feature = "backend-rama")]
 async fn benchmark_http2(
     output: &BenchOutput,
     proxy: std::net::SocketAddr,

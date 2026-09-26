@@ -76,7 +76,7 @@ body.
 
 Baffle is not a host firewall and does not create a sandbox or network
 namespace. A sandboxed process that can use another network route can bypass
-its proxy policy. Baffle's internal Hudsucker TCP listeners bind to
+its proxy policy. Baffle's internal Rama TCP listeners bind to
 `127.0.0.1` in the daemon's network namespace. Any process that shares that
 namespace can reach those listeners directly. Run Baffle in a network
 namespace inaccessible to sandboxed clients, or enforce an equivalent
@@ -234,11 +234,11 @@ credentials. Errors returned over the control protocol use safe messages and
 do not include request bodies or secret values. The secret value's debug
 representation is redacted.
 
-Hudsucker reports connection authorities and transport errors in its error
-events. Keep logs access-controlled and review custom `RUST_LOG` filters before
-using them. Do not enable request/header/body tracing in another component
-that handles these connections. The deployment must protect logs as
-operational metadata even though Baffle does not record credentials.
+Proxy runtime events report session lifecycle and transport error classes.
+Keep logs access-controlled and review custom `RUST_LOG` filters before using
+them. Do not enable request/header/body tracing in another component that
+handles these connections. The deployment must protect logs as operational
+metadata even though Baffle does not record credentials.
 
 Credential injection requires an intercepted HTTPS rule and a matching host,
 port, TLS identity, and path. Baffle does not inject credentials over
@@ -259,4 +259,5 @@ before any credential can be added.
 - Give upstream credentials the narrowest practical privileges.
 - Review deployment DNS and network egress rules for every workload that needs
   destination-address containment.
-- Recheck the Hudsucker patch and its tests before changing its pinned version.
+- Recheck required interception, authority binding, and credential-isolation
+  tests when updating Rama or the proxy runtime.

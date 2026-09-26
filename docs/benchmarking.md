@@ -1,10 +1,11 @@
-# Backend benchmark report
+# Runtime benchmark report
 
 ## Result
 
-This report compares the Hudsucker and Rama backend selections. Hudsucker
-remains the default. These measurements do not support a backend migration
-decision or a performance-parity claim.
+Historical Hudsucker measurements below were collected before baffle/34 made
+Rama the only supported runtime. They record past comparisons and do not
+describe a current build option. All commands and benchmark scripts now run
+Rama only.
 
 Issue 32 measured a 41.979 ms Rama median and a 0.108 ms Hudsucker median on a
 Rust-origin HTTP/1.1 keep-alive workload. Issue 33 repeats that workload with
@@ -35,7 +36,7 @@ sweep was pinned to CPU 0 with `CARGO_BUILD_JOBS=1`. The raw build record
 includes CPU affinity, Cargo's build-job limit, native tool versions, and the
 libclang library path.
 
-Both backend selections used the same fixture certificates. Their SHA-256
+The historical backend builds used the same fixture certificates. Their SHA-256
 fingerprints are in [the fixture README](../bench/fixtures/README.md). The
 benchmark starts a local TLS origin on loopback. It uses one intercepted
 session with an exact `localhost` host rule, an `/allowed` path rule, and a
@@ -111,12 +112,11 @@ benchmark also checked that each session socket disappeared after shutdown.
 
 ## Build and binary results
 
-`benchmark_builds.py` runs three clean/no-op incremental build pairs for each
-backend and profile. It alternates the backend order between repeats. The
-table shows the median and full range for each build time. The script also
-records release binary sizes and distinct package entries in each normal
-dependency graph. It removes Cargo's trailing `(*)` repeat-node marker before
-it deduplicates package entries.
+`benchmark_builds.py` runs clean and no-op incremental builds for the current
+Rama runtime in each profile. The table retains historical Hudsucker and Rama
+measurements collected before baffle/34. Current runs record the Rama binary
+size and dependency graph. The script removes Cargo's trailing `(*)`
+repeat-node marker before it deduplicates package entries.
 The raw JSONL file retains the environment and every sample. See [the benchmark
 results directory](../bench/results/).
 
@@ -136,12 +136,8 @@ times use one CPU and one Cargo job; they describe this pinned runner setup and
 should not be read as multi-core developer workstation times.
 
 Rama 0.4.0 requires Rust 1.96 or newer. Its BoringSSL build needs CMake, a
-C++ toolchain, and the libclang library for the DNS dependency. This host had
-CMake 3.31.6, Debian C++ 14.2.0, and libclang-dev 19 at
-`/usr/lib/x86_64-linux-gnu/libclang-19.so.19`. The `clang` command-line driver
-was unavailable. The Hudsucker selection does not compile Rama or BoringSSL.
-The existing [Rama prototype report](rama-prototype.md) records those
-toolchain requirements.
+C++ toolchain, and the libclang library for the DNS dependency. The source-build
+requirements are documented in the [runtime migration note](runtime-migration.md).
 
 ## Resilience coverage and limits
 
@@ -158,31 +154,23 @@ and HTTP/2. The final raw files contain no failed workload samples.
 
 ## Reproduction
 
-Run the matched release runtime workload and write raw per-request rows:
+Run the release Rama runtime workload and write raw per-request rows:
 
 ```sh
-taskset -c 0 env BAFFLE_BENCH_RAW=bench/results/hudsucker-runtime-release.csv \
-  cargo test --locked --release --lib --no-default-features \
-  --features backend-hudsucker runtime_benchmark -- \
-  --ignored --nocapture --test-threads=1
-
 taskset -c 0 env BAFFLE_BENCH_RAW=bench/results/rama-runtime-release.csv \
-  cargo test --locked --release --lib --no-default-features \
-  --features backend-rama runtime_benchmark -- \
+  cargo test --locked --release --lib runtime_benchmark -- \
   --ignored --nocapture --test-threads=1
 ```
 
-Run the real daemon/control-path session workload. It uses the same pinned CA
-fixture for both builds:
+Run the real daemon/control-path session workload:
 
 ```sh
 python3 scripts/benchmark_sessions.py --profile release --repeats 5 \
   --counts 1,2,4,8 --cpu 0
 ```
 
-Run three paired clean/no-op build samples per backend and profile, with
-backend order alternated between repeats. The environment row records CPU 0
-affinity and one Cargo build job:
+Run three clean/no-op build samples per profile. The environment row records
+CPU affinity and Cargo build jobs:
 
 ```sh
 taskset -c 0 env CARGO_BUILD_JOBS=1 \
@@ -271,15 +259,14 @@ the socket profile with:
 
 ```sh
 python3 scripts/benchmark_http1.py \
-  --backends hudsucker,rama --origins rust,python \
+  --origins rust,python \
   --tcp-nodelay off,all --result-prefix issue32 --cpu 0
 
 python3 scripts/benchmark_http1.py \
-  --backends rama --origins rust \
+  --origins rust \
   --tcp-nodelay proxy-ingress,proxy-egress --result-prefix issue32 --cpu 0
 
-python3 scripts/profile_http1_sockets.py \
-  --backends hudsucker,rama --cpu 0
+python3 scripts/profile_http1_sockets.py --cpu 0
 ```
 
 ## Issue 33: production Rama ingress behavior
@@ -291,9 +278,8 @@ explicit `off` control for repeatable comparisons; compiling that feature does
 not turn the production ingress setting off by default.
 
 The `production` benchmark mode builds without the diagnostic feature. It
-measures Rama with the production ingress setting and Hudsucker with its
-unchanged default. The `off` mode enables the diagnostic feature and explicitly
-disables the Rama ingress setting. The current
+measures Rama with the production ingress setting. The `off` mode enables the
+diagnostic feature and explicitly disables the Rama ingress setting. The current
 `runtime_http1_characterization` test uses the same TLS proxy policy,
 credential injection, CONNECT authority, keep-alive pattern, and payload sizes
 across these modes.
@@ -312,12 +298,12 @@ Run matched production-mode HTTP/1.1 measurements against the Rust TLS origin:
 
 ```sh
 python3 scripts/benchmark_http1.py \
-  --backends hudsucker,rama --origins rust --tcp-nodelay production \
+  --origins rust --tcp-nodelay production \
   --payloads 4096:32768 --concurrency-levels 1,4,16 \
   --result-prefix issue33-production --cpu 0
 
 python3 scripts/benchmark_http1.py \
-  --backends hudsucker,rama --origins rust --tcp-nodelay production \
+  --origins rust --tcp-nodelay production \
   --payloads 1048576:1048576 --concurrency-levels 1 \
   --result-prefix issue33-bulk-production --cpu 0
 ```
@@ -326,12 +312,12 @@ Run Rama's reproducible `TCP_NODELAY`-off control with the same workloads:
 
 ```sh
 python3 scripts/benchmark_http1.py \
-  --backends rama --origins rust --tcp-nodelay off \
+  --origins rust --tcp-nodelay off \
   --payloads 4096:32768 --concurrency-levels 1,4,16 \
   --result-prefix issue33-control --cpu 0
 
 python3 scripts/benchmark_http1.py \
-  --backends rama --origins rust --tcp-nodelay off \
+  --origins rust --tcp-nodelay off \
   --payloads 1048576:1048576 --concurrency-levels 1 \
   --result-prefix issue33-bulk-control --cpu 0
 ```
@@ -342,14 +328,8 @@ requests and responses are empty and reuse one TLS connection. HTTP/2 results
 therefore describe request-path latency and rate, not bulk transfer speed.
 
 ```sh
-taskset -c 0 env BAFFLE_BENCH_RAW=bench/results/issue33-hudsucker-runtime.csv \
-  cargo test --locked --release --lib --no-default-features \
-  --features backend-hudsucker runtime_benchmark -- \
-  --ignored --nocapture --test-threads=1
-
 taskset -c 0 env BAFFLE_BENCH_RAW=bench/results/issue33-rama-runtime.csv \
-  cargo test --locked --release --lib --no-default-features \
-  --features backend-rama runtime_benchmark -- \
+  cargo test --locked --release --lib runtime_benchmark -- \
   --ignored --nocapture --test-threads=1
 ```
 

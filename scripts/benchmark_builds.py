@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect matched Cargo clean/no-op build and binary/dependency measurements."""
+"""Collect Cargo build and dependency measurements for the Rama runtime."""
 
 from __future__ import annotations
 
@@ -13,17 +13,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BACKENDS = {
-    "hudsucker": "backend-hudsucker",
-    "rama": "backend-rama",
-}
-
-
-def paired_backend_order(backends: list[str], repeat: int) -> list[str]:
-    """Alternate paired build order to reduce systematic order bias."""
-    return backends if repeat % 2 == 0 else list(reversed(backends))
-
-
 def unique_dependency_entries(lines: list[str]) -> list[str]:
     """Deduplicate Cargo tree entries after removing its repeat-node marker."""
     return sorted({
@@ -46,8 +35,8 @@ def command(args: list[str], *, check: bool = True) -> subprocess.CompletedProce
     return result
 
 
-def timed_build(feature: str, release: bool) -> float:
-    args = ["cargo", "build", "--locked", "--no-default-features", "--features", feature]
+def timed_build(release: bool) -> float:
+    args = ["cargo", "build", "--locked"]
     if release:
         args.append("--release")
     started = time.perf_counter()
@@ -95,15 +84,13 @@ def cpu_name() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backends", default="hudsucker,rama")
     parser.add_argument("--profiles", default="debug,release")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--output", type=Path, default=Path("bench/results/builds.jsonl"))
     args = parser.parse_args()
-    backends = [value.strip() for value in args.backends.split(",")]
     profiles = [value.strip() for value in args.profiles.split(",")]
-    if args.repeats < 1 or any(value not in BACKENDS for value in backends):
-        parser.error("use positive --repeats and --backends hudsucker,rama")
+    if args.repeats < 1:
+        parser.error("--repeats must be positive")
     if any(value not in {"debug", "release"} for value in profiles):
         parser.error("--profiles accepts debug and release")
 
@@ -125,41 +112,36 @@ def main() -> None:
             "native_tools": native_versions(),
         }
         output.write(json.dumps(environment, sort_keys=True) + "\n")
-        for backend in backends:
-            feature = BACKENDS[backend]
-            graph = command([
-                "cargo", "tree", "--locked", "--no-default-features", "--features", feature,
-                "-e", "normal", "--prefix", "none",
-            ]).stdout.splitlines()
-            dependencies = unique_dependency_entries(graph)
-            output.write(json.dumps({
-                "kind": "dependency_graph",
-                "backend": backend,
-                "entries": len(dependencies),
-                "values": dependencies,
-            }, sort_keys=True) + "\n")
+        graph = command([
+            "cargo", "tree", "--locked", "-e", "normal", "--prefix", "none",
+        ]).stdout.splitlines()
+        dependencies = unique_dependency_entries(graph)
+        output.write(json.dumps({
+            "kind": "dependency_graph",
+            "runtime": "rama",
+            "entries": len(dependencies),
+            "values": dependencies,
+        }, sort_keys=True) + "\n")
         for profile in profiles:
             release = profile == "release"
             for repeat in range(args.repeats):
-                for backend in paired_backend_order(backends, repeat):
-                    feature = BACKENDS[backend]
-                    command(["cargo", "clean"])
-                    clean_seconds = timed_build(feature, release)
-                    incremental_seconds = timed_build(feature, release)
-                    row = {
-                        "kind": "build_sample",
-                        "backend": backend,
-                        "profile": profile,
-                        "repeat": repeat,
-                        "clean_seconds": round(clean_seconds, 6),
-                        "incremental_noop_seconds": round(incremental_seconds, 6),
-                    }
-                    if release:
-                        binary = ROOT / "target" / "release" / "baffle"
-                        row["release_binary_bytes"] = binary.stat().st_size
-                    output.write(json.dumps(row, sort_keys=True) + "\n")
-                    output.flush()
-                    print(json.dumps(row, sort_keys=True), flush=True)
+                command(["cargo", "clean"])
+                clean_seconds = timed_build(release)
+                incremental_seconds = timed_build(release)
+                row = {
+                    "kind": "build_sample",
+                    "runtime": "rama",
+                    "profile": profile,
+                    "repeat": repeat,
+                    "clean_seconds": round(clean_seconds, 6),
+                    "incremental_noop_seconds": round(incremental_seconds, 6),
+                }
+                if release:
+                    binary = ROOT / "target" / "release" / "baffle"
+                    row["release_binary_bytes"] = binary.stat().st_size
+                output.write(json.dumps(row, sort_keys=True) + "\n")
+                output.flush()
+                print(json.dumps(row, sort_keys=True), flush=True)
     print(f"wrote raw build measurements to {args.output}")
 
 

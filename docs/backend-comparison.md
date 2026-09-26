@@ -1,14 +1,20 @@
-# Baffle backend size, complexity, and maintenance comparison
+# Archived backend comparison (pre-baffle/34)
+
+This is a static record of the Hudsucker/Rama source comparison before the
+baffle/34 migration. Hudsucker is no longer shipped or built. The feature flags,
+vendored tree, and code-count script described below have been removed, so the
+commands are historical and do not run against the current source. Current
+benchmark scripts and runtime requirements are documented separately.
 
 ## Scope and revisions
 
-This report compares Baffle at commit `ed3946099491931542fc1c71416596bcb3636c9a`, which contains both feature-selected backends. Hudsucker is still the default. Rama is pinned to version `0.4.0` in `Cargo.toml` and `Cargo.lock` (crate checksum `3803b2144b39cfe1e7ef9ad32c20f7335cc573d6d5739bd7b460fc9444b8e85b`). The report does not recommend a backend change or authorize removal of either implementation.
+This report compares Baffle at commit `ed3946099491931542fc1c71416596bcb3636c9a`, which contains both feature-selected backends. Hudsucker was the default at that revision. Rama was pinned to version `0.4.0` in `Cargo.toml` and `Cargo.lock` (crate checksum `3803b2144b39cfe1e7ef9ad32c20f7335cc573d6d5739bd7b460fc9444b8e85b`). The report captures the review evidence before the migration; it does not describe current backend support.
 
-The vendored dependency is Hudsucker 0.25.0. Its packaged source records upstream Git revision `631fa972a4eb1428c52de2ebeab700bc39ea380c` in `.cargo_vcs_info.json`. The vendor patch inventory is in [`vendor/hudsucker/PATCHES.md`](../vendor/hudsucker/PATCHES.md).
+The vendored dependency at that revision was Hudsucker 0.25.0. Its packaged source recorded upstream Git revision `631fa972a4eb1428c52de2ebeab700bc39ea380c` in `.cargo_vcs_info.json`; its patch inventory was removed with the vendored tree.
 
 ## Measurement method
 
-[`scripts/measure_backend_code.py`](../scripts/measure_backend_code.py) is the repeatable source counter. This runner did not have `tokei` or `cloc`, so the repository includes a small Python counter and unit tests instead. It needs only Python 3. It counts Rust code lines and reports comment and blank lines separately. It treats all lines inside a Rust string literal as code, removes comments and blank lines from code LOC, and separates code inside `#[cfg(test)]` items from production code.
+The repeatable source counter used for this report was a small Python script with unit tests. It counted Rust code lines and reported comment and blank lines separately. It treated all lines inside a Rust string literal as code, removed comments and blank lines from code LOC, and separated code inside `#[cfg(test)]` items from production code. The counter was removed during baffle/34 because it measured the retired backend matrix.
 
 The script uses explicit Rust file lists. It excludes examples, docs, external fixtures, generated files, build output, non-Rust files, and any Rust file outside those lists. It includes all five root `tests/*.rs` files as test code. `Cargo.toml` requires `backend-hudsucker` for `client`, `control_protocol`, `daemon_lifecycle`, and `proxy_runtime`; the auto-discovered `tests/documentation.rs` target runs with either backend. The Hudsucker feature gate does not prove every assertion in those four targets is intrinsically Hudsucker-specific. Inline tests are assigned by their `cfg(test)` feature and source file.
 
@@ -16,22 +22,11 @@ For `src/ca.rs`, the counter assigns each `#[cfg(feature = ...)]` attribute and 
 
 The vendor count includes only `vendor/hudsucker/src/**/*.rs`. It reports the full upstream and vendored dependency source separately from Baffle code. The patch comparison uses the 0.25.0 crate source at the revision above. It excludes vendor examples, tests, docs, and manifests from the source LOC comparison. The vendor patch changes no upstream test code.
 
-Reproduce the report counts from the Baffle repository root:
+The source counter and comparative Cargo commands were removed with the
+feature matrix. The reported values below are retained as a snapshot of the
+specified commit.
 
-```sh
-python3 -m unittest discover -s scripts -p 'test_measure_backend_code.py'
-python3 scripts/measure_backend_code.py \
-  --revision ed3946099491931542fc1c71416596bcb3636c9a \
-  --upstream-hudsucker-src "$(find "$HOME/.cargo/registry/src" -path '*/hudsucker-0.25.0/src' -type d -print -quit)" \
-  --format markdown
-
-cargo tree --locked --offline --no-default-features --features backend-hudsucker -e normal --prefix none | sort -u | wc -l
-cargo tree --locked --offline --no-default-features --features backend-rama -e normal --prefix none | sort -u | wc -l
-```
-
-The first command tests the counter. The script pins source inputs to the specified Git revision, so it produces the same counts after this report and script are added. The dependency commands count unique normal dependency graph entries, not source files. To compare the Hudsucker vendor patch, the upstream source path must point to the exact 0.25.0 package whose `.cargo_vcs_info.json` contains the recorded revision.
-
-## Current dual-backend measurements
+## Pre-migration source counts
 
 Code LOC excludes comments and blank lines. Test LOC includes inline Rust test items and the listed root integration-test files. Function and module counts are source declarations counted by the script; they are not cyclomatic-complexity scores.
 
@@ -150,14 +145,8 @@ Both adapters duplicate `UnixSocketGuard`, `bind_unix_listener`, `run_bridge`, c
 
 ## Maintenance trade-offs and follow-up evidence
 
-Hudsucker keeps the Baffle adapter smaller and delegates protocol machinery to a mature upstream library. Its current cost is the 157-line textual vendor diff, which must be compared with each upgrade and re-tested for CONNECT admission, authority binding, fail-closed interception, HTTP/2, and upstream TLS verification. Upstreaming those hooks would remove the fork-specific diff but would still require dependency upgrades and CVE reviews.
-
-
-Concrete maintenance work that can reduce cost without changing the default:
-
-- Keep the baffle/28 daemon and baffle/29 live-proxy results tied to their exact revisions. The pinned source counts remain at `ed39460`; do not treat later code as part of those counts.
-- Share or port the real-daemon, HTTP/2, fragmented ClientHello, authority, credential, and socket-lifecycle fixtures. Record tests that remain backend-specific.
-- Use baffle/30's build and runtime measurements when available. baffle/30 has not posted measured results yet.
-- Keep the Hudsucker vendor diff limited to strict interception and authority binding. Revisit the upstream-only option only after the required hooks are released and the same security tests pass.
-- Consider extracting the duplicate bridge and socket guard after the backend parity tests exercise their cancellation and cleanup behavior.
-- Keep Hudsucker's default feature and both backend implementations unchanged until a separate decision is reviewed.
+The pre-migration review identified duplicated Unix bridge and socket-guard
+code. baffle/34 removed the Hudsucker implementation and its copy of that
+code. Rama now owns the bridge and inode-safe cleanup behind the
+daemon-facing runtime boundary. See `docs/architecture.md` for the current
+ownership and future replacement point.
