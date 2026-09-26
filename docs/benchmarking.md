@@ -23,9 +23,10 @@ changes were below useful resolution at these session counts.
 
 The runs used Linux `7.0.0-31-generic`, x86-64, an AMD Ryzen 9 5900X, Rust
 1.98.1, and Cargo 1.98.1. Release runtime tests and public-daemon session runs
-were pinned to CPU 0 with `taskset` or `sched_setaffinity`. The build sweep was
-not CPU-pinned. The raw build record includes the native tool versions that
-were available on `PATH`.
+were pinned to CPU 0 with `taskset` or `sched_setaffinity`. The repeated build
+sweep was pinned to CPU 0 with `CARGO_BUILD_JOBS=1`. The raw build record
+includes CPU affinity, Cargo's build-job limit, native tool versions, and the
+libclang library path.
 
 Both backend selections used the same fixture certificates. Their SHA-256
 fingerprints are in [the fixture README](../bench/fixtures/README.md). The
@@ -103,29 +104,35 @@ benchmark also checked that each session socket disappeared after shutdown.
 
 ## Build and binary results
 
-`benchmark_builds.py` runs a clean and a no-op incremental build for each
-backend and profile. It also records release binary sizes and distinct normal
-dependency graph entries. The raw JSONL file retains the commands' environment
-and each sample. See [the benchmark results directory](../bench/results/).
+`benchmark_builds.py` runs three clean/no-op incremental build pairs for each
+backend and profile. It alternates the backend order between repeats. The
+table shows the median and full range for each build time. The script also
+records release binary sizes and distinct normal dependency graph entries.
+The raw JSONL file retains the environment and every sample. See [the benchmark
+results directory](../bench/results/).
 
 | Profile and measure | Hudsucker | Rama |
 | --- | ---: | ---: |
-| Clean debug build | 18.59 s | 47.00 s |
-| No-op incremental debug build | 0.13 s | 0.17 s |
-| Clean release build | 33.61 s | 69.67 s |
-| No-op incremental release build | 0.14 s | 0.18 s |
-| Release binary size | 14,486,032 bytes | 18,165,256 bytes |
+| Clean debug build | 128.858 s (128.554–129.812) | 247.856 s (247.693–247.884) |
+| No-op incremental debug build | 0.133 s (0.133–0.137) | 0.177 s (0.171–0.180) |
+| Clean release build | 248.771 s (242.894–252.562) | 453.861 s (453.819–468.198) |
+| No-op incremental release build | 0.135 s (0.134–0.140) | 0.178 s (0.177–0.184) |
+| Release binary size | 14,486,344 bytes | 18,165,664 bytes |
 | Normal dependency graph entries | 252 | 358 |
 
-The release binary size gap is 3,679,224 bytes. The Rama build adds 106
-distinct normal dependency graph entries. Each build value is one clean/no-op
-pair; run the script three times to estimate build-time variation.
+Each build-time cell reports the median of three samples and the minimum and
+maximum in parentheses. The release binary size gap is 3,679,320 bytes. The
+Rama build adds 106 distinct normal dependency graph entries. These build
+times use one CPU and one Cargo job; they describe this pinned runner setup and
+should not be read as multi-core developer workstation times.
 
 Rama 0.4.0 requires Rust 1.96 or newer. Its BoringSSL build needs CMake, a
-C++ toolchain, and libclang for the DNS dependency. The Hudsucker selection
-does not compile Rama or BoringSSL. The existing [Rama prototype report](rama-prototype.md)
-records those toolchain details; this run's raw build record contains the
-available CMake and C++ version strings.
+C++ toolchain, and the libclang library for the DNS dependency. This host had
+CMake 3.31.6, Debian C++ 14.2.0, and libclang-dev 19 at
+`/usr/lib/x86_64-linux-gnu/libclang-19.so.19`. The `clang` command-line driver
+was unavailable. The Hudsucker selection does not compile Rama or BoringSSL.
+The existing [Rama prototype report](rama-prototype.md) records those
+toolchain requirements.
 
 ## Resilience coverage and limits
 
@@ -164,11 +171,13 @@ python3 scripts/benchmark_sessions.py --profile release --repeats 5 \
   --counts 1,2,4,8 --cpu 0
 ```
 
-Run clean and no-op incremental builds, dependency counts, and binary-size
-checks:
+Run three paired clean/no-op build samples per backend and profile, with
+backend order alternated between repeats. The environment row records CPU 0
+affinity and one Cargo build job:
 
 ```sh
-python3 scripts/benchmark_builds.py --repeats 3
+taskset -c 0 env CARGO_BUILD_JOBS=1 \
+  python3 scripts/benchmark_builds.py --repeats 3
 ```
 
 These commands are opt-in. They do not run as part of the required checks.

@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
-import re
 import subprocess
 import time
 from pathlib import Path
@@ -17,6 +17,11 @@ BACKENDS = {
     "hudsucker": "backend-hudsucker",
     "rama": "backend-rama",
 }
+
+
+def paired_backend_order(backends: list[str], repeat: int) -> list[str]:
+    """Alternate paired build order to reduce systematic order bias."""
+    return backends if repeat % 2 == 0 else list(reversed(backends))
 
 
 def command(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -46,10 +51,26 @@ def native_versions() -> dict[str, str]:
     for name, args in {
         "cmake": ["cmake", "--version"],
         "cxx": ["c++", "--version"],
-        "libclang": ["clang", "--version"],
+        "clang_driver": ["clang", "--version"],
     }.items():
         result = command(args, check=False)
         values[name] = result.stdout.splitlines()[0] if result.returncode == 0 else "unavailable"
+    configured_libclang = os.environ.get("LIBCLANG_PATH")
+    libclang_paths = []
+    if configured_libclang:
+        configured_path = Path(configured_libclang)
+        if configured_path.is_dir():
+            libclang_paths.extend(configured_path.glob("libclang.so*"))
+        elif configured_path.exists():
+            libclang_paths.append(configured_path)
+    if not libclang_paths:
+        libclang_paths.extend(Path("/usr/lib").glob("llvm-*/lib/libclang.so*"))
+        libclang_paths.extend(Path("/usr/local/lib").glob("libclang.so*"))
+    values["libclang"] = (
+        str(sorted(path.resolve() for path in libclang_paths)[-1])
+        if libclang_paths
+        else "unavailable"
+    )
     return values
 
 
@@ -84,6 +105,12 @@ def main() -> None:
             "date_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "uname": platform.platform(),
             "cpu": cpu_name(),
+            "cpu_affinity": (
+                sorted(os.sched_getaffinity(0))
+                if hasattr(os, "sched_getaffinity")
+                else "unavailable"
+            ),
+            "cargo_build_jobs": os.environ.get("CARGO_BUILD_JOBS", "cargo default"),
             "rustc": command(["rustc", "-Vv"]).stdout.strip(),
             "cargo": command(["cargo", "-V"]).stdout.strip(),
             "native_tools": native_versions(),
@@ -102,9 +129,11 @@ def main() -> None:
                 "entries": len(dependencies),
                 "values": dependencies,
             }, sort_keys=True) + "\n")
-            for profile in profiles:
-                release = profile == "release"
-                for repeat in range(args.repeats):
+        for profile in profiles:
+            release = profile == "release"
+            for repeat in range(args.repeats):
+                for backend in paired_backend_order(backends, repeat):
+                    feature = BACKENDS[backend]
                     command(["cargo", "clean"])
                     clean_seconds = timed_build(feature, release)
                     incremental_seconds = timed_build(feature, release)
