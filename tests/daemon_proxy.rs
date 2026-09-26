@@ -40,11 +40,18 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
     assert_eq!(ephemeral_created["ok"], true);
     let ephemeral_socket = socket_from(&ephemeral_created);
 
-    let (_, persistent_created) =
-        daemon.request(&tunnel_session(true, second_upstream.address.port()));
+    let named_session = tunnel_session(true, second_upstream.address.port()).replace(
+        "persistent = true",
+        "persistent = true\nsocket_name = \"cladding/github.sock\"",
+    );
+    let (_, persistent_created) = daemon.request(&named_session);
     assert_eq!(persistent_created["ok"], true);
     let persistent_socket = socket_from(&persistent_created);
     assert_ne!(ephemeral_socket, persistent_socket);
+    assert_eq!(
+        persistent_socket,
+        daemon.directory.path().join("proxies/cladding/github.sock")
+    );
     assert!(ephemeral_socket.exists());
     assert!(persistent_socket.exists());
 
@@ -69,6 +76,7 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
             .expect("the authorized destination should be dialed")
             .is_some()
     );
+    drop(first_tunnel);
 
     assert_status(
         &ephemeral_socket,
@@ -142,11 +150,29 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
             .expect("the second authorized destination should be dialed")
             .is_some()
     );
+    drop(second_tunnel);
 
     let (_, full) = daemon.request(&tunnel_session(true, first_upstream.address.port()));
     assert_eq!(full["error"]["code"], "session_limit");
     drop(ephemeral_lease);
     wait_for_path(&ephemeral_socket, false).await;
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let (_, listed) = daemon.request("version = 1\noperation = \"list\"\n");
+            if listed["result"]["sessions"].as_array().unwrap().len() == 1 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("lease reaper should remove the session before the collision check");
+    let (_, collision) = daemon.request(&named_session);
+    assert_eq!(collision["error"]["code"], "internal_error");
+    assert!(
+        persistent_socket.exists(),
+        "collision must preserve the owned socket"
+    );
     assert!(
         persistent_socket.exists(),
         "the other session must keep running"
@@ -167,6 +193,35 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
         b"replacement file"
     );
     drop((first_upstream, second_upstream));
+}
+
+#[tokio::test]
+async fn real_daemon_rejects_nested_socket_symlinks_and_path_traversal() {
+    let daemon = DaemonProcess::start(4, &[]);
+    let proxies = daemon.directory.path().join("proxies");
+    let target = tempfile::tempdir().expect("symlink target should exist");
+    let link = proxies.join("cladding");
+    std::os::unix::fs::symlink(target.path(), &link)
+        .expect("nested path symlink should be created");
+
+    let named = tunnel_session(true, 443).replace(
+        "persistent = true",
+        "persistent = true\nsocket_name = \"cladding/github.sock\"",
+    );
+    let (_, response) = daemon.request(&named);
+    assert_eq!(response["error"]["code"], "internal_error");
+    assert!(
+        !target.path().join("github.sock").exists(),
+        "the daemon must not bind through a nested symlink"
+    );
+
+    let traversal = tunnel_session(true, 443).replace(
+        "persistent = true",
+        "persistent = true\nsocket_name = \"../outside.sock\"",
+    );
+    let (_, response) = daemon.request(&traversal);
+    assert_eq!(response["error"]["code"], "invalid_request");
+    assert!(!daemon.directory.path().join("outside.sock").exists());
 }
 
 #[tokio::test]
@@ -328,11 +383,16 @@ async fn real_daemon_isolates_injected_credentials_across_http2_streams_and_sess
     daemon.write_secret("session-one-token", "session-one-secret-91");
     daemon.write_secret("session-two-token", "session-two-secret-27");
 
-    let (_, first_created) = daemon.request(&injected_session(
+    let first_session = injected_session(
         "localhost",
         first_upstream.address.port(),
         "session-one-token",
-    ));
+    )
+    .replace(
+        "persistent = true",
+        "persistent = true\nsocket_name = \"cladding/http2-one.sock\"",
+    );
+    let (_, first_created) = daemon.request(&first_session);
     let (_, second_created) = daemon.request(&injected_session(
         "localhost",
         second_upstream.address.port(),
@@ -343,6 +403,15 @@ async fn real_daemon_isolates_injected_credentials_across_http2_streams_and_sess
     let first_socket = socket_from(&first_created);
     let second_socket = socket_from(&second_created);
     assert_ne!(first_socket, second_socket);
+    assert_eq!(
+        first_socket,
+        daemon
+            .directory
+            .path()
+            .join("proxies/cladding/http2-one.sock")
+    );
+    assert!(first_socket.exists());
+    assert!(second_socket.exists());
 
     if !cfg!(baffle_integration_test) {
         // The upstream TLS trust hook is compiled only for CI's integration

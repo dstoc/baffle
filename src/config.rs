@@ -173,11 +173,6 @@ impl DaemonConfig {
                 "daemon.max_provisioning_requests must be greater than zero",
             ));
         }
-        if daemon.connection_timeout_ms == 0 {
-            return Err(ConfigError::new(
-                "daemon.connection_timeout_ms must be greater than zero",
-            ));
-        }
         if daemon.io_timeout_ms == 0 {
             return Err(ConfigError::new(
                 "daemon.io_timeout_ms must be greater than zero",
@@ -216,6 +211,8 @@ fn required_path(path: PathBuf, field: &str) -> Result<PathBuf, ConfigError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionConfig {
     pub persistent: bool,
+    /// Optional path relative to the daemon's session socket directory.
+    pub socket_name: Option<String>,
     pub rules: Vec<HostRule>,
 }
 
@@ -346,6 +343,10 @@ impl ControlRequest {
                     version,
                     session: SessionConfig {
                         persistent: session.persistent,
+                        socket_name: session
+                            .socket_name
+                            .map(|name| validate_socket_name(&name))
+                            .transpose()?,
                         rules,
                     },
                 })
@@ -423,6 +424,27 @@ fn validate_session_config_dir(path: &Path) -> Result<(), ConfigError> {
         ));
     }
     Ok(())
+}
+
+fn validate_socket_name(input: &str) -> Result<String, ConfigError> {
+    if input.is_empty() || input.starts_with('/') || input.contains(['\\', '\0']) {
+        return Err(ConfigError::new(
+            "session.socket_name must be a relative Unix socket path",
+        ));
+    }
+    let components = input.split('/').collect::<Vec<_>>();
+    if components
+        .iter()
+        .any(|component| component.is_empty() || *component == "." || *component == "..")
+    {
+        return Err(ConfigError::new(
+            "session.socket_name must not contain empty, dot, or parent components",
+        ));
+    }
+    if input.len() > 107 {
+        return Err(ConfigError::new("session.socket_name is too long"));
+    }
+    Ok(input.to_owned())
 }
 
 fn validate_protocol_version(version: u16) -> Result<(), ConfigError> {
@@ -903,6 +925,8 @@ enum RawControlRequest {
 struct RawSessionSettings {
     #[serde(default)]
     persistent: bool,
+    #[serde(default)]
+    socket_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1131,6 +1155,38 @@ directory = "/var/lib/baffle/secrets"
             session.rules[2].inject[0].username.as_deref(),
             Some("x-access-token")
         );
+    }
+
+    #[test]
+    fn validates_optional_nested_session_socket_names() {
+        let request = ControlRequest::from_toml(
+            "version = 1\noperation = \"create\"\n\n[session]\nsocket_name = \"cladding/github.sock\"\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n",
+        )
+        .expect("a nested socket name should parse");
+        let ControlRequest::Create { session, .. } = request else {
+            panic!("expected create request");
+        };
+        assert_eq!(session.socket_name.as_deref(), Some("cladding/github.sock"));
+
+        for name in [
+            "",
+            "/absolute.sock",
+            "./socket.sock",
+            "directory/../socket.sock",
+            "../socket.sock",
+            "directory//socket.sock",
+            "directory/",
+            "directory\\socket.sock",
+            &"x".repeat(108),
+        ] {
+            let input = format!(
+                "version = 1\noperation = \"create\"\n\n[session]\nsocket_name = {name:?}\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n"
+            );
+            assert!(
+                ControlRequest::from_toml(&input).is_err(),
+                "unsafe socket name should fail: {name:?}"
+            );
+        }
     }
 
     #[test]
@@ -1436,7 +1492,6 @@ format = "raw"
         for field in [
             "control_read_timeout_ms",
             "max_provisioning_requests",
-            "connection_timeout_ms",
             "io_timeout_ms",
         ] {
             let input = DAEMON_EXAMPLE.replace(

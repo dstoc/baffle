@@ -11,7 +11,6 @@ pub struct Metrics {
     upstream_failures: AtomicU64,
     interception_errors: AtomicU64,
     forced_shutdowns: AtomicU64,
-    bridge_failures: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,7 +22,6 @@ pub struct MetricsSnapshot {
     pub upstream_failures: u64,
     pub interception_errors: u64,
     pub forced_shutdowns: u64,
-    pub bridge_failures: u64,
 }
 
 impl Metrics {
@@ -36,7 +34,6 @@ impl Metrics {
             upstream_failures: self.upstream_failures.load(Ordering::Relaxed),
             interception_errors: self.interception_errors.load(Ordering::Relaxed),
             forced_shutdowns: self.forced_shutdowns.load(Ordering::Relaxed),
-            bridge_failures: self.bridge_failures.load(Ordering::Relaxed),
         }
     }
 
@@ -75,10 +72,6 @@ impl Metrics {
     pub(crate) fn forced_shutdown(&self) -> u64 {
         self.forced_shutdowns.fetch_add(1, Ordering::Relaxed) + 1
     }
-
-    pub(crate) fn bridge_failure(&self) -> u64 {
-        self.bridge_failures.fetch_add(1, Ordering::Relaxed) + 1
-    }
 }
 
 #[cfg(test)]
@@ -94,7 +87,6 @@ mod tests {
         metrics.upstream_failure();
         metrics.interception_error();
         metrics.forced_shutdown();
-        metrics.bridge_failure();
 
         assert_eq!(
             metrics.snapshot(),
@@ -106,7 +98,6 @@ mod tests {
                 upstream_failures: 1,
                 interception_errors: 1,
                 forced_shutdowns: 1,
-                bridge_failures: 1,
             }
         );
 

@@ -2,6 +2,7 @@
 """Run Baffle's opt-in, privileged Linux network namespace integration test."""
 
 import argparse
+import errno
 import importlib.util
 import json
 import os
@@ -328,10 +329,9 @@ def verify_checker_negative_cases(
     )
     wide_port = read_startup_port(wide_bind_process, "wide-bind negative fixture")
     wide_bind = run_checker(wide_bind_process.pid, client_pid)
-    expected = f"0.0.0.0:{wide_port} is not bound to loopback"
-    if wide_bind.returncode == 0 or expected not in wide_bind.stderr:
-        fail(f"checker did not reject a non-loopback listener: {wide_bind.stderr}")
-    print("PASS: checker rejects a listener bound to 0.0.0.0")
+    if wide_bind.returncode == 0 or "unexpected TCP listening ports" not in wide_bind.stderr:
+        fail(f"checker did not reject an unexpected TCP listener: {wide_bind.stderr}")
+    print(f"PASS: checker rejects an unexpected TCP listener at 0.0.0.0:{wide_port}")
 
 
 def exercise_client(
@@ -341,12 +341,10 @@ def exercise_client(
     proxy_socket: Path,
     daemon_address: str,
     route_probe_port: int,
-    internal_port: int,
     upstream_port: int,
 ) -> subprocess.Popen[str]:
     code = textwrap.dedent(
         f'''\
-        import errno
         import ssl
         import signal
         import socket
@@ -361,17 +359,6 @@ def exercise_client(
                 probe.sendall(b"route-check")
                 route_result = probe.recv(64)
                 assert route_result == b"route-canary-ok\\n", route_result
-
-            # Probe the daemon's veth address at the actual internal listener port.
-            # The request never targets this client's own 127.0.0.1 or ::1.
-            try:
-                with socket.create_connection(({daemon_address!r}, {internal_port}), timeout=2):
-                    raise AssertionError("sandbox client reached Baffle's internal TCP port")
-            except OSError as error:
-                assert error.errno == errno.ECONNREFUSED, (
-                    "the daemon interface route should be reachable and the loopback-only "
-                    f"listener should refuse this address; got {{error!r}}"
-                )
 
             # The same client can use the assigned Unix data socket and reach its allowed HTTPS upstream.
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as proxy:
@@ -531,6 +518,7 @@ def main() -> None:
 
             [session]
             persistent = true
+            socket_name = "cladding/namespace.sock"
 
             [[rules]]
             host = "localhost"
@@ -542,15 +530,36 @@ def main() -> None:
         proxy_socket = Path(str(created["socket"]))
         if not proxy_socket.exists():
             fail(f"Baffle reported a missing session socket: {proxy_socket}")
+        socket_metadata = proxy_socket.stat()
+        if socket_metadata.st_uid != os.geteuid() or socket_metadata.st_mode & 0o777 != 0o600:
+            fail("Baffle data socket does not have the configured owner and mode 0600")
+        parent_metadata = proxy_socket.parent.stat()
+        if parent_metadata.st_uid != os.geteuid() or parent_metadata.st_mode & 0o777 != 0o700:
+            fail("Baffle nested socket directory does not have owner-only mode 0700")
+        trusted_uid = os.geteuid()
+        directories = [proxy_socket.parent, proxy_socket.parent.parent, temporary_directory]
+        directory_modes = [(path, path.stat().st_mode & 0o777) for path in directories]
+        for path, _ in directory_modes:
+            path.chmod(0o711)
+        try:
+            os.seteuid(65534)
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as untrusted:
+                    untrusted.connect(str(proxy_socket))
+                fail("an untrusted UID connected to a mode-0600 session socket")
+            except OSError as error:
+                if error.errno != errno.EACCES:
+                    fail(f"unexpected untrusted Unix-socket error: {error!r}")
+        finally:
+            os.seteuid(trusted_uid)
+            for path, mode in directory_modes:
+                path.chmod(mode)
+        print("PASS: mode-0600 Unix socket denies an untrusted UID with traversable parents")
         daemon_pid = daemon.pid
 
         listeners = daemon_tcp_listeners(daemon_pid)
-        loopback_ports = [
-            port for address, port in listeners if address in {"127.0.0.1", "::1"}
-        ]
-        if not loopback_ports:
-            fail(f"Baffle has no loopback internal TCP listener: {listeners}")
-        internal_port = loopback_ports[0]
+        if listeners:
+            fail(f"Baffle created an internal TCP listening port: {listeners}")
 
         client_result = temporary_directory / "client-result"
         client = exercise_client(
@@ -560,7 +569,6 @@ def main() -> None:
             proxy_socket,
             DAEMON_ADDRESS,
             route_probe_port,
-            internal_port,
             upstream_port,
         )
         print(wait_for_client_result(client, client_result))
@@ -570,8 +578,8 @@ def main() -> None:
             fail(f"namespace checker failed:\n{checker.stdout}{checker.stderr}")
         print(checker.stdout.strip())
         print(
-            "PASS: the client reached the daemon veth canary, was refused at the daemon's "
-            f"internal port {internal_port}, and received its upstream response through the Unix socket"
+            "PASS: the isolated client reached the daemon veth canary and received its "
+            "authorized upstream response through the assigned Unix socket"
         )
 
         verify_checker_negative_cases(processes, daemon_ns, daemon_pid, client.pid)

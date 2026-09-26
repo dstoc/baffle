@@ -14,7 +14,7 @@ use common::{
 use rcgen::{CertificateParams, KeyPair};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream, UnixStream},
+    net::{TcpListener, UnixStream},
     sync::mpsc,
     time::timeout,
 };
@@ -41,7 +41,7 @@ async fn multiple_proxy_instances_deny_outbound_requests_and_stop_independently(
     )
     .await
     .expect("first runtime should start");
-    let first_address = first.local_addr();
+    let first_address = first.socket_path().to_path_buf();
     let second = ProxyRuntime::start(
         second_id.clone(),
         session_config(),
@@ -52,29 +52,27 @@ async fn multiple_proxy_instances_deny_outbound_requests_and_stop_independently(
     )
     .await
     .expect("second runtime should start");
-    let second_address = second.local_addr();
+    let second_address = second.socket_path().to_path_buf();
 
-    assert!(first_address.ip().is_loopback());
-    assert!(second_address.ip().is_loopback());
     assert_ne!(first_address, second_address);
     assert_ne!(first.socket_path(), second.socket_path());
     assert_eq!(first.runtime_id(), &first_id);
     assert_eq!(second.runtime_id(), &second_id);
 
-    assert_denied(first_address, "GET", "http://example.com/").await;
-    assert_denied(first_address, "CONNECT", "example.com:443").await;
-    assert_denied(second_address, "GET", "http://example.com/").await;
+    assert_denied(&first_address, "GET", "http://example.com/").await;
+    assert_denied(&first_address, "CONNECT", "example.com:443").await;
+    assert_denied(&second_address, "GET", "http://example.com/").await;
     assert_unix_proxy_denied(first.socket_path()).await;
 
     first.shutdown(Duration::from_secs(2)).await;
     assert_exit(&mut events, &first_id).await;
     assert!(
-        TcpStream::connect(first_address).await.is_err(),
+        UnixStream::connect(first_address).await.is_err(),
         "stopped runtime should close only its own listener"
     );
     assert!(!directory.path().join("first.sock").exists());
     assert!(directory.path().join("second.sock").exists());
-    assert_denied(second_address, "GET", "http://example.com/").await;
+    assert_denied(&second_address, "GET", "http://example.com/").await;
     assert_unix_proxy_denied(second.socket_path()).await;
 
     second.shutdown(Duration::from_secs(2)).await;
@@ -121,7 +119,7 @@ async fn outer_forward_http_and_https_requests_are_denied_before_upstream_dialin
     ] {
         let authority = format!("localhost:{port}");
         let target = format!("{scheme}://{authority}/allowed");
-        let mut client = TcpStream::connect(runtime.local_addr())
+        let mut client = UnixStream::connect(runtime.socket_path())
             .await
             .expect("proxy should accept a forward-proxy connection");
         client
@@ -174,7 +172,7 @@ async fn intercept_connect_with_unknown_payload_does_not_open_an_opaque_tunnel()
     .await
     .expect("intercept runtime should start");
 
-    let mut client = TcpStream::connect(runtime.local_addr())
+    let mut client = UnixStream::connect(runtime.socket_path())
         .await
         .expect("proxy should accept CONNECT");
     let request = format!(
@@ -248,7 +246,7 @@ async fn connect_request_body_does_not_open_an_upstream_tunnel() {
     .await
     .expect("intercept runtime should start");
 
-    let mut client = TcpStream::connect(runtime.local_addr())
+    let mut client = UnixStream::connect(runtime.socket_path())
         .await
         .expect("proxy should accept CONNECT");
     client
@@ -334,7 +332,7 @@ async fn malformed_or_conflicting_connect_identity_never_dials_upstream() {
         duplicate_host,
         conflicting_port,
     ] {
-        let mut client = TcpStream::connect(runtime.local_addr())
+        let mut client = UnixStream::connect(runtime.socket_path())
             .await
             .expect("proxy should accept a CONNECT attempt");
         client
@@ -423,7 +421,7 @@ async fn intercepted_https_dials_loopback_and_rejects_untrusted_upstream_certifi
     .await
     .expect("intercept runtime should start");
 
-    let mut proxy = TcpStream::connect(runtime.local_addr())
+    let mut proxy = UnixStream::connect(runtime.socket_path())
         .await
         .expect("proxy should accept CONNECT");
     proxy
@@ -524,7 +522,7 @@ async fn fragmented_client_hello_on_interception_rule_never_opens_an_opaque_tunn
     .expect("intercept runtime should start");
 
     let authority = format!("localhost:{upstream_port}");
-    let mut client = open_connect_tunnel(runtime.local_addr(), &authority)
+    let mut client = open_connect_tunnel(runtime.socket_path(), &authority)
         .await
         .expect("CONNECT should be accepted before TLS parsing");
     let mut tls_client = tokio_rustls::rustls::ClientConnection::new(
@@ -622,7 +620,7 @@ async fn port_80_interception_rule_intercepts_or_rejects_without_tunneling() {
     .await
     .expect("port-80 TLS rule should start");
 
-    let (connect_status, stream) = open_connect_response(runtime.local_addr(), "localhost:80")
+    let (connect_status, stream) = open_connect_response(runtime.socket_path(), "localhost:80")
         .await
         .expect("proxy should respond to CONNECT");
     if connect_status.starts_with("HTTP/1.1 200") {
@@ -693,7 +691,7 @@ async fn intercepted_tls_rejects_missing_or_conflicting_sni_before_egress() {
     let conflicting = timeout(
         Duration::from_secs(2),
         connect_intercepted_tls(
-            runtime.local_addr(),
+            runtime.socket_path(),
             &authority,
             "other.example",
             &ca,
@@ -705,7 +703,7 @@ async fn intercepted_tls_rejects_missing_or_conflicting_sni_before_egress() {
     .is_err();
     assert!(conflicting, "SNI must match the CONNECT authority");
 
-    let tunnel = open_connect_tunnel(runtime.local_addr(), &authority)
+    let tunnel = open_connect_tunnel(runtime.socket_path(), &authority)
         .await
         .expect("second CONNECT should be accepted before TLS parsing");
     let missing_sni_name = ServerName::try_from("127.0.0.1".to_owned()).unwrap();
@@ -718,7 +716,7 @@ async fn intercepted_tls_rejects_missing_or_conflicting_sni_before_egress() {
     .is_err();
     assert!(missing_sni, "intercepted TLS must include SNI");
 
-    let mut malformed = open_connect_tunnel(runtime.local_addr(), &authority)
+    let mut malformed = open_connect_tunnel(runtime.socket_path(), &authority)
         .await
         .expect("third CONNECT should be accepted before TLS parsing");
     malformed
@@ -777,7 +775,7 @@ async fn redirect_responses_pass_through_and_downgrade_requests_are_rejected() {
     .expect("runtime should start");
 
     let authority = format!("localhost:{upstream_port}");
-    let mut client = open_connect_tunnel(runtime.local_addr(), &authority)
+    let mut client = open_connect_tunnel(runtime.socket_path(), &authority)
         .await
         .expect("authorized CONNECT should open an opaque tunnel");
     client
@@ -822,7 +820,7 @@ async fn redirect_responses_pass_through_and_downgrade_requests_are_rejected() {
         "redirect Location should reach the client unchanged"
     );
 
-    let mut downgrade = TcpStream::connect(runtime.local_addr())
+    let mut downgrade = UnixStream::connect(runtime.socket_path())
         .await
         .expect("proxy should accept the client's redirected request");
     downgrade
@@ -872,7 +870,7 @@ async fn assert_unix_proxy_denied(path: &std::path::Path) {
     let mut status = String::new();
     timeout(Duration::from_secs(2), reader.read_line(&mut status))
         .await
-        .expect("proxy should respond through the Unix bridge")
+        .expect("proxy should respond through the session Unix socket")
         .expect("proxy response should be readable");
     assert_denied_status(&status, "ordinary HTTP through the session Unix socket");
 }
@@ -972,7 +970,7 @@ async fn unauthorized_ip_literal_is_rejected_before_an_upstream_connection() {
     .await
     .expect("proxy runtime should start");
 
-    let mut stream = TcpStream::connect(runtime.local_addr())
+    let mut stream = UnixStream::connect(runtime.socket_path())
         .await
         .expect("proxy listener should accept connections");
     let request =
@@ -1023,7 +1021,7 @@ async fn forward_requests_are_denied_but_connect_can_use_an_authorized_destinati
     .await
     .expect("runtime should start");
 
-    let mut http_client = TcpStream::connect(runtime.local_addr())
+    let mut http_client = UnixStream::connect(runtime.socket_path())
         .await
         .expect("proxy should accept a forward-proxy request");
     http_client
@@ -1055,7 +1053,7 @@ async fn forward_requests_are_denied_but_connect_can_use_an_authorized_destinati
     );
 
     let mut connect_client =
-        open_connect_tunnel(runtime.local_addr(), &format!("localhost:{upstream_port}"))
+        open_connect_tunnel(runtime.socket_path(), &format!("localhost:{upstream_port}"))
             .await
             .expect("configured CONNECT should be accepted");
     connect_client
@@ -1129,7 +1127,7 @@ async fn websocket_forward_requests_are_denied_before_dialing() {
     .await
     .expect("runtime should start");
 
-    let mut denied_client = TcpStream::connect(runtime.local_addr())
+    let mut denied_client = UnixStream::connect(runtime.socket_path())
         .await
         .expect("proxy should accept the denied WebSocket request");
     denied_client
@@ -1153,7 +1151,7 @@ async fn websocket_forward_requests_are_denied_before_dialing() {
         "the denied WebSocket destination must not receive an outbound connection"
     );
 
-    let mut authorized_client = TcpStream::connect(runtime.local_addr())
+    let mut authorized_client = UnixStream::connect(runtime.socket_path())
         .await
         .expect("proxy should accept the authorized WebSocket request");
     authorized_client

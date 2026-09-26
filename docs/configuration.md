@@ -34,7 +34,6 @@ max_connections_per_session = 128
 shutdown_grace_seconds = 5
 control_read_timeout_ms = 5000
 max_provisioning_requests = 8
-connection_timeout_ms = 5000
 io_timeout_ms = 30000
 # Optional. Required only when create_mode is "file_only".
 session_config_dir = "/etc/baffle/sessions"
@@ -55,12 +54,12 @@ allowed = ["example-api"]
 | `daemon.socket_dir` | path | required | Directory for per-session Unix sockets. It must be owned by `trusted_operator_uid` and have mode `0700` or stricter. |
 | `daemon.trusted_operator_uid` | unsigned 32-bit integer | required | Linux UID accepted on the control socket and used as the owner for private runtime and secret files. Run Baffle as this UID. |
 | `daemon.max_sessions` | positive integer | `64` | Maximum active sessions. Zero is invalid. |
-| `daemon.max_connections_per_session` | positive integer | `128` | Maximum concurrent client connections accepted by one session bridge. Excess connections are closed. Zero is invalid. |
+| `daemon.max_connections_per_session` | positive integer | `128` | Maximum concurrent client connections accepted by one session's Unix listener. Excess connections are closed. Zero is invalid. |
 | `daemon.shutdown_grace_seconds` | integer | `5` | Grace period for each session during shutdown. Zero requests immediate forced shutdown. |
 | `daemon.control_read_timeout_ms` | positive integer | `5000` | Timeout for control request frame reads. Zero is invalid. |
 | `daemon.max_provisioning_requests` | positive integer | `8` | Maximum concurrent session creation requests. Additional requests receive `busy`. Zero is invalid. |
-| `daemon.connection_timeout_ms` | positive integer | `5000` | Maximum time to connect from a data socket bridge to its internal Rama listener. Zero is invalid. |
-| `daemon.io_timeout_ms` | positive integer | `30000` | Maximum idle time for bridge reads, writes, and half-closes. A bridge closes when either direction makes no progress for this period. Zero is invalid. |
+| `daemon.connection_timeout_ms` | unsigned integer | `5000` | Legacy field from older daemon files. Baffle accepts it for compatibility and does not use it. |
+| `daemon.io_timeout_ms` | positive integer | `30000` | Maximum idle time for CONNECT parsing and proxy tunnel reads, writes, and half-closes. Zero is invalid. |
 | `daemon.create_mode` | `inline` or `file_only` | `inline` | Selects how clients create sessions. The default preserves inline TOML requests. `file_only` accepts only `create_from_file`. |
 | `daemon.session_config_dir` | absolute path | required in `file_only` mode | Directory containing administrator-managed session request TOML files. It is invalid in `inline` mode. The daemon refuses symlinks, unsafe ownership, and group- or other-writable directories and files. |
 | `ca.certificate` | path | required | One current PEM CA certificate with `CA:TRUE` and `keyCertSign`. |
@@ -114,6 +113,8 @@ operation = "create"
 
 [session]
 persistent = false
+# Optional, relative to daemon.socket_dir:
+# socket_name = "cladding/github.sock"
 
 [[rules]]
 host = "example.com"
@@ -122,8 +123,18 @@ ports = [443]
 ```
 
 `version` must be `1`. `session` is required. `persistent` defaults to
-`false`. At least one `[[rules]]` entry is required. A create request has one
-rule per exact host; duplicate normalized hosts are invalid.
+`false`. Omit `socket_name` to use a generated session path. A named socket
+path is relative to `daemon.socket_dir` and can include nested directories.
+Baffle rejects absolute paths, empty, `.` or `..` components, symlinks, and
+paths that exceed the Unix socket path limit. It creates missing nested
+directories with mode `0700`, refuses occupied socket names, and removes
+Baffle-created directories when they are empty. At least one `[[rules]]` entry
+is required. A create request has one rule per exact host; duplicate normalized
+hosts are invalid.
+
+The Rust client can request a name with
+`SessionConfig::new().socket_name("cladding/github.sock")`. The response keeps
+the existing `socket` field; clients should connect to that returned path.
 
 | Rule field | Type | Default | Meaning and validation |
 | --- | --- | --- | --- |

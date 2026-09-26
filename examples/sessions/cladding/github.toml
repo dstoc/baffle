@@ -3,6 +3,7 @@ operation = "create"
 
 [session]
 persistent = false
+socket_name = "cladding/github.sock"
 
 [[rules]]
 host = "github.com"

@@ -38,6 +38,17 @@ requires path or credential checks.
 guarantee for an opaque tunnel: Baffle cannot prove that each established
 tunnel carries TLS.
 
+**Decision update (2026-09-26, baffle/40):** Baffle now serves Rama directly
+from its Baffle-owned Unix data listener. Per-session loopback TCP listeners,
+ephemeral ingress ports, and the Unix-to-TCP bridge have been removed. A
+session may request an optional nested `socket_name` relative to the daemon's
+`socket_dir`; omission retains generated names. Baffle creates missing nested
+directories securely and retains inode-checked socket cleanup. A network
+namespace is not required solely to hide an internal proxy listener. See the
+current [architecture](architecture.md), [configuration](configuration.md),
+and [security guide](security-deployment.md); the proposal below remains the
+historical v1 design and decision record.
+
 ## 1. Summary
 
 Baffle is a long-running Rust daemon that creates independent HTTPS forward proxies on demand. A trusted local client submits a TOML policy over Baffle's Unix-domain control socket. Baffle validates the policy, starts a proxy inside its existing process, and returns the path to a newly created Unix-domain data socket. The client keeps the control connection open as a lease. Unless the request specifies `persistent = true`, loss of that connection stops the proxy and removes its socket. Persistent proxies remain until explicitly stopped or until Baffle exits.

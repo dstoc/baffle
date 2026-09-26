@@ -207,15 +207,13 @@ def main() -> None:
     allowed_modes = {
         "production",
         "off",
-        "client",
-        "proxy-ingress",
         "proxy-egress",
         "origin",
         "all",
     }
     if not nodelay_modes or any(value not in allowed_modes for value in nodelay_modes):
         parser.error(
-            "--tcp-nodelay must contain production, off, client, proxy-ingress, proxy-egress, origin, or all"
+            "--tcp-nodelay must contain production, off, proxy-egress, origin, or all"
         )
     payloads = []
     try:

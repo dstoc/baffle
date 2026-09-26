@@ -7,6 +7,37 @@ Rama the only supported runtime. They record past comparisons and do not
 describe a current build option. All commands and benchmark scripts now run
 Rama only.
 
+The Issue 32 and Issue 33 values below were collected before baffle/40 moved
+session ingress from loopback TCP to Unix sockets. Keep them as historical
+measurements; they do not compare performance over the current transport and
+must not be used as a baseline for it. The current benchmark harness connects
+through the assigned Unix data socket. Its optional `TCP_NODELAY` control
+applies only to outbound TCP and the test origin.
+
+## baffle/40: direct Unix-ingress characterization
+
+On 2026-09-26, the release `runtime_http1_characterization` benchmark ran over
+the assigned Unix socket on `ld-cladding` (Linux `7.0.0-31-generic`, AMD Ryzen
+9 5900X, Rust `1.98.1`, CPU 0). It sent 4 KiB requests and received 32 KiB
+responses through intercepted HTTPS, with five trials of 16 warm-up and 80
+measured requests per client. The fixture verified all 10,080 origin requests
+and injected credentials. These are a fresh direct-Unix measurement, not a
+comparison with the historical TCP-ingress results above.
+
+| Concurrent clients | Median / p95 request latency |
+| ---: | ---: |
+| 1 | 0.264 / 0.392 ms |
+| 4 | 0.222 / 6.409 ms |
+| 16 | 2.601 / 9.120 ms |
+
+The HTTP/1.1/TLS, tunnel, and HTTP/2 release smoke benchmark also passed over
+Unix sockets. Its fixture verified 480 intercepted HTTP/1.1 requests and 416
+HTTP/2 requests with injected credentials. The raw characterization and smoke
+outputs are [HTTP/1.1 concurrency](../bench/results/issue40-rama-unix-http1-20260926.csv)
+and [runtime smoke](../bench/results/issue40-rama-unix-ingress-20260926.csv).
+These one-run figures are diagnostic, not CI thresholds or a performance
+claim against the removed ingress transport.
+
 Issue 32 measured a 41.979 ms Rama median and a 0.108 ms Hudsucker median on a
 Rust-origin HTTP/1.1 keep-alive workload. Issue 33 repeats that workload with
 the production Rama ingress setting and a reproducible off control. Rama's
@@ -200,10 +231,10 @@ uses the same pinned certificate, returns the same response body, and checks
 that the proxy injected the benchmark credential. Each Python-origin run
 verified all 10,080 warm-up and measured requests.
 
-The table reports median and p95 request latency across all five trials. The
-`all` mode enables `TCP_NODELAY` on the client, proxy accepted socket, proxy
-outbound socket, and origin accepted socket. `proxy-ingress` and `proxy-egress`
-enable it on only the named Rama socket leg.
+The table reports median and p95 request latency across all five historical
+trials. The old `all` mode enabled `TCP_NODELAY` on the client, the proxy's
+accepted TCP socket, the proxy's outbound socket, and the origin's accepted
+socket. That accepted ingress socket no longer exists.
 
 | Backend | Origin | `TCP_NODELAY` | 1 client, median / p95 | 4 clients, median / p95 | 16 clients, median / p95 |
 | --- | --- | --- | ---: | ---: | ---: |
@@ -251,8 +282,9 @@ The runner was Linux `7.0.0-31-generic`, x86-64, an AMD Ryzen 9 5900X, and Rust
 `1.98.1`. These Issue 32 rows are diagnostic measurements from before the
 production Rama ingress change. The `benchmark-tcp-nodelay` feature enabled
 socket toggles for that experiment. It did not change the production socket
-settings at that revision. This investigation does not make a backend
-migration decision.
+settings at that revision. baffle/40 removed the ingress leg, so the current
+harness cannot reproduce the old `proxy-ingress` row. This investigation does
+not make a backend migration decision.
 
 Reproduce the two-origin and all-socket comparison, the one-leg Rama runs, and
 the socket profile with:
@@ -264,25 +296,24 @@ python3 scripts/benchmark_http1.py \
 
 python3 scripts/benchmark_http1.py \
   --origins rust \
-  --tcp-nodelay proxy-ingress,proxy-egress --result-prefix issue32 --cpu 0
+  --tcp-nodelay proxy-egress --result-prefix issue32 --cpu 0
 
 python3 scripts/profile_http1_sockets.py --cpu 0
 ```
 
-## Issue 33: production Rama ingress behavior
+## Issue 33: historical Rama TCP ingress behavior
 
-Rama now enables `TCP_NODELAY` on every accepted client-facing TCP socket in
-normal builds. The setting applies before CONNECT parsing, TLS peeking, or HTTP
-handling. The `benchmark-tcp-nodelay` feature remains opt-in. It supports an
-explicit `off` control for repeatable comparisons; compiling that feature does
-not turn the production ingress setting off by default.
+At the time of Issue 33, Rama enabled `TCP_NODELAY` on each accepted
+client-facing TCP socket. baffle/40 removed that TCP ingress, so the production
+setting and its ingress-only comparison no longer apply. The raw measurements
+below remain historical records.
 
-The `production` benchmark mode builds without the diagnostic feature. It
-measures Rama with the production ingress setting. The `off` mode enables the
-diagnostic feature and explicitly disables the Rama ingress setting. The current
-`runtime_http1_characterization` test uses the same TLS proxy policy,
-credential injection, CONNECT authority, keep-alive pattern, and payload sizes
-across these modes.
+The `production` and `off` runs below compared the old TCP ingress setting.
+The current `runtime_http1_characterization` test connects over a Unix data
+socket and uses the same TLS proxy policy, credential injection, CONNECT
+authority, keep-alive pattern, and payload sizes. Its optional socket toggles
+cover outbound TCP and the fixture origin; there is no ingress toggle after
+baffle/40.
 
 The characterization measures five trials at 1, 4, and 16 HTTP/1.1 clients.
 Each client warms its keep-alive connection with 16 requests and sends 80

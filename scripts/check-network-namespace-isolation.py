@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify namespace and bind-address invariants for Baffle's internal listeners."""
+"""Verify network namespace separation and the absence of Baffle TCP listeners."""
 
 import os
 import re
@@ -28,8 +28,6 @@ def parse_listener_rows(daemon_pid: int, output: str) -> list[tuple[str, int]]:
             fail(f"could not parse listener address: {fields[3]}")
         listeners.append((address, int(port_text)))
 
-    if not listeners:
-        fail("no Baffle TCP listeners found; start a session before running this check")
     return listeners
 
 
@@ -72,12 +70,9 @@ def main() -> None:
     )
 
     listeners = listener_rows(daemon_pid)
-    for address, port in listeners:
-        if address not in {"127.0.0.1", "::1"}:
-            fail(f"Baffle listener {address}:{port} is not bound to loopback")
-        print(f"PASS: Baffle listener {address}:{port} is bound to loopback")
-
-    print("PASS: namespace and listener bind checks completed")
+    if listeners:
+        fail(f"Baffle created unexpected TCP listening ports: {listeners}")
+    print("PASS: Baffle has no internal TCP listeners")
 
 
 if __name__ == "__main__":

@@ -468,7 +468,6 @@ impl ControlServer {
             upstream_failures,
             interception_errors,
             forced_shutdowns,
-            bridge_failures,
         } = self.metrics.snapshot();
         info!(
             event = "daemon_metrics",
@@ -479,7 +478,6 @@ impl ControlServer {
             upstream_failures,
             interception_errors,
             forced_shutdowns,
-            bridge_failures,
             "daemon counters at shutdown"
         );
         self.socket_guard.take();
@@ -880,7 +878,6 @@ struct SessionManager {
     socket_dir: PathBuf,
     max_sessions: usize,
     max_connections_per_session: usize,
-    connection_timeout: Duration,
     io_timeout: Duration,
     shutdown_grace: Duration,
     ca: Arc<ManagedCa>,
@@ -906,7 +903,6 @@ impl SessionManager {
             socket_dir: settings.socket_dir.clone(),
             max_sessions: settings.max_sessions,
             max_connections_per_session: settings.max_connections_per_session,
-            connection_timeout: Duration::from_millis(settings.connection_timeout_ms),
             io_timeout: Duration::from_millis(settings.io_timeout_ms),
             shutdown_grace: Duration::from_secs(settings.shutdown_grace_seconds),
             ca,
@@ -942,7 +938,11 @@ impl SessionManager {
             }
         }
 
-        let socket_path = self.socket_dir.join(format!("{id}.sock"));
+        let socket_name = session
+            .socket_name
+            .clone()
+            .unwrap_or_else(|| format!("{id}.sock"));
+        let socket_path = self.socket_dir.join(socket_name);
         let runtime = match ProxyRuntime::start_with_metrics(
             RuntimeId::new(id.clone()),
             session.clone(),
@@ -950,7 +950,6 @@ impl SessionManager {
             Arc::clone(&self.ca),
             socket_path,
             self.max_connections_per_session,
-            self.connection_timeout,
             self.io_timeout,
             Arc::clone(&self.metrics),
             self.runtime_events.clone(),

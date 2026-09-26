@@ -35,11 +35,10 @@ do not match a session policy.
   resolved destination IP addresses. An allowlisted hostname may resolve to
   an internal or otherwise sensitive address.
 
-**Deployment isolation is mandatory.** Sandboxed clients must not reach
-Baffle's internal TCP listeners directly. Only the trusted operator should
-access the control socket, and clients should receive access only to their
-assigned Unix data sockets. Deployments that require destination-IP
-restrictions must also enforce suitable DNS and network-egress controls.
+Only the trusted operator should access the control socket. Give each client
+access only to its assigned Unix data socket. Baffle has no internal per-session
+TCP listeners. Deployments that require destination-IP restrictions must still
+enforce suitable DNS and network-egress controls.
 
 For CA provisioning, configuration, detailed policy behavior, secret storage,
 and isolation requirements, see the [security and deployment guide](docs/security-deployment.md)
@@ -99,18 +98,18 @@ socket directory defaults to `/run/baffle/proxies` in the example
 configuration. See
 [`examples/session.toml`](examples/session.toml) for a direct-protocol policy.
 
-For an HTTPS CONNECT session exposed through a local TCP bridge, use the
-[Cladding integration example](docs/cladding-integration.md). It uses
-`socat`; the Baffle daemon and sandboxed client must have the network and socket
-isolation described in the [deployment guide](docs/security-deployment.md).
+Consumers can connect to the assigned Unix data socket directly. The
+[Cladding integration example](docs/cladding-integration.md) uses `socat`
+outside Baffle to expose that socket through a local TCP listener. Protect the
+socket and listener, and apply the client egress controls described in the
+[deployment guide](docs/security-deployment.md).
 
 ## How it works
 
 The daemon owns a private Unix control socket and a managed certificate
 authority. A trusted orchestrator creates a session over the control socket
-and gets the path to that session's Unix data socket. The Rama runtime handles
-proxy traffic. A bounded in-process bridge connects the data socket to its
-private, pre-bound loopback TCP listener.
+and gets the path to that session's Unix data socket. Rama handles proxy
+traffic directly on the Baffle-owned Unix listener.
 
 The current implementation gives every session an immutable policy, a
 Rama runtime, credential state, and resource counters. The runtime authorizes
@@ -171,9 +170,11 @@ manual namespace test command.
 
 Baffle runs on Linux. It is a forward proxy. It does not install its
 CA into system trust stores, configure client proxy settings, or create the
-network sandbox that isolates its internal TCP listeners. The deployment must
-provide that isolation. Baffle does not change Cladding; a consumer integrates
-through the public control protocol or `baffle-client` crate.
+network sandbox. It has no internal per-session TCP listeners. The deployment
+must still prevent unauthorized direct client egress and control Baffle's
+outbound network access when its threat model requires those restrictions.
+Baffle does not change Cladding; a consumer integrates through the public
+control protocol or `baffle-client` crate.
 
 ## License
 

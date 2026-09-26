@@ -3,6 +3,8 @@ operation = "create"
 
 [session]
 persistent = false
+# Optional stable path relative to daemon.socket_dir:
+# socket_name = "cladding/github.sock"
 
 [[rules]]
 host = "example.com"
