@@ -1,10 +1,11 @@
 # Architecture
 
-**Current runtime architecture.** Baffle accepts HTTPS destinations through
-CONNECT and rejects ordinary forward-proxy requests. baffle/25 removed
-application-level destination-IP filtering; deployment egress controls own
-address restrictions. Fail-closed interception and identity binding remain
-required.
+**Current runtime architecture.** Rama is Baffle's only supported proxy
+runtime. Baffle accepts HTTPS destinations through CONNECT and rejects ordinary
+forward-proxy requests. It does not filter destination IP addresses; deployment
+DNS and egress controls own address restrictions. Required interception remains
+fail-closed, with CONNECT, TLS, and HTTP identities bound to the authorized
+destination.
 
 Baffle runs one Tokio daemon process. The daemon owns the control listener,
 session registry, CA signing key, secret store, shared CA handle, and runtime.
@@ -19,7 +20,7 @@ credential state, data socket, and counters.
 | Configuration | `src/config.rs` | Parse strict daemon and session TOML, normalize exact host rules, and reject invalid policy before provisioning. |
 | Control server and session manager | `src/control.rs` | Authenticate Unix peers, frame requests and responses, create/list/stop sessions, track leases, enforce limits, and remove sockets. |
 | Proxy runtime and bridge | `src/proxy_runtime.rs`, `src/proxy_runtime/rama.rs` | Expose the opaque session lifecycle to the daemon. Rama binds the loopback TCP listener and Unix data socket, applies connection limits and timeouts, and supervises failures. |
-| Shared policy and runtime adapter | `src/policy.rs`, `src/proxy_runtime/rama.rs` | Apply exact destination, port, mode, canonical path, TLS identity, and header-injection rules through backend-neutral request facts. |
+| Policy and Rama adapter | `src/policy.rs`, `src/proxy_runtime/rama.rs` | Map Rama requests to shared request facts and apply exact destination, port, mode, canonical path, TLS identity, and header-injection rules. |
 | CA manager | `src/ca.rs` | Validate CA files, retain daemon-owned signing material, provide cloned handles to the runtime, and export only the public certificate. |
 | Secret store | `src/secrets.rs` | Authorize symbolic secret names, validate private files, and keep values inside the owning session. |
 | Rust client | `crates/baffle-client` | Provide typed asynchronous `create`, `list`, and `stop` operations for consumers. |
@@ -56,8 +57,8 @@ port. Only CONNECT can establish an outbound destination. It checks paths for
 each request carried inside a successfully intercepted TLS connection. It
 checks the CONNECT authority against TLS SNI and each decrypted request
 authority. Only after an intercepted request passes all checks can the handler
-add its configured headers. The runtime maps its request and TLS context to
-backend-neutral facts before applying the shared session policy.
+add its configured headers. The Rama adapter maps its request and TLS context
+to shared request facts before applying the session policy.
 
 For HTTPS, `tunnel` rules permit an opaque CONNECT tunnel only when no path
 restriction or credential injection requires inspection. `intercept` rules
@@ -139,11 +140,10 @@ behavior, and fails closed when required TLS interception or authority checks
 fail. It verifies upstream TLS against the approved CONNECT hostname, disables
 TLS key logging, and enables `TCP_NODELAY` on accepted client sockets.
 
-A future runtime can replace the private module by implementing the same opaque
-startup/handle/event/shutdown contract in this boundary. It must continue to use
-the shared policy facts and daemon-owned CA/secret values. No backend selector or
-Rama type belongs in daemon configuration or the control protocol. See the
-[runtime migration note](runtime-migration.md) for the migration summary.
+Rama is the only runtime implementation. This boundary keeps Rama networking
+types out of daemon and control-protocol code. No backend selector is exposed
+in daemon configuration or the control protocol. See the [runtime migration
+note](runtime-migration.md) for the completed removal of Hudsucker.
 
 ## Failures and logging
 

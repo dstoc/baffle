@@ -14,11 +14,13 @@ owns TLS and HTTP processing, the Unix-to-TCP bridge, socket cleanup, and task
 supervision. The daemon retains ownership of policy, session leases, CA
 material, credentials, and the control protocol.
 
-A future runtime can replace the private implementation behind that boundary.
-It must consume Baffle's backend-neutral request facts and preserve the
-existing Unix socket, fail-closed interception, upstream TLS verification, and
-session lifecycle behavior. No backend selector is persisted in TOML or
-exposed through the control protocol.
+Rama is the only runtime implemented and supported in this repository. The
+daemon-facing boundary keeps Baffle's lifecycle and policy types outside the
+Rama module; the repository has no second implementation or backend selector.
+An alternative runtime, if added later, would need to preserve the existing
+Unix socket, fail-closed interception, upstream TLS verification, and session
+lifecycle behavior. No backend selector is persisted in TOML or exposed through
+the control protocol.
 
 Historical Baffle-authored code and performance comparisons remain in the
 [archived backend comparison](backend-comparison.md) and

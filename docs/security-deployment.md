@@ -33,14 +33,15 @@ inner HTTP authority must remain bound on reused HTTP/1.1 and HTTP/2
 connections. Baffle checks each request before it forwards the request or adds
 a daemon-managed credential.
 
-The target policy authorizes exact configured hostnames and ports. It defers
-DNS and destination-IP restrictions to deployment controls. An allowlisted
-hostname may resolve to private, loopback, link-local, metadata, or another
-sensitive address, even if the service presents a valid certificate for that
-hostname. A valid certificate verifies TLS identity; it does not make the
-destination address safe. Apply DNS policy and default-deny network egress
-rules when the threat model requires address containment. Ensure sandboxed
-clients cannot bypass Baffle or reach its internal listeners.
+Baffle's session policy authorizes exact configured hostnames and ports. It
+does not classify DNS answers or restrict destination IP addresses; deployment
+DNS and egress controls own those restrictions. An allowlisted hostname may
+resolve to private, loopback, link-local, metadata, or another sensitive
+address, even if the service presents a valid certificate for that hostname.
+A valid certificate verifies TLS identity; it does not make the destination
+address safe. Apply DNS policy and default-deny network egress rules when the
+threat model requires address containment. Ensure sandboxed clients cannot
+bypass Baffle or reach its internal listeners.
 
 Baffle implements HTTPS-only request admission and permits TLS on any
 configured port, including port 80. It fails closed when a rule requires

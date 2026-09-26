@@ -155,8 +155,8 @@ manual namespace test command.
   the privileged namespace test.
 - [Benchmark report](docs/benchmarking.md): current Rama benchmark commands and
   historical Hudsucker comparisons.
-- [Runtime migration note](docs/runtime-migration.md): removal of Hudsucker and
-  the seam for a future runtime implementation.
+- [Runtime migration note](docs/runtime-migration.md): the Hudsucker removal,
+  Rama-only status, and daemon-facing runtime boundary.
 - [Release review](docs/release-review.md): package, dependency, logging,
   error-handling, and credential-protection review.
 - [Original v1 proposal (historical)](docs/baffle-proposal.md): product goals,
