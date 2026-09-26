@@ -103,6 +103,53 @@ It creates the control socket and each session socket with mode `0600`.
 See the [security guide](security-deployment.md) for ownership and sandbox
 access requirements.
 
+## Command-line control
+
+The `baffle` executable provides top-level `create`, `list`, and `stop`
+commands. They use `/run/baffle/control.sock` by default. Set the global
+`--control-socket PATH` option before or after a command to select another
+socket. This client default does not change the daemon's required
+`daemon.control_socket` setting.
+
+Run the commands as `daemon.trusted_operator_uid`. The control socket has mode
+`0600`, and its parent directory has mode `0700`; other users cannot access it.
+The daemon also checks the connecting process UID. The `list` command shows
+only session IDs, lifecycle states, persistence types, and socket paths. It
+does not show policy rules or secrets. `stop SESSION_ID` stops only the
+authorized session with that ID.
+
+For a daemon in the default `create_mode = "inline"`, load a local session
+request and send it through the control protocol:
+
+```sh
+baffle create --config ./github.toml
+```
+
+The client reads `./github.toml` and validates it as a version 1 `create`
+request before sending the typed policy. The file must be readable by the
+caller. Inline creation is rejected when the daemon uses `file_only` mode.
+
+In `file_only` mode, send a nested name for an administrator-managed session
+file:
+
+```sh
+baffle create cladding/github.toml
+```
+
+The client sends only `cladding/github.toml`. The daemon resolves the name
+beneath `session_config_dir` and enforces the nested-path, ownership,
+permission, and symlink rules described above. The client does not read this
+server-side file or treat its name as a local path.
+
+An ephemeral session is leased to the running `create` command. The command
+prints the ID and data-socket path, then holds the control connection until
+Ctrl+C, SIGTERM, or other process termination. Closing the connection removes
+the session. A session file can set `persistent = true`; for that response the
+command labels the session persistent and exits without holding a lease. Use
+`baffle stop SESSION_ID` to remove it. `list` and `stop` use separate short-lived
+control connections, so stopping one session does not close another create
+command's lease.
+
 ## Session configuration
 
 Every create request uses this shape:
