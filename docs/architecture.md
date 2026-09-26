@@ -19,8 +19,9 @@ credential state, data socket, and counters.
 | CLI and daemon entry point | `src/main.rs`, `src/cli.rs`, `src/daemon.rs` | Parse `daemon` and `ca export` commands, load configuration, start the control server, and handle Ctrl-C. |
 | Configuration | `src/config.rs`, `src/config/{daemon,policy,protocol,session}.rs` | Parse strict daemon and session TOML, normalize exact host rules, and reject invalid policy before provisioning. |
 | Control server and session manager | `src/control.rs` | Authenticate Unix peers, frame requests and responses, create/list/stop sessions, track leases, enforce limits, and remove sockets. |
-| Proxy runtime | `src/proxy_runtime.rs`, `src/proxy_runtime/rama.rs` | Expose the opaque session lifecycle to the daemon. Baffle binds the Unix data socket and Rama handles accepted Unix streams with connection limits, timeouts, and supervised tasks. |
-| Policy and Rama adapter | `src/policy.rs`, `src/proxy_runtime/rama.rs` | Map Rama requests to shared request facts and apply exact destination, port, mode, canonical path, TLS identity, and header-injection rules. |
+| Proxy runtime | `src/proxy_runtime.rs`, `src/proxy_runtime/rama/mod.rs`, `src/proxy_runtime/rama/ingress.rs` | Expose the opaque session lifecycle to the daemon. Baffle binds the Unix data socket and Rama handles accepted Unix streams with connection limits, timeouts, and supervised tasks. |
+| CONNECT and TLS | `src/proxy_runtime/rama/connect.rs`, `src/proxy_runtime/rama/tls.rs` | Admit authorized CONNECT requests, preserve explicit tunnel behavior, inspect ClientHello, and verify the upstream TLS identity. |
+| HTTP policy adapter | `src/policy.rs`, `src/proxy_runtime/rama/http.rs` | Map decrypted Rama requests to shared request facts and apply exact destination, port, mode, canonical path, and header-injection rules. |
 | CA manager | `src/ca.rs` | Validate CA files, retain daemon-owned signing material, provide cloned handles to the runtime, and export only the public certificate. |
 | Secret store | `src/secrets.rs` | Authorize symbolic secret names, validate private files, and keep values inside the owning session. |
 | Rust client | `crates/baffle-client` | Provide typed asynchronous `create`, `list`, and `stop` operations for consumers. |
@@ -133,13 +134,16 @@ and bounded shutdown. The daemon and control protocol use Baffle-owned session,
 policy, CA, secret, and metrics types; they do not use Rama networking or
 request types.
 
-The private `src/proxy_runtime/rama.rs` module owns Rama-specific TLS and HTTP
-processing, direct Unix-stream ingress, and inode-safe socket cleanup. It
-accepts CONNECT only, authorizes the CONNECT authority before dialing,
-preserves explicit tunnel-only behavior, and fails closed when required TLS
-interception or authority checks fail. It verifies upstream TLS against the
-approved CONNECT hostname, disables TLS key logging, and adapts Unix streams to
-Rama's TLS relay interface.
+The private `src/proxy_runtime/rama/` modules own the Rama adapter. `mod.rs`
+keeps the opaque runtime lifecycle and immutable policy generations.
+`ingress.rs` accepts directly on the Unix socket, applies connection limits,
+and owns inode-safe socket cleanup. `connect.rs` parses and authorizes CONNECT
+requests and handles explicit tunnels. `tls.rs` inspects ClientHello and
+verifies the upstream TLS identity. `http.rs` applies the shared request policy
+and managed credential injection to decrypted HTTP/1.1 and HTTP/2 requests.
+The adapter preserves tunnel-only behavior and fails closed when TLS
+interception or authority checks fail. It disables TLS key logging and adapts
+Unix streams to Rama's TLS relay interface.
 
 Rama is the only runtime implementation. This boundary keeps Rama networking
 types out of daemon and control-protocol code. No backend selector is exposed
