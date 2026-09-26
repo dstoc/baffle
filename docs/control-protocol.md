@@ -107,6 +107,41 @@ holds the ephemeral lease in the same way as `Client::create`. Inline `create`
 is rejected in `file_only` mode. `create_from_file` is rejected in `inline`
 mode. Both modes permit authorized `list` and `stop` requests.
 
+## Baffle command-line client
+
+The `baffle` binary exposes `create`, `list`, and `stop` as top-level
+commands. It uses `/run/baffle/control.sock` unless `--control-socket PATH` is
+set. Run it as the daemon's `trusted_operator_uid`; the control socket is mode
+`0600` inside a mode-`0700` directory, and the daemon checks peer UID.
+
+For inline mode, the client reads a local TOML request and submits it through
+the typed `baffle-client` API:
+
+```sh
+baffle create --config ./github.toml
+```
+
+For `file_only` mode, pass the daemon-managed relative name:
+
+```sh
+baffle create cladding/github.toml
+```
+
+The second form sends the nested name in a `create_from_file` request. The
+daemon resolves it beneath `session_config_dir` and applies the file security
+checks. The client does not read the named file. Supplying both create forms
+is an argument error. Inline creation in `file_only` mode returns an explicit
+error that directs the operator to the server-side file form.
+
+The create command prints the ID and returned data-socket path. If the
+response is ephemeral, it labels the session `leased` and stays open until
+Ctrl+C, SIGTERM, or process termination closes its control connection. If the
+response is persistent, it labels the session `persistent` and exits; the
+session remains until `stop` or daemon shutdown. `list` prints ID, state,
+persistence type, and socket path, without policy contents. `stop SESSION_ID`
+uses its own short-lived connection and stops only the named authorized
+session. It does not close other clients' leases.
+
 Stop an owned session:
 
 ```toml

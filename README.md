@@ -90,6 +90,34 @@ installation paths. Then start Baffle:
 baffle daemon --config /etc/baffle/daemon.toml
 ```
 
+The top-level control commands use `/run/baffle/control.sock` by default. Use
+`--control-socket PATH` to select another daemon control socket:
+
+```sh
+# Inline mode: Baffle reads this file on the client and sends its TOML policy.
+baffle create --config ./github.toml
+
+# File-only mode: Baffle sends this name; the daemon loads it from its
+# configured session directory.
+baffle create cladding/github.toml
+
+baffle list
+baffle stop <session-id>
+```
+
+The control socket is private. Run these commands as the configured
+`trusted_operator_uid`, with access to the socket's mode-`0700` parent
+directory. An ephemeral create prints its session ID and data-socket path, then
+keeps running as the lease owner until Ctrl+C or process termination. A
+persistent create prints that it is persistent and returns; stop it with
+`baffle stop <session-id>`.
+
+The two create forms are exclusive. `--config` names a local file and is
+available when the daemon accepts inline creates. The positional name is
+relative to the daemon's `session_config_dir`; the client does not read that
+file. See [configuration](docs/configuration.md) and the
+[control protocol](docs/control-protocol.md) for file ownership and path rules.
+
 The Rust `client` example creates an ephemeral session and sends CONNECT for
 `example.com:443`. It confirms the tunnel response and then closes the session;
 it does not send a TLS request. For a complete HTTPS request, use the
