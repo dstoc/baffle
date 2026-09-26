@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 description = "A standalone daemon for policy-controlled HTTP and HTTPS proxies"
+license = "MIT"
 
 [workspace]
 members = ["crates/baffle-client"]
