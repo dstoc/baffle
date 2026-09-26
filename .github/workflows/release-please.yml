@@ -6,13 +6,19 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+  contents: read
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
     steps:
       - name: Create or update the release pull request
         id: release
@@ -37,4 +43,53 @@ jobs:
 
       - name: Check synchronized release versions
         if: ${{ steps.release.outputs.prs_created == 'true' }}
-        run: python3 -m unittest scripts.test_release_please_manifests
+        run: python3 -m unittest scripts.test_release_please_manifests scripts.test_publish_crates
+
+  validate-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' && github.ref == 'refs/heads/main' }}
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.release-please.outputs.sha }}
+    permissions:
+      contents: read
+
+  publish-crates:
+    needs: [release-please, validate-release]
+    if: ${{ needs.release-please.outputs.release_created == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: baffle-crates-io-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact Release Please tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          fetch-depth: 0
+
+      - name: Verify GitHub Release, tag, commit, and crate versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          RELEASE_SHA: ${{ needs.release-please.outputs.sha }}
+        run: python3 scripts/publish_crates.py verify-release --repo "$REPOSITORY" --tag "$RELEASE_TAG" --release-sha "$RELEASE_SHA"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.96
+
+      - name: Validate package contents and client package build
+        run: |
+          cargo metadata --locked --format-version 1
+          cargo package --list --locked --package baffle-client
+          cargo package --list --locked --package baffle-proxy
+          cargo publish --dry-run --locked --package baffle-client
+
+      - name: Publish both crates to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: python3 scripts/publish_crates.py publish --tag "$RELEASE_TAG"

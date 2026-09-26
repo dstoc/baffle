@@ -1,6 +1,12 @@
 name: Rust CI
 
 on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to check in a Release Please run
+        required: false
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -16,6 +22,9 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
 
       - name: Install Rama native build tools
         run: |
