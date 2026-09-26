@@ -17,17 +17,18 @@ native build packages.
 | --- | --- | --- |
 | Client and control protocol | `tests/client.rs` and `tests/control_protocol.rs` run for both features. They cover the typed client, real framed requests, errors, leases, persistence, concurrent independent sessions, and response redaction. | Control and secret-store unit tests inspect internal state. They do not count as daemon parity. |
 | Daemon lifecycle | `tests/daemon_lifecycle.rs` runs for both features. It starts the executable and checks startup, graceful shutdown, and missing CA handling. | None. |
-| Proxy policy through the daemon | `tests/daemon_proxy.rs` starts the executable, creates sessions over the framed control socket, and uses each assigned Unix socket. It checks authorized and denied hosts and ports, tunnel-only traffic, plaintext HTTP rejection, session separation, lease revocation, capacity errors, daemon-held secret entitlements, credential replacement, path denial, redaction, and inode-safe socket cleanup. | None for these HTTP/1.1 and tunnel scenarios. The local upstream CA is available only in the integration-test build; normal daemon builds retain the default trust roots. |
-| Direct proxy runtime | Not counted as end-to-end daemon parity. | `tests/proxy_runtime.rs` remains Hudsucker-only because it uses Hudsucker's HTTP/2 client types and backend-specific runtime details. It tests lower-level CONNECT, TLS, HTTP/2, revocation, limits, and socket guards. Rama has separate runtime unit tests in `src/proxy_runtime/rama.rs`; these test the adapter without launching the daemon. |
-| Secret and policy internals | The real-daemon target verifies entitlement, injection, path denial, and control-response redaction with the same fixture values under both features. | `src/control.rs`, `src/secrets.rs`, and each backend runtime have unit tests for internal checks. Unit tests alone do not establish parity. |
+| Proxy policy through the daemon | `tests/daemon_proxy.rs` starts the executable, creates sessions over the framed control socket, and uses each assigned Unix socket. It checks authorized and denied hosts and ports, tunnel-only traffic, plaintext HTTP rejection, session separation, lease revocation, capacity errors, daemon-held secret entitlements, HTTP/1.1 credential replacement, HTTP/2 stream policy, per-session secret isolation, path denial, redaction, and inode-safe socket cleanup. | None. The local upstream CA is available only in the integration-test build; normal daemon builds retain the default trust roots. |
+| Direct proxy runtime | Not counted as end-to-end daemon parity. | `tests/proxy_runtime.rs` runs shared live CONNECT, TLS, one-byte ClientHello fragmentation with a bounded close, tunnel-only, and upstream TLS denial fixtures under both features. Hudsucker-only runtime cases cover HTTP/1.1 reuse and HTTP/2 path and authority checks. Rama has live HTTP/2, path, credential, certificate, fragmentation, and resource-limit tests in `src/proxy_runtime/rama.rs`; these test the adapter without launching the daemon. |
+| Secret and policy internals | The real-daemon target verifies entitlement, injection, path denial, HTTP/2 stream enforcement, session secret isolation, and control-response redaction under both features. | `src/control.rs`, `src/secrets.rs`, and each backend runtime have unit tests for internal checks. Unit tests alone do not establish parity. |
 | Documentation examples | `tests/documentation.rs` parses the checked-in TOML examples. `cargo check --examples` compiles client examples under both backend selections. | None. |
 
-The only Cargo integration target with a backend gate is `proxy_runtime`, which
-requires `backend-hudsucker` for the direct Hudsucker-specific cases described
-above. The `client`, `daemon_lifecycle`, and `control_protocol` targets run for
-both backends. The three Rust examples also compile for both backends. Unit
-tests inside backend adapters remain backend-specific and do not replace the
-shared real-daemon target.
+The `proxy_runtime` integration target runs under both backend features. Its
+shared CONNECT, TLS, and fragmentation fixtures exercise each live proxy. The
+Hudsucker-specific protocol cases are feature-gated, and Rama has backend
+runtime tests in `src/proxy_runtime/rama.rs`. The `client`, `daemon_lifecycle`,
+`control_protocol`, and `daemon_proxy` targets run for both backends. The three
+Rust examples also compile for both backends. Adapter unit tests do not replace
+the shared real-daemon target.
 
 The backends use different denial status codes for plaintext forward requests.
 Hudsucker returns 403. Rama rejects the non-CONNECT request with 400. Shared

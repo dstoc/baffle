@@ -10,6 +10,8 @@ use std::{
 };
 
 use common::{DaemonProcess, socket_from};
+use h2::client;
+use http::{Request, StatusCode, Version, header::AUTHORIZATION};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
@@ -310,6 +312,264 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
     drop(upstream);
 }
 
+#[tokio::test]
+async fn real_daemon_isolates_injected_credentials_across_http2_streams_and_sessions() {
+    let upstream_directory = tempfile::tempdir().expect("upstream fixture directory should exist");
+    let (upstream_root, upstream_certificate, upstream_key) =
+        write_upstream_certificates(upstream_directory.path());
+    let mut first_upstream =
+        spawn_http2_tls_origin(upstream_certificate.clone(), upstream_key.clone()).await;
+    let mut second_upstream = spawn_http2_tls_origin(upstream_certificate, upstream_key).await;
+    let daemon = DaemonProcess::start_with_upstream_ca(
+        4,
+        &["session-one-token", "session-two-token"],
+        Some(&upstream_root),
+    );
+    daemon.write_secret("session-one-token", "session-one-secret-91");
+    daemon.write_secret("session-two-token", "session-two-secret-27");
+
+    let (_, first_created) = daemon.request(&injected_session(
+        "localhost",
+        first_upstream.address.port(),
+        "session-one-token",
+    ));
+    let (_, second_created) = daemon.request(&injected_session(
+        "localhost",
+        second_upstream.address.port(),
+        "session-two-token",
+    ));
+    assert_eq!(first_created["ok"], true);
+    assert_eq!(second_created["ok"], true);
+    let first_socket = socket_from(&first_created);
+    let second_socket = socket_from(&second_created);
+    assert_ne!(first_socket, second_socket);
+
+    if !cfg!(baffle_integration_test) {
+        // The upstream TLS trust hook is compiled only for CI's integration
+        // build. The regular developer test still creates separate sessions.
+        return;
+    }
+
+    let first_tls = connect_intercepted_tls_with_alpn(
+        &first_socket,
+        &format!("localhost:{}", first_upstream.address.port()),
+        &daemon.ca_certificate,
+        b"h2",
+    )
+    .await;
+    let second_tls = connect_intercepted_tls_with_alpn(
+        &second_socket,
+        &format!("localhost:{}", second_upstream.address.port()),
+        &daemon.ca_certificate,
+        b"h2",
+    )
+    .await;
+    assert_eq!(
+        first_tls.get_ref().1.alpn_protocol(),
+        Some(b"h2".as_slice()),
+        "the first live proxy connection should negotiate HTTP/2"
+    );
+    assert_eq!(
+        second_tls.get_ref().1.alpn_protocol(),
+        Some(b"h2".as_slice()),
+        "the second live proxy connection should negotiate HTTP/2"
+    );
+
+    let (first_sender, first_connection) = client::handshake(first_tls)
+        .await
+        .expect("first HTTP/2 client should connect to the live proxy");
+    let (second_sender, second_connection) = client::handshake(second_tls)
+        .await
+        .expect("second HTTP/2 client should connect to the live proxy");
+    let first_driver = tokio::spawn(first_connection);
+    let second_driver = tokio::spawn(second_connection);
+
+    let mut first_allowed_a = first_sender
+        .clone()
+        .ready()
+        .await
+        .expect("first allowed stream should be ready");
+    let mut first_allowed_b = first_sender
+        .clone()
+        .ready()
+        .await
+        .expect("second allowed stream should be ready");
+    let mut first_denied = first_sender
+        .clone()
+        .ready()
+        .await
+        .expect("first denied stream should be ready");
+    let mut second_allowed_a = second_sender
+        .clone()
+        .ready()
+        .await
+        .expect("third allowed stream should be ready");
+    let mut second_allowed_b = second_sender
+        .clone()
+        .ready()
+        .await
+        .expect("fourth allowed stream should be ready");
+    let mut second_denied = second_sender
+        .clone()
+        .ready()
+        .await
+        .expect("second denied stream should be ready");
+
+    let make_request = |port: u16, path: &str, attacker_value: &str| {
+        Request::builder()
+            .method("GET")
+            .version(Version::HTTP_2)
+            .uri(format!("https://localhost:{port}/{path}"))
+            .header(AUTHORIZATION, attacker_value)
+            .body(())
+            .expect("HTTP/2 request should build")
+    };
+    let (first_a, _) = first_allowed_a
+        .send_request(
+            make_request(
+                first_upstream.address.port(),
+                "allowed",
+                "Bearer attacker-first-a",
+            ),
+            true,
+        )
+        .expect("first session's first allowed stream should be sent");
+    let (first_b, _) = first_allowed_b
+        .send_request(
+            make_request(
+                first_upstream.address.port(),
+                "allowed",
+                "Bearer attacker-first-b",
+            ),
+            true,
+        )
+        .expect("first session's second allowed stream should be sent");
+    let (first_rejected, _) = first_denied
+        .send_request(
+            make_request(
+                first_upstream.address.port(),
+                "forbidden",
+                "Bearer attacker-first-denied",
+            ),
+            true,
+        )
+        .expect("first session's denied stream should be sent");
+    let (second_a, _) = second_allowed_a
+        .send_request(
+            make_request(
+                second_upstream.address.port(),
+                "allowed",
+                "Bearer attacker-second-a",
+            ),
+            true,
+        )
+        .expect("second session's first allowed stream should be sent");
+    let (second_b, _) = second_allowed_b
+        .send_request(
+            make_request(
+                second_upstream.address.port(),
+                "allowed",
+                "Bearer attacker-second-b",
+            ),
+            true,
+        )
+        .expect("second session's second allowed stream should be sent");
+    let (second_rejected, _) = second_denied
+        .send_request(
+            make_request(
+                second_upstream.address.port(),
+                "forbidden",
+                "Bearer attacker-second-denied",
+            ),
+            true,
+        )
+        .expect("second session's denied stream should be sent");
+
+    let (first_a, first_b, first_rejected, second_a, second_b, second_rejected) = tokio::join!(
+        timeout(Duration::from_secs(4), first_a),
+        timeout(Duration::from_secs(4), first_b),
+        timeout(Duration::from_secs(4), first_rejected),
+        timeout(Duration::from_secs(4), second_a),
+        timeout(Duration::from_secs(4), second_b),
+        timeout(Duration::from_secs(4), second_rejected),
+    );
+    for response in [first_a, first_b, second_a, second_b] {
+        assert_eq!(
+            response
+                .expect("allowed HTTP/2 response should arrive")
+                .expect("allowed HTTP/2 response should be readable")
+                .status(),
+            StatusCode::OK
+        );
+    }
+    for response in [first_rejected, second_rejected] {
+        assert_eq!(
+            response
+                .expect("denied HTTP/2 response should arrive")
+                .expect("denied HTTP/2 response should be readable")
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    let mut first_observed = Vec::new();
+    for _ in 0..2 {
+        first_observed.push(
+            timeout(Duration::from_secs(3), first_upstream.requests.recv())
+                .await
+                .expect("first session's allowed streams should reach its origin")
+                .expect("first HTTP/2 origin should remain active"),
+        );
+    }
+    assert!(
+        timeout(Duration::from_millis(250), first_upstream.requests.recv())
+            .await
+            .is_err(),
+        "denied streams from the first session must not reach its origin"
+    );
+    for request in &first_observed {
+        assert_eq!(
+            request.path, "/allowed",
+            "only allowed paths may reach the first origin"
+        );
+        assert!(!request.authorization.contains("attacker-"));
+        assert_eq!(
+            request.authorization, "Bearer session-one-secret-91",
+            "the first session must inject its own secret: {request:?}"
+        );
+    }
+    let mut second_observed = Vec::new();
+    for _ in 0..2 {
+        second_observed.push(
+            timeout(Duration::from_secs(3), second_upstream.requests.recv())
+                .await
+                .expect("second session's allowed streams should reach its origin")
+                .expect("second HTTP/2 origin should remain active"),
+        );
+    }
+    assert!(
+        timeout(Duration::from_millis(250), second_upstream.requests.recv())
+            .await
+            .is_err(),
+        "denied streams from the second session must not reach its origin"
+    );
+    for request in &second_observed {
+        assert_eq!(
+            request.path, "/allowed",
+            "only allowed paths may reach the second origin"
+        );
+        assert!(!request.authorization.contains("attacker-"));
+        assert_eq!(
+            request.authorization, "Bearer session-two-secret-27",
+            "the second session must inject its own secret: {request:?}"
+        );
+    }
+
+    drop((first_sender, second_sender));
+    first_driver.abort();
+    second_driver.abort();
+}
+
 struct EchoOrigin {
     address: std::net::SocketAddr,
     accepted: mpsc::UnboundedReceiver<()>,
@@ -360,6 +620,24 @@ struct TlsOrigin {
 }
 
 impl Drop for TlsOrigin {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[derive(Debug)]
+struct Http2ObservedRequest {
+    path: String,
+    authorization: String,
+}
+
+struct Http2TlsOrigin {
+    address: std::net::SocketAddr,
+    requests: mpsc::UnboundedReceiver<Http2ObservedRequest>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for Http2TlsOrigin {
     fn drop(&mut self) {
         self.task.abort();
     }
@@ -435,6 +713,80 @@ async fn spawn_tls_origin(certificate: Vec<u8>, key: Vec<u8>) -> TlsOrigin {
     }
 }
 
+async fn spawn_http2_tls_origin(certificate: Vec<u8>, key: Vec<u8>) -> Http2TlsOrigin {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("HTTP/2 TLS origin should bind");
+    let address = listener
+        .local_addr()
+        .expect("HTTP/2 origin address should exist");
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("TLS versions should be available")
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![rustls::pki_types::CertificateDer::from(certificate)],
+        rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(key)),
+    )
+    .expect("HTTP/2 origin certificate should be accepted");
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let (requests_tx, requests) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let acceptor = acceptor.clone();
+            let requests = requests_tx.clone();
+            tokio::spawn(async move {
+                let Ok(Ok(tls)) = timeout(Duration::from_secs(3), acceptor.accept(stream)).await
+                else {
+                    return;
+                };
+                if tls.get_ref().1.alpn_protocol() != Some(b"h2".as_slice()) {
+                    return;
+                }
+                let Ok(mut connection) = h2::server::handshake(tls).await else {
+                    return;
+                };
+                while let Some(Ok((request, mut respond))) = connection.accept().await {
+                    let path = request.uri().path().to_owned();
+                    let authorization = request
+                        .headers()
+                        .get(AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_owned();
+                    if requests
+                        .send(Http2ObservedRequest {
+                            path,
+                            authorization,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let response = http::Response::builder()
+                        .status(StatusCode::OK)
+                        .body(())
+                        .expect("HTTP/2 origin response should build");
+                    if respond.send_response(response, true).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    Http2TlsOrigin {
+        address,
+        requests,
+        task,
+    }
+}
+
 async fn connect_tunnel(socket: &Path, authority: &str) -> UnixStream {
     let mut stream = UnixStream::connect(socket)
         .await
@@ -490,6 +842,15 @@ async fn connect_intercepted_tls(
     authority: &str,
     ca_path: &Path,
 ) -> tokio_rustls::client::TlsStream<UnixStream> {
+    connect_intercepted_tls_with_alpn(socket, authority, ca_path, b"").await
+}
+
+async fn connect_intercepted_tls_with_alpn(
+    socket: &Path,
+    authority: &str,
+    ca_path: &Path,
+    alpn: &[u8],
+) -> tokio_rustls::client::TlsStream<UnixStream> {
     let stream = connect_tunnel(socket, authority).await;
     let mut roots = rustls::RootCertStore::empty();
     let pem = fs::read(ca_path).expect("daemon CA certificate should be readable");
@@ -500,13 +861,16 @@ async fn connect_intercepted_tls(
             certificate.contents,
         ))
         .expect("daemon CA should be a valid TLS trust anchor");
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .expect("TLS versions should be available")
     .with_root_certificates(roots)
     .with_no_client_auth();
+    if !alpn.is_empty() {
+        config.alpn_protocols = vec![alpn.to_vec()];
+    }
     let connector = TlsConnector::from(Arc::new(config));
     timeout(
         Duration::from_secs(4),
