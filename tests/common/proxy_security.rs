@@ -1,6 +1,6 @@
 //! Backend-neutral fixtures for tests that drive a live Baffle proxy runtime.
 
-use std::{error::Error, fs, net::SocketAddr, sync::Arc, time::Duration};
+use std::{error::Error, fs, path::Path, sync::Arc, time::Duration};
 
 use baffle_proxy::{
     ca::ManagedCa,
@@ -10,7 +10,7 @@ use baffle_proxy::{
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::TcpStream,
+    net::UnixStream,
     sync::mpsc,
     time::timeout,
 };
@@ -96,10 +96,10 @@ pub(crate) fn tls_client_config(ca: &ManagedCa, alpn: &[u8]) -> Arc<ClientConfig
 }
 
 pub(crate) async fn open_connect_tunnel(
-    proxy_address: SocketAddr,
+    proxy_path: &Path,
     authority: &str,
-) -> Result<TcpStream, Box<dyn Error + Send + Sync>> {
-    let (status, stream) = open_connect_response(proxy_address, authority).await?;
+) -> Result<UnixStream, Box<dyn Error + Send + Sync>> {
+    let (status, stream) = open_connect_response(proxy_path, authority).await?;
     if !status.starts_with("HTTP/1.1 200") {
         return Err(format!("CONNECT failed: {status:?}").into());
     }
@@ -107,10 +107,10 @@ pub(crate) async fn open_connect_tunnel(
 }
 
 pub(crate) async fn open_connect_response(
-    proxy_address: SocketAddr,
+    proxy_path: &Path,
     authority: &str,
-) -> Result<(String, TcpStream), Box<dyn Error + Send + Sync>> {
-    let mut stream = TcpStream::connect(proxy_address).await?;
+) -> Result<(String, UnixStream), Box<dyn Error + Send + Sync>> {
+    let mut stream = UnixStream::connect(proxy_path).await?;
     stream
         .write_all(format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes())
         .await?;
@@ -128,13 +128,13 @@ pub(crate) async fn open_connect_response(
 }
 
 pub(crate) async fn connect_intercepted_tls(
-    proxy_address: SocketAddr,
+    proxy_path: &Path,
     authority: &str,
     server_name: &str,
     ca: &ManagedCa,
     alpn: &[u8],
-) -> Result<TlsStream<TcpStream>, Box<dyn Error + Send + Sync>> {
-    let stream = open_connect_tunnel(proxy_address, authority).await?;
+) -> Result<TlsStream<UnixStream>, Box<dyn Error + Send + Sync>> {
+    let stream = open_connect_tunnel(proxy_path, authority).await?;
     let server_name = ServerName::try_from(server_name.to_owned())?;
     let tls = timeout(
         Duration::from_secs(3),
@@ -160,8 +160,8 @@ where
     Ok(status)
 }
 
-pub(crate) async fn assert_denied(address: SocketAddr, method: &str, target: &str) {
-    let mut stream = TcpStream::connect(address)
+pub(crate) async fn assert_denied(path: &Path, method: &str, target: &str) {
+    let mut stream = UnixStream::connect(path)
         .await
         .expect("proxy listener should accept connections");
     let request =

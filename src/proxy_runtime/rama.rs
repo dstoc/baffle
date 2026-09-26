@@ -1,24 +1,29 @@
 //! Rama implementation of the proxy-runtime boundary.
 //!
-//! The backend keeps Baffle's private Unix socket and loopback TCP bridge. It
+//! The backend serves directly from Baffle's private Unix socket. It
 //! accepts only CONNECT requests, authorizes the CONNECT authority before
 //! dialing, and fails closed if TLS inspection cannot be established.
 
 use std::{
+    collections::HashMap,
+    ffi::CString,
     fs, io,
-    net::SocketAddr,
-    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
-    path::{Path, PathBuf},
-    sync::Arc,
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::{ffi::OsStrExt, fs::PermissionsExt},
+    },
+    path::{Component, Path, PathBuf},
+    pin::Pin,
+    sync::{Arc, Mutex, OnceLock},
+    task::{Context, Poll},
     time::Duration,
 };
 
-#[cfg(feature = "benchmark-tcp-nodelay")]
-use super::benchmark_tcp_nodelay_enabled;
 use super::{ProxyRuntimeError, ProxyRuntimeEvent, RuntimeId};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rama::{
     Layer, Service,
+    extensions::{Extensions, ExtensionsRef},
     http::proxy::mitm::HttpMitmRelay,
     io::{BridgeIo, peek::PeekTimeoutPolicy},
     rt::Executor,
@@ -34,8 +39,8 @@ use rama::{
     },
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpListener, TcpStream, UnixListener},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
+    net::{TcpStream, UnixListener},
     sync::Semaphore,
     task::{AbortHandle, JoinHandle, JoinSet},
 };
@@ -51,16 +56,12 @@ use crate::{
 
 const MAX_CONNECT_HEADER_BYTES: usize = 16 * 1024;
 
-/// An opaque proxy session with a private Unix socket and loopback listener.
+/// An opaque proxy session served directly on its private Unix socket.
 pub struct ProxyRuntime {
     runtime_id: RuntimeId,
-    local_addr: SocketAddr,
     socket_path: PathBuf,
-    proxy_cancellation: CancellationToken,
-    bridge_ingress_shutdown: CancellationToken,
-    bridge_force_cancellation: CancellationToken,
-    proxy_abort: AbortHandle,
-    bridge_abort: AbortHandle,
+    cancellation: CancellationToken,
+    task_abort: AbortHandle,
     task: JoinHandle<()>,
     metrics: Arc<Metrics>,
 }
@@ -68,9 +69,8 @@ pub struct ProxyRuntime {
 impl ProxyRuntime {
     /// Bind and start one runtime from a validated session configuration.
     ///
-    /// Success means both the private Unix socket and loopback TCP listener are
-    /// bound. The returned handle exposes the listener details and owns all
-    /// runtime tasks until bounded shutdown or cancellation on drop.
+    /// Success means the private Unix socket is bound. The returned handle owns
+    /// all runtime tasks until bounded shutdown or cancellation on drop.
     pub async fn start(
         runtime_id: RuntimeId,
         session: SessionConfig,
@@ -86,7 +86,6 @@ impl ProxyRuntime {
             ca,
             socket_path,
             max_connections,
-            Duration::from_secs(5),
             Duration::from_secs(30),
             Arc::new(Metrics::default()),
             events,
@@ -102,78 +101,33 @@ impl ProxyRuntime {
         ca: Arc<ManagedCa>,
         socket_path: PathBuf,
         max_connections: usize,
-        connection_timeout: Duration,
         io_timeout: Duration,
         metrics: Arc<Metrics>,
         events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
     ) -> Result<Self, ProxyRuntimeError> {
-        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .map_err(ProxyRuntimeError::Bind)?;
-        let local_addr = listener.local_addr().map_err(ProxyRuntimeError::Bind)?;
         let (unix_listener, socket_guard) =
             bind_unix_listener(&socket_path).map_err(ProxyRuntimeError::BindSocket)?;
 
         let policy = Arc::new(SessionPolicy::compile(&session));
-        let proxy_cancellation = CancellationToken::new();
-        let bridge_ingress_shutdown = CancellationToken::new();
-        let bridge_force_cancellation = CancellationToken::new();
+        let cancellation = CancellationToken::new();
         let mut proxy_task = tokio::spawn(run_proxy(
-            listener,
+            unix_listener,
+            socket_guard,
             ProxySettings {
                 policy,
                 secrets,
                 ca,
                 permits: Arc::new(Semaphore::new(max_connections)),
-                cancellation: proxy_cancellation.clone(),
+                cancellation: cancellation.clone(),
                 metrics: Arc::clone(&metrics),
                 io_timeout,
             },
         ));
-        let mut bridge_task = tokio::spawn(run_bridge(
-            unix_listener,
-            socket_guard,
-            BridgeSettings {
-                upstream: local_addr,
-                permits: Arc::new(Semaphore::new(max_connections)),
-                connection_timeout,
-                io_timeout,
-                ingress_shutdown: bridge_ingress_shutdown.clone(),
-                force_cancellation: bridge_force_cancellation.clone(),
-                metrics: Arc::clone(&metrics),
-            },
-        ));
-        let proxy_abort = proxy_task.abort_handle();
-        let bridge_abort = bridge_task.abort_handle();
-        let supervisor_proxy_cancel = proxy_cancellation.clone();
-        let supervisor_bridge_ingress_shutdown = bridge_ingress_shutdown.clone();
-        let supervisor_bridge_force_cancel = bridge_force_cancellation.clone();
+        let task_abort = proxy_task.abort_handle();
         let event_id = runtime_id.clone();
-        let task_metrics = Arc::clone(&metrics);
         let task = tokio::spawn(async move {
-            let (proxy_result, bridge_result) = tokio::select! {
-                result = &mut proxy_task => {
-                    supervisor_bridge_ingress_shutdown.cancel();
-                    let proxy_result = map_proxy_join(result);
-                    if proxy_result.is_err() {
-                        supervisor_bridge_force_cancel.cancel();
-                    }
-                    supervisor_proxy_cancel.cancel();
-                    (proxy_result, map_bridge_join(bridge_task.await))
-                }
-                result = &mut bridge_task => {
-                    let bridge_result = map_bridge_join(result);
-                    if bridge_result.is_err() {
-                        supervisor_bridge_force_cancel.cancel();
-                        proxy_task.abort();
-                    }
-                    supervisor_proxy_cancel.cancel();
-                    (map_proxy_join(proxy_task.await), bridge_result)
-                }
-            };
-            let result = proxy_result.and(bridge_result);
+            let result = map_proxy_join((&mut proxy_task).await);
             if result.is_err() {
-                task_metrics.bridge_failure();
                 tracing::error!(
                     event = "session_lifecycle",
                     session_id = %event_id.as_str(),
@@ -189,13 +143,9 @@ impl ProxyRuntime {
 
         Ok(Self {
             runtime_id,
-            local_addr,
             socket_path,
-            proxy_cancellation,
-            bridge_ingress_shutdown,
-            bridge_force_cancellation,
-            proxy_abort,
-            bridge_abort,
+            cancellation,
+            task_abort,
             task,
             metrics,
         })
@@ -203,11 +153,6 @@ impl ProxyRuntime {
 
     pub fn runtime_id(&self) -> &RuntimeId {
         &self.runtime_id
-    }
-
-    /// Return the address of the bound loopback listener.
-    pub fn local_addr(&self) -> SocketAddr {
-        self.local_addr
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -222,13 +167,10 @@ impl ProxyRuntime {
             state = "stopping",
             "Rama proxy session shutdown started"
         );
-        self.bridge_ingress_shutdown.cancel();
-        self.proxy_cancellation.cancel();
+        self.cancellation.cancel();
         if tokio::time::timeout(grace, &mut self.task).await.is_err() {
             self.metrics.forced_shutdown();
-            self.bridge_force_cancellation.cancel();
-            self.proxy_abort.abort();
-            self.bridge_abort.abort();
+            self.task_abort.abort();
             let _ = (&mut self.task).await;
         }
     }
@@ -236,13 +178,10 @@ impl ProxyRuntime {
 
 impl Drop for ProxyRuntime {
     fn drop(&mut self) {
-        self.bridge_ingress_shutdown.cancel();
-        self.bridge_force_cancellation.cancel();
-        self.proxy_cancellation.cancel();
+        self.cancellation.cancel();
         // If the session owner is cancelled while awaiting graceful shutdown,
-        // do not detach active proxy or bridge tasks.
-        self.proxy_abort.abort();
-        self.bridge_abort.abort();
+        // do not detach the proxy connection tasks.
+        self.task_abort.abort();
     }
 }
 
@@ -250,16 +189,6 @@ fn map_proxy_join(
     result: Result<Result<(), ProxyRuntimeError>, tokio::task::JoinError>,
 ) -> Result<(), ProxyRuntimeError> {
     result.map_err(|error| ProxyRuntimeError::Task(error.to_string()))?
-}
-
-fn map_bridge_join(
-    result: Result<io::Result<()>, tokio::task::JoinError>,
-) -> Result<(), ProxyRuntimeError> {
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(ProxyRuntimeError::Bridge(error)),
-        Err(error) => Err(ProxyRuntimeError::Task(error.to_string())),
-    }
 }
 
 struct ProxySettings {
@@ -273,7 +202,8 @@ struct ProxySettings {
 }
 
 async fn run_proxy(
-    listener: TcpListener,
+    listener: UnixListener,
+    socket_guard: UnixSocketGuard,
     settings: ProxySettings,
 ) -> Result<(), ProxyRuntimeError> {
     let ProxySettings {
@@ -295,8 +225,8 @@ async fn run_proxy(
                     return Err(ProxyRuntimeError::Task(error.to_string()));
                 }
             }
-            accepted = accept_client(&listener) => {
-                let (stream, _) = accepted?;
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.map_err(ProxyRuntimeError::BindSocket)?;
                 let permit = match Arc::clone(&permits).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => continue,
@@ -317,42 +247,22 @@ async fn run_proxy(
         }
     }
     drop(listener);
+    drop(socket_guard);
     while connections.join_next().await.is_some() {}
     Ok(())
 }
 
-/// Accept a client connection and configure its TCP behavior before a task
-/// can read CONNECT, peek at TLS, or handle HTTP.
-async fn accept_client(
-    listener: &TcpListener,
-) -> Result<(TcpStream, SocketAddr), ProxyRuntimeError> {
-    let (stream, peer) = listener.accept().await.map_err(ProxyRuntimeError::Bind)?;
-    configure_accepted_client_socket(&stream)?;
-    Ok((stream, peer))
-}
-
-fn configure_accepted_client_socket(stream: &TcpStream) -> Result<(), ProxyRuntimeError> {
-    #[cfg(feature = "benchmark-tcp-nodelay")]
-    let enabled = benchmark_tcp_nodelay_enabled("proxy-ingress");
-    #[cfg(not(feature = "benchmark-tcp-nodelay"))]
-    let enabled = true;
-
-    if enabled {
-        stream
-            .set_nodelay(true)
-            .map_err(ProxyRuntimeError::SocketOption)?;
-    }
-    Ok(())
-}
-
-async fn handle_client(
-    mut client: TcpStream,
+async fn handle_client<S>(
+    mut client: S,
     policy: Arc<SessionPolicy>,
     secrets: Arc<ResolvedSecrets>,
     ca: Arc<ManagedCa>,
     metrics: Arc<Metrics>,
     io_timeout: Duration,
-) -> Result<(), ProxyRuntimeError> {
+) -> Result<(), ProxyRuntimeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let parsed = match tokio::time::timeout(io_timeout, read_connect_request(&mut client)).await {
         Ok(Ok(parsed)) => parsed,
         Ok(Err(error)) => {
@@ -398,9 +308,9 @@ async fn handle_client(
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await
-        .map_err(ProxyRuntimeError::Bridge)?;
+        .map_err(|error| ProxyRuntimeError::Run(error.to_string()))?;
 
-    let client = RamaTcpStream::new(client);
+    let client = RamaIo::new(client);
     let (client, client_hello) = match peek_client_hello_from_input_with_timeout_policy(
         client,
         Some(io_timeout),
@@ -503,6 +413,56 @@ async fn handle_client(
         .serve(decrypted)
         .await
         .map_err(|error| ProxyRuntimeError::Run(error.to_string()))
+}
+
+/// Add Rama's connection extensions to a generic Tokio stream. Its TLS
+/// relays require this interface even when ingress is a Unix-domain stream.
+struct RamaIo<S> {
+    inner: S,
+    extensions: Extensions,
+}
+
+impl<S> RamaIo<S> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            extensions: Extensions::new(),
+        }
+    }
+}
+
+impl<S> ExtensionsRef for RamaIo<S> {
+    fn extensions(&self) -> &Extensions {
+        &self.extensions
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for RamaIo<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(context, buffer)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for RamaIo<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(context, buffer)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(context)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(context)
+    }
 }
 
 #[cfg(test)]
@@ -696,12 +656,15 @@ fn format_injected_secret(injection: &HeaderInjection, secret: &SecretValue) -> 
     })
 }
 
-async fn handle_tunnel(
-    mut client: TcpStream,
+async fn handle_tunnel<S>(
+    mut client: S,
     destination: Destination,
     io_timeout: Duration,
     metrics: &Metrics,
-) -> Result<(), ProxyRuntimeError> {
+) -> Result<(), ProxyRuntimeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let upstream = match tokio::time::timeout(
         io_timeout,
         TcpStream::connect((destination.host.as_str(), destination.port)),
@@ -727,12 +690,12 @@ async fn handle_tunnel(
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await
-        .map_err(ProxyRuntimeError::Bridge)?;
+        .map_err(|error| ProxyRuntimeError::Run(error.to_string()))?;
     let mut upstream = upstream;
     copy_bidirectional_with_timeout(&mut client, &mut upstream, io_timeout)
         .await
         .map(|_| ())
-        .map_err(ProxyRuntimeError::Bridge)
+        .map_err(|error| ProxyRuntimeError::Run(error.to_string()))
 }
 
 async fn copy_bidirectional_with_timeout<A, B>(
@@ -788,7 +751,10 @@ struct ParsedConnect {
     has_body: bool,
 }
 
-async fn read_connect_request(stream: &mut TcpStream) -> io::Result<ParsedConnect> {
+async fn read_connect_request<S>(stream: &mut S) -> io::Result<ParsedConnect>
+where
+    S: AsyncRead + Unpin,
+{
     let mut bytes = Vec::with_capacity(1024);
     while bytes.len() < MAX_CONNECT_HEADER_BYTES {
         let byte = stream.read_u8().await?;
@@ -860,35 +826,67 @@ async fn read_connect_request(stream: &mut TcpStream) -> io::Result<ParsedConnec
 
 struct UnixSocketGuard {
     path: PathBuf,
+    parent: OwnedFd,
+    name: CString,
     device: u64,
     inode: u64,
+    _created_directories: CreatedDirectorySet,
 }
 
 impl UnixSocketGuard {
     fn bind(path: &Path) -> io::Result<(UnixListener, Self)> {
-        match fs::symlink_metadata(path) {
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "socket path exists",
-                ));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error),
-        }
-        let listener = UnixListener::bind(path)?;
-        let metadata = fs::symlink_metadata(path)?;
-        if !metadata.file_type().is_socket() {
-            return Err(io::Error::other("bound path is not a Unix socket"));
-        }
-        let guard = Self {
-            path: path.to_path_buf(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
         };
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        let metadata = fs::symlink_metadata(path)?;
-        if !guard.matches(&metadata) || metadata.permissions().mode() & 0o777 != 0o600 {
+        if absolute.as_os_str().as_bytes().len() >= 108 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Unix socket path is too long",
+            ));
+        }
+        let name = CString::new(
+            absolute
+                .file_name()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing socket name"))?
+                .as_bytes(),
+        )
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid socket name"))?;
+        let (parent, created_directories, normalized) = open_socket_parent(&absolute)?;
+        if stat_at(parent.as_raw_fd(), &name)?.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "socket path exists",
+            ));
+        }
+        // Binding through the held directory FD makes the final component
+        // directory-confined even if an ancestor is renamed during setup.
+        let bind_path = PathBuf::from(format!(
+            "/proc/self/fd/{}/{}",
+            parent.as_raw_fd(),
+            name.to_string_lossy()
+        ));
+        let listener = UnixListener::bind(&bind_path)?;
+        let identity = stat_at(parent.as_raw_fd(), &name)?
+            .ok_or_else(|| io::Error::other("bound Unix socket disappeared"))?;
+        let guard = Self {
+            path: normalized,
+            parent,
+            name,
+            device: identity.st_dev as u64,
+            inode: identity.st_ino as u64,
+            _created_directories: created_directories,
+        };
+        fs::set_permissions(&bind_path, fs::Permissions::from_mode(0o600))?;
+        let current = stat_at(guard.parent.as_raw_fd(), &guard.name)?;
+        if !current
+            .as_ref()
+            .is_some_and(|metadata| guard.matches(metadata))
+            || current
+                .as_ref()
+                .is_some_and(|metadata| metadata.st_mode & 0o777 != 0o600)
+        {
             return Err(io::Error::other(
                 "bound Unix socket identity or permissions changed",
             ));
@@ -896,92 +894,269 @@ impl UnixSocketGuard {
         Ok((listener, guard))
     }
 
-    fn matches(&self, metadata: &fs::Metadata) -> bool {
-        metadata.file_type().is_socket()
-            && metadata.dev() == self.device
-            && metadata.ino() == self.inode
+    fn matches(&self, metadata: &libc::stat) -> bool {
+        metadata.st_mode & libc::S_IFMT == libc::S_IFSOCK
+            && metadata.st_dev == self.device
+            && metadata.st_ino == self.inode
     }
 }
 
 impl Drop for UnixSocketGuard {
     fn drop(&mut self) {
-        if let Ok(metadata) = fs::symlink_metadata(&self.path)
+        if let Ok(Some(metadata)) = stat_at(self.parent.as_raw_fd(), &self.name)
             && self.matches(&metadata)
-            && let Err(error) = fs::remove_file(&self.path)
-            && error.kind() != io::ErrorKind::NotFound
+            && unsafe { libc::unlinkat(self.parent.as_raw_fd(), self.name.as_ptr(), 0) } == -1
         {
-            tracing::warn!(path = %self.path.display(), %error, "failed to remove Rama proxy Unix socket");
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(path = %self.path.display(), %error, "failed to remove Rama proxy Unix socket");
+            }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct DirectoryKey {
+    device: u64,
+    inode: u64,
+}
+
+struct DirectoryRecord {
+    parent: OwnedFd,
+    name: CString,
+    device: u64,
+    inode: u64,
+    path: PathBuf,
+    created_by_baffle: bool,
+    leases: usize,
+}
+
+static DIRECTORY_REGISTRY: OnceLock<Mutex<HashMap<DirectoryKey, DirectoryRecord>>> =
+    OnceLock::new();
+static SOCKET_PARENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct CreatedDirectorySet(Vec<DirectoryKey>);
+
+impl Drop for CreatedDirectorySet {
+    fn drop(&mut self) {
+        // Provisioning holds this lock while it walks and registers directory
+        // descriptors. Serialize removal with that walk so a newly opened
+        // directory cannot be unlinked before its lease is registered.
+        let path_lock = SOCKET_PARENT_LOCK.get_or_init(|| Mutex::new(()));
+        let _path_lock = path_lock.lock().unwrap_or_else(|error| error.into_inner());
+        let registry = DIRECTORY_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut registry = registry.lock().unwrap_or_else(|error| error.into_inner());
+        while let Some(key) = self.0.pop() {
+            let Some(record) = registry.get_mut(&key) else {
+                continue;
+            };
+            record.leases = record.leases.saturating_sub(1);
+            if record.leases != 0 {
+                continue;
+            }
+            if !record.created_by_baffle {
+                registry.remove(&key);
+                continue;
+            }
+            let matches = stat_at(record.parent.as_raw_fd(), &record.name)
+                .ok()
+                .flatten()
+                .is_some_and(|metadata| {
+                    metadata.st_mode & libc::S_IFMT == libc::S_IFDIR
+                        && metadata.st_dev == record.device
+                        && metadata.st_ino == record.inode
+                });
+            if !matches {
+                registry.remove(&key);
+                continue;
+            }
+            if unsafe {
+                libc::unlinkat(
+                    record.parent.as_raw_fd(),
+                    record.name.as_ptr(),
+                    libc::AT_REMOVEDIR,
+                )
+            } == 0
+            {
+                registry.remove(&key);
+            } else {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::NotFound {
+                    registry.remove(&key);
+                } else {
+                    tracing::debug!(path = %record.path.display(), %error, "left non-empty session socket directory");
+                }
+            }
+        }
+    }
+}
+
+fn register_directory(
+    parent: &OwnedFd,
+    name: &CString,
+    metadata: &libc::stat,
+    path: PathBuf,
+    created_by_baffle: bool,
+) -> io::Result<DirectoryKey> {
+    let key = DirectoryKey {
+        device: metadata.st_dev,
+        inode: metadata.st_ino,
+    };
+    let registry = DIRECTORY_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut registry = registry.lock().unwrap_or_else(|error| error.into_inner());
+    let record = registry.entry(key).or_insert(DirectoryRecord {
+        parent: parent.try_clone()?,
+        name: name.clone(),
+        device: key.device,
+        inode: key.inode,
+        path,
+        created_by_baffle,
+        leases: 0,
+    });
+    record.created_by_baffle |= created_by_baffle;
+    record.leases += 1;
+    Ok(key)
+}
+
+fn open_socket_parent(path: &Path) -> io::Result<(OwnedFd, CreatedDirectorySet, PathBuf)> {
+    let path_lock = SOCKET_PARENT_LOCK.get_or_init(|| Mutex::new(()));
+    let mut created = CreatedDirectorySet(Vec::new());
+    let result = {
+        let _path_lock = path_lock.lock().unwrap_or_else(|error| error.into_inner());
+        open_socket_parent_locked(path, &mut created)
+    };
+    match result {
+        Ok((parent, normalized)) => Ok((parent, created, normalized)),
+        Err(error) => {
+            drop(created);
+            Err(error)
+        }
+    }
+}
+
+fn open_socket_parent_locked(
+    path: &Path,
+    created: &mut CreatedDirectorySet,
+) -> io::Result<(OwnedFd, PathBuf)> {
+    let parent_path = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let absolute_parent = if parent_path.is_absolute() {
+        parent_path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(parent_path)
+    };
+    let root = unsafe {
+        libc::open(
+            c"/".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if root == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut current = unsafe { OwnedFd::from_raw_fd(root) };
+    let mut normalized = PathBuf::from("/");
+    for component in absolute_parent.components() {
+        let component = match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::ParentDir => {
+                CString::new("..").expect("parent component contains no nul byte")
+            }
+            Component::Normal(name) => CString::new(name.as_bytes()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid directory name")
+            })?,
+            Component::Prefix(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid socket path",
+                ));
+            }
+        };
+        let mut made = false;
+        let mut fd = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                component.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd == -1 && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
+            let mkdir = unsafe { libc::mkdirat(current.as_raw_fd(), component.as_ptr(), 0o700) };
+            if mkdir == 0 {
+                made = true;
+            } else if io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
+                return Err(io::Error::last_os_error());
+            }
+            fd = unsafe {
+                libc::openat(
+                    current.as_raw_fd(),
+                    component.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+        }
+        if fd == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let next = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(next.as_raw_fd(), metadata.as_mut_ptr()) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let metadata = unsafe { metadata.assume_init() };
+        if made {
+            unsafe {
+                libc::fchmod(next.as_raw_fd(), 0o700);
+            }
+        }
+        normalized.push(component.to_string_lossy().as_ref());
+        let registered =
+            register_directory(&current, &component, &metadata, normalized.clone(), made);
+        match registered {
+            Ok(key) => created.0.push(key),
+            Err(error) => {
+                if made {
+                    unsafe {
+                        libc::unlinkat(current.as_raw_fd(), component.as_ptr(), libc::AT_REMOVEDIR);
+                    }
+                }
+                return Err(error);
+            }
+        }
+        current = next;
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing socket name"))?;
+    let normalized = normalized.join(name);
+    Ok((current, normalized))
+}
+
+fn stat_at(parent: libc::c_int, name: &CString) -> io::Result<Option<libc::stat>> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            parent,
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0
+    {
+        return Ok(Some(unsafe { metadata.assume_init() }));
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::NotFound {
+        Ok(None)
+    } else {
+        Err(error)
     }
 }
 
 fn bind_unix_listener(path: &Path) -> io::Result<(UnixListener, UnixSocketGuard)> {
     UnixSocketGuard::bind(path)
-}
-
-struct BridgeSettings {
-    upstream: SocketAddr,
-    permits: Arc<Semaphore>,
-    connection_timeout: Duration,
-    io_timeout: Duration,
-    ingress_shutdown: CancellationToken,
-    force_cancellation: CancellationToken,
-    metrics: Arc<Metrics>,
-}
-
-async fn run_bridge(
-    listener: UnixListener,
-    _socket_guard: UnixSocketGuard,
-    settings: BridgeSettings,
-) -> io::Result<()> {
-    let BridgeSettings {
-        upstream,
-        permits,
-        connection_timeout,
-        io_timeout,
-        ingress_shutdown,
-        force_cancellation,
-        metrics,
-    } = settings;
-    let mut connections = JoinSet::new();
-    loop {
-        tokio::select! {
-            biased;
-            _ = ingress_shutdown.cancelled() => break,
-            _ = force_cancellation.cancelled() => break,
-            Some(result) = connections.join_next(), if !connections.is_empty() => {
-                if let Err(error) = result { return Err(io::Error::other(error.to_string())); }
-            }
-            accepted = listener.accept() => {
-                let (mut unix_stream, _) = accepted?;
-                let permit = match Arc::clone(&permits).try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => continue,
-                };
-                metrics.connection_started();
-                let metrics = Arc::clone(&metrics);
-                let cancellation = force_cancellation.clone();
-                connections.spawn(async move {
-                    let _permit = permit;
-                    let _guard = ConnectionGuard(Arc::clone(&metrics));
-                    tokio::select! {
-                        _ = cancellation.cancelled() => (),
-                        _ = async {
-                            if let Ok(Ok(mut tcp)) = tokio::time::timeout(connection_timeout, TcpStream::connect(upstream)).await {
-                                let _ = copy_bidirectional_with_timeout(&mut unix_stream, &mut tcp, io_timeout).await;
-                            } else {
-                                metrics.upstream_failure();
-                            }
-                        } => (),
-                    }
-                });
-            }
-        }
-    }
-    drop(listener);
-    drop(_socket_guard);
-    while connections.join_next().await.is_some() {}
-    Ok(())
 }
 
 struct ConnectionGuard(Arc<Metrics>);
@@ -1012,14 +1187,12 @@ mod tests {
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-        net::{TcpListener, TcpStream, UnixStream},
+        net::{TcpListener, UnixStream},
         sync::{mpsc, oneshot},
         time::timeout,
     };
     use tokio_rustls::{TlsAcceptor, TlsConnector, rustls};
 
-    #[cfg(not(feature = "benchmark-tcp-nodelay"))]
-    use super::accept_client;
     use super::{ProxyRuntime, RuntimeId, set_test_upstream_trust_anchor};
     use crate::{
         ca::ManagedCa,
@@ -1029,23 +1202,6 @@ mod tests {
     };
 
     type TestError = Box<dyn Error + Send + Sync>;
-
-    #[cfg(not(feature = "benchmark-tcp-nodelay"))]
-    #[tokio::test]
-    async fn production_accept_path_enables_tcp_nodelay_before_returning_the_socket()
-    -> Result<(), TestError> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let client = TcpStream::connect(listener.local_addr()?).await?;
-
-        let (accepted, _) = accept_client(&listener).await?;
-
-        assert!(
-            accepted.nodelay()?,
-            "the production accept path must enable TCP_NODELAY before returning the socket"
-        );
-        drop((accepted, client));
-        Ok(())
-    }
 
     fn write_managed_ca(directory: &Path) -> Arc<ManagedCa> {
         let key = KeyPair::generate().expect("Baffle CA key should generate");
@@ -1187,7 +1343,6 @@ mod tests {
             ca,
             directory.join(format!("{name}.sock")),
             max_connections,
-            Duration::from_secs(1),
             timeout,
             Arc::new(crate::telemetry::Metrics::default()),
             events_tx,
@@ -1256,31 +1411,31 @@ mod tests {
     }
 
     async fn open_tls_client(
-        proxy: std::net::SocketAddr,
+        proxy: &Path,
         authority: &str,
         ca: &ManagedCa,
-    ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, TestError> {
+    ) -> Result<tokio_rustls::client::TlsStream<UnixStream>, TestError> {
         open_tls_client_for_name(proxy, authority, "localhost", ca).await
     }
 
     async fn open_tls_client_for_name(
-        proxy: std::net::SocketAddr,
+        proxy: &Path,
         authority: &str,
         server_name: &str,
         ca: &ManagedCa,
-    ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, TestError> {
+    ) -> Result<tokio_rustls::client::TlsStream<UnixStream>, TestError> {
         open_tls_client_with_alpn(proxy, authority, server_name, ca, &[], &[]).await
     }
 
     async fn open_tls_client_with_alpn(
-        proxy: std::net::SocketAddr,
+        proxy: &Path,
         authority: &str,
         server_name: &str,
         ca: &ManagedCa,
         alpn: &[&[u8]],
         extra_roots: &[Vec<u8>],
-    ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, TestError> {
-        let mut stream = TcpStream::connect(proxy).await?;
+    ) -> Result<tokio_rustls::client::TlsStream<UnixStream>, TestError> {
+        let mut stream = UnixStream::connect(proxy).await?;
         stream
             .write_all(
                 format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes(),
@@ -1500,7 +1655,7 @@ mod tests {
         )
         .await?;
         let mut tls =
-            open_tls_client(runtime.local_addr(), &format!("localhost:{port}"), &ca).await?;
+            open_tls_client(runtime.socket_path(), &format!("localhost:{port}"), &ca).await?;
         tls.write_all(
             format!(
                 "GET /allowed HTTP/1.1\r\nHost: localhost:{port}\r\nAuthorization: Bearer attacker-value\r\nConnection: keep-alive\r\n\r\n"
@@ -1573,7 +1728,7 @@ mod tests {
         )
         .await?;
 
-        let mut client = TcpStream::connect(runtime.local_addr()).await?;
+        let mut client = UnixStream::connect(runtime.socket_path()).await?;
         client
             .write_all(
                 format!(
@@ -1615,7 +1770,7 @@ mod tests {
         )
         .await?;
         let tls = open_tls_client_with_alpn(
-            runtime.local_addr(),
+            runtime.socket_path(),
             &authority,
             "localhost",
             &ca,
@@ -1827,7 +1982,7 @@ mod tests {
 
         let port = origin_address.port();
         let mut tls = open_tls_client(
-            intercept_runtime.local_addr(),
+            intercept_runtime.socket_path(),
             &format!("localhost:{port}"),
             &ca,
         )
@@ -1847,56 +2002,113 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unix_bridge_enforces_the_configured_connection_limit() -> Result<(), TestError> {
-        let directory = tempfile::tempdir()?;
-        let ca = write_managed_ca(directory.path());
-        let upstream = TcpListener::bind("127.0.0.1:0").await?;
-        let port = upstream.local_addr()?.port();
-        let (runtime, _events) = start_runtime_limited(
-            directory.path(),
-            tunnel_session(port),
-            ca,
-            "rama-limited",
-            1,
-            Duration::from_millis(100),
-        )
-        .await?;
-
-        let first = UnixStream::connect(runtime.socket_path()).await?;
-        let mut over_limit = UnixStream::connect(runtime.socket_path()).await?;
-        let mut byte = [0u8; 1];
-        let read = timeout(Duration::from_secs(1), over_limit.read(&mut byte)).await??;
-        assert_eq!(read, 0, "over-limit clients must be closed before proxying");
-
-        drop(first);
-        runtime.shutdown(Duration::from_secs(1)).await;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn loopback_listener_enforces_the_configured_connection_limit() -> Result<(), TestError> {
+    async fn unix_listener_enforces_the_configured_connection_limit() -> Result<(), TestError> {
         let directory = tempfile::tempdir()?;
         let ca = write_managed_ca(directory.path());
         let (runtime, _) = start_runtime_limited(
             directory.path(),
             tunnel_session(443),
             ca,
-            "rama-loopback-limited",
+            "rama-unix-limited",
             1,
             Duration::from_secs(2),
         )
         .await?;
 
-        let mut admitted = TcpStream::connect(runtime.local_addr()).await?;
+        let mut admitted = UnixStream::connect(runtime.socket_path()).await?;
         admitted.write_all(b"C").await?;
         tokio::time::sleep(Duration::from_millis(25)).await;
-        let mut over_limit = TcpStream::connect(runtime.local_addr()).await?;
+        let mut over_limit = UnixStream::connect(runtime.socket_path()).await?;
         let mut byte = [0; 1];
         let read = timeout(Duration::from_secs(1), over_limit.read(&mut byte)).await??;
-        assert_eq!(read, 0, "over-limit loopback clients must be closed");
+        assert_eq!(read, 0, "over-limit Unix clients must be closed");
 
         drop(admitted);
         runtime.shutdown(Duration::from_secs(1)).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nested_socket_directories_are_private_and_removed_on_shutdown() -> Result<(), TestError>
+    {
+        let directory = tempfile::tempdir()?;
+        let ca = write_managed_ca(directory.path());
+        let path = directory.path().join("cladding/github.sock");
+        let (events, _) = mpsc::unbounded_channel();
+        let runtime = ProxyRuntime::start(
+            RuntimeId::new("rama-nested-socket"),
+            tunnel_session(443),
+            ca,
+            path.clone(),
+            4,
+            events,
+        )
+        .await?;
+        assert!(path.exists());
+        assert_eq!(
+            fs::metadata(path.parent().expect("named socket has a parent"))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert!(UnixStream::connect(&path).await.is_ok());
+        runtime.shutdown(Duration::from_secs(1)).await;
+        assert!(!path.exists());
+        assert!(!path.parent().expect("named socket has a parent").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nested_socket_parent_symlink_is_rejected() -> Result<(), TestError> {
+        let directory = tempfile::tempdir()?;
+        let target = tempfile::tempdir()?;
+        let ca = write_managed_ca(directory.path());
+        let link = directory.path().join("cladding");
+        std::os::unix::fs::symlink(target.path(), &link)?;
+        let path = link.join("github.sock");
+        let (events, _) = mpsc::unbounded_channel();
+        let result = ProxyRuntime::start(
+            RuntimeId::new("rama-symlink-socket"),
+            tunnel_session(443),
+            ca,
+            path.clone(),
+            4,
+            events,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!target.path().join("github.sock").exists());
+        assert!(fs::symlink_metadata(link)?.file_type().is_symlink());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn renamed_socket_parent_cleanup_leaves_replacement_path_untouched()
+    -> Result<(), TestError> {
+        let directory = tempfile::tempdir()?;
+        let ca = write_managed_ca(directory.path());
+        let original_parent = directory.path().join("cladding");
+        let path = original_parent.join("github.sock");
+        let (events, _) = mpsc::unbounded_channel();
+        let runtime = ProxyRuntime::start(
+            RuntimeId::new("rama-renamed-socket-parent"),
+            tunnel_session(443),
+            ca,
+            path,
+            4,
+            events,
+        )
+        .await?;
+        let renamed_parent = directory.path().join("cladding-old");
+        fs::rename(&original_parent, &renamed_parent)?;
+        fs::create_dir(&original_parent)?;
+        let replacement = original_parent.join("github.sock");
+        fs::write(&replacement, b"replacement")?;
+
+        runtime.shutdown(Duration::from_secs(1)).await;
+        assert!(!renamed_parent.join("github.sock").exists());
+        assert_eq!(fs::read(replacement)?, b"replacement");
         Ok(())
     }
 
@@ -1916,7 +2128,6 @@ mod tests {
             socket_path.clone(),
             4,
             Duration::from_secs(1),
-            Duration::from_secs(1),
             Arc::new(crate::telemetry::Metrics::default()),
             events,
         )
@@ -1930,8 +2141,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_task_failure_is_reported_to_the_session_event_channel() -> Result<(), TestError>
-    {
+    async fn direct_listener_task_failure_is_reported_to_the_session_event_channel()
+    -> Result<(), TestError> {
         let directory = tempfile::tempdir()?;
         let ca = write_managed_ca(directory.path());
         let (runtime, mut events) = start_runtime(
@@ -1943,14 +2154,14 @@ mod tests {
         .await?;
         let id = runtime.runtime_id().clone();
 
-        runtime.bridge_abort.abort();
+        runtime.task_abort.abort();
         let event = timeout(Duration::from_secs(2), events.recv())
             .await?
             .ok_or_else(|| io::Error::other("session event channel should remain open"))?;
         assert_eq!(event.runtime_id, id);
         assert!(
             event.result.is_err(),
-            "bridge failure must reach the supervisor"
+            "listener task failure must reach the supervisor"
         );
         runtime.shutdown(Duration::from_secs(1)).await;
         Ok(())
@@ -1976,7 +2187,7 @@ mod tests {
             Duration::from_secs(30),
         )
         .await?;
-        let local_address = runtime.local_addr();
+        let local_address = runtime.socket_path().to_path_buf();
         let socket_path = runtime.socket_path().to_path_buf();
         let runtime_id = runtime.runtime_id().clone();
         let mut tunnel = UnixStream::connect(&socket_path).await?;
@@ -2009,7 +2220,7 @@ mod tests {
             }
         })
         .await?;
-        assert!(TcpStream::connect(local_address).await.is_err());
+        assert!(UnixStream::connect(local_address).await.is_err());
         let mut byte = [0; 1];
         let read = timeout(Duration::from_secs(1), tunnel.read(&mut byte)).await?;
         assert!(
@@ -2074,10 +2285,10 @@ mod tests {
             Duration::from_secs(30),
         )
         .await?;
-        let local_address = runtime.local_addr();
+        let local_address = runtime.socket_path().to_path_buf();
         let socket_path = runtime.socket_path().to_path_buf();
         let runtime_id = runtime.runtime_id().clone();
-        let mut client = open_tls_client(local_address, &format!("localhost:{port}"), &ca).await?;
+        let mut client = open_tls_client(&local_address, &format!("localhost:{port}"), &ca).await?;
         client
             .write_all(
                 format!("GET /allowed HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").as_bytes(),
@@ -2099,7 +2310,7 @@ mod tests {
             }
         })
         .await?;
-        assert!(TcpStream::connect(local_address).await.is_err());
+        assert!(UnixStream::connect(local_address).await.is_err());
         let mut byte = [0; 1];
         match timeout(Duration::from_secs(1), client.read(&mut byte)).await? {
             Ok(0) | Err(_) => (),
@@ -2131,7 +2342,7 @@ mod tests {
         )
         .await?;
 
-        runtime.proxy_abort.abort();
+        runtime.task_abort.abort();
         let event = timeout(Duration::from_secs(2), events.recv())
             .await?
             .ok_or_else(|| io::Error::other("session event channel should remain open"))?;
@@ -2157,7 +2368,7 @@ mod tests {
         )
         .await?;
 
-        let mut unsupported = TcpStream::connect(runtime.local_addr()).await?;
+        let mut unsupported = UnixStream::connect(runtime.socket_path()).await?;
         unsupported
             .write_all(
                 format!(
@@ -2178,7 +2389,7 @@ mod tests {
             b"not TLS".as_slice(),
             &[0x16, 0x03, 0x03, 0x00, 0x20, 0x01, 0x00],
         ] {
-            let mut stream = TcpStream::connect(runtime.local_addr()).await?;
+            let mut stream = UnixStream::connect(runtime.socket_path()).await?;
             stream
                 .write_all(
                     format!("CONNECT localhost:{port} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n")
@@ -2252,7 +2463,7 @@ mod tests {
         .await?;
 
         let authority = format!("localhost:{}", upstream_address.port());
-        let mut connect = TcpStream::connect(runtime.local_addr()).await?;
+        let mut connect = UnixStream::connect(runtime.socket_path()).await?;
         connect
             .write_all(
                 format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes(),
@@ -2325,7 +2536,7 @@ mod tests {
         .await?;
 
         let result = open_tls_client_for_name(
-            runtime.local_addr(),
+            runtime.socket_path(),
             &format!("localhost:{port}"),
             "other.example",
             &ca,
@@ -2356,7 +2567,7 @@ mod tests {
         )
         .await?;
         if let Ok(mut tls) =
-            open_tls_client(runtime.local_addr(), &format!("localhost:{port}"), &ca).await
+            open_tls_client(runtime.socket_path(), &format!("localhost:{port}"), &ca).await
         {
             tls.write_all(
                 format!("GET /allowed HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").as_bytes(),
@@ -2394,7 +2605,7 @@ mod tests {
         )
         .await?;
         if let Ok(mut tls) =
-            open_tls_client(runtime.local_addr(), &format!("localhost:{port}"), &ca).await
+            open_tls_client(runtime.socket_path(), &format!("localhost:{port}"), &ca).await
         {
             tls.write_all(
                 format!("GET /allowed HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").as_bytes(),

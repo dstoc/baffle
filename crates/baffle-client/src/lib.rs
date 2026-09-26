@@ -53,6 +53,7 @@ impl Client {
             operation: "create",
             session: SessionSettings {
                 persistent: config.persistent,
+                socket_name: config.socket_name,
             },
             rules: config.rules,
         };
@@ -135,6 +136,8 @@ impl Client {
 pub struct SessionConfig {
     /// Keep the proxy after the create control connection closes.
     pub persistent: bool,
+    /// Optional Unix socket path relative to the daemon's session socket directory.
+    pub socket_name: Option<String>,
     /// Host allowlist rules for this proxy.
     pub rules: Vec<HostRule>,
 }
@@ -148,6 +151,12 @@ impl SessionConfig {
     /// Set whether the session survives a control-client disconnect.
     pub fn persistent(mut self, persistent: bool) -> Self {
         self.persistent = persistent;
+        self
+    }
+
+    /// Request a named data socket below the daemon's session socket directory.
+    pub fn socket_name(mut self, socket_name: impl Into<String>) -> Self {
+        self.socket_name = Some(socket_name.into());
         self
     }
 
@@ -436,6 +445,8 @@ struct CreateFromFileRequest<'a> {
 #[derive(Serialize)]
 struct SessionSettings {
     persistent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    socket_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -590,21 +601,43 @@ mod tests {
     fn serializes_create_requests_with_the_v1_wire_shape() {
         let policy = SessionConfig::new()
             .persistent(true)
+            .socket_name("cladding/github.sock")
             .with_rule(HostRule::intercept("api.example.com"));
         let encoded = toml::to_string(&CreateRequest {
             version: 1,
             operation: "create",
-            session: SessionSettings { persistent: true },
+            session: SessionSettings {
+                persistent: true,
+                socket_name: policy.socket_name,
+            },
             rules: policy.rules,
         })
         .expect("request should serialize");
         assert!(encoded.contains("operation = \"create\""));
         assert!(encoded.contains("version = 1"));
         assert!(encoded.contains("[session]\npersistent = true"));
+        assert!(encoded.contains("socket_name = \"cladding/github.sock\""));
         assert!(encoded.contains("[[rules]]"));
         assert!(encoded.contains("mode = \"intercept\""));
         assert!(encoded.contains("ports = [443]"));
         assert!(!encoded.contains("private_addresses"));
+    }
+
+    #[test]
+    fn omits_socket_name_when_not_requested() {
+        let policy = SessionConfig::new().with_rule(HostRule::tunnel("api.example.com"));
+        let encoded = toml::to_string(&CreateRequest {
+            version: 1,
+            operation: "create",
+            session: SessionSettings {
+                persistent: policy.persistent,
+                socket_name: policy.socket_name,
+            },
+            rules: policy.rules,
+        })
+        .expect("request should serialize");
+
+        assert!(!encoded.contains("socket_name"));
     }
 
     #[test]

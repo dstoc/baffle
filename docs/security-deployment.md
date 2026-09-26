@@ -41,7 +41,7 @@ address, even if the service presents a valid certificate for that hostname.
 A valid certificate verifies TLS identity; it does not make the destination
 address safe. Apply DNS policy and default-deny network egress rules when the
 threat model requires address containment. Ensure sandboxed clients cannot
-bypass Baffle or reach its internal listeners.
+bypass Baffle, and expose only each client's assigned data socket.
 
 Baffle implements HTTPS-only request admission and permits TLS on any
 configured port, including port 80. It fails closed when a rule requires
@@ -77,12 +77,10 @@ body.
 
 Baffle is not a host firewall and does not create a sandbox or network
 namespace. A sandboxed process that can use another network route can bypass
-its proxy policy. Baffle's internal Rama TCP listeners bind to
-`127.0.0.1` in the daemon's network namespace. Any process that shares that
-namespace can reach those listeners directly. Run Baffle in a network
-namespace inaccessible to sandboxed clients, or enforce an equivalent
-firewall boundary. Do not treat loopback or the Unix data socket alone as
-network isolation.
+its proxy policy. Baffle has no internal per-session TCP listeners. Protect
+the control socket and expose only each assigned data socket to its client.
+Use network namespaces or firewall rules when required to control direct
+client egress or Baffle's outbound destinations.
 
 The control protocol authenticates by UID, not by process identity. Processes
 with the trusted UID are trusted. Baffle does not isolate mutually hostile
@@ -199,16 +197,17 @@ intercepted requests.
 
 ## Egress and client isolation
 
-Use a network namespace that contains the daemon and its internal loopback
-listeners but is not shared with sandboxed client processes. Configure the
-client's network so the assigned Baffle proxy is its only permitted egress
-path. A proxy URL or environment variable alone does not enforce this.
+Configure the client's network so the assigned Baffle proxy is its only
+permitted egress path. A proxy URL or environment variable alone does not
+enforce this. Use a network namespace or firewall when the deployment's
+outbound network policy requires one.
 
 The repository includes a privileged Linux fixture that creates separate
-daemon and client network namespaces, probes the daemon's internal listener,
-and verifies that the listener cannot be reached from the client namespace.
-Run it as described in [integration testing](integration-testing.md). Repeat
-the same isolation check for the namespace, routes, mounts, and firewall used
+daemon and client network namespaces. It checks that Baffle creates no
+internal TCP listening port, that data-socket permissions restrict access,
+and that an authorized client can reach an allowed HTTPS origin. Run it as
+described in [integration testing](integration-testing.md). Apply the same
+socket and egress checks to the namespace, routes, mounts, and firewall used
 in production. A passing fixture does not validate a different deployment
 topology.
 

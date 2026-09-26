@@ -15,12 +15,13 @@ socket, and owns the session lease for the workload's lifetime.
 3. Keep the returned `Session` handle alive while an ephemeral workload runs.
    Its control connection is the lease. Close or drop the handle after normal
    completion, cancellation, or failure.
-4. Expose only that session's data socket to the assigned workload. Use a
-   trusted bridge or controlled mount and preserve mode `0600`; do not expose
-   the control socket or the full socket directory.
-5. Ensure the sandbox cannot reach Baffle's internal loopback TCP listeners
-   and cannot bypass the proxy for external network access. See the
-   [security and deployment guide](security-deployment.md).
+4. Expose only that session's data socket to the assigned workload. A named
+   nested socket path is available when a stable name helps orchestration.
+   Preserve mode `0600`; do not expose the control socket or the full socket
+   directory.
+5. Ensure the sandbox cannot bypass the proxy for external network access.
+   Apply outbound network restrictions required by the deployment threat
+   model. See the [security and deployment guide](security-deployment.md).
 
 For a persistent session, close the create connection after the response and
 send an explicit `stop` operation during cleanup. Use `list` to inspect
@@ -75,10 +76,10 @@ curl --proxy http://127.0.0.1:18080 https://github.com/
 
 Press Ctrl-C to stop `socat` and close the ephemeral session. The example
 requires `socat` on `PATH`, a running Baffle daemon, and access to the Baffle
-source checkout. The TCP listener is bound to loopback in the namespace where
-the example runs. Keep that namespace isolated from untrusted clients and keep
-Baffle's own loopback listeners in a separate, inaccessible network
-namespace.
+source checkout. Its optional TCP listener is bound to loopback in the
+namespace where the example runs. Protect that listener from clients that
+should not share the session. Baffle itself has no internal per-session TCP
+listeners.
 
 The example illustrates the consumer boundary. A production Cladding
 integration should create one Baffle session per independently configured

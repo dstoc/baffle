@@ -2,7 +2,7 @@
 //!
 //! The daemon provisions an opaque runtime, reads its bound listener details,
 //! receives fatal runtime events, and cancels it with bounded shutdown. The
-//! private Rama module owns the listener, Unix bridge, tasks, and cleanup.
+//! private Rama module owns the Unix listener, tasks, and cleanup.
 
 mod rama;
 
@@ -22,10 +22,6 @@ pub(crate) fn benchmark_tcp_nodelay_mode() -> String {
 
 #[cfg(any(test, feature = "benchmark-tcp-nodelay"))]
 pub(crate) fn benchmark_tcp_nodelay_enabled(socket_leg: &str) -> bool {
-    #[cfg(feature = "benchmark-tcp-nodelay")]
-    if std::env::var_os("BAFFLE_BENCH_TCP_NODELAY").is_none() {
-        return socket_leg == "proxy-ingress";
-    }
     let mode = benchmark_tcp_nodelay_mode();
     mode == socket_leg || mode == "all"
 }
@@ -55,10 +51,7 @@ impl RuntimeId {
 /// A backend-neutral startup or fatal runtime error.
 #[derive(Debug)]
 pub enum ProxyRuntimeError {
-    Bind(io::Error),
     BindSocket(io::Error),
-    SocketOption(io::Error),
-    Bridge(io::Error),
     Build(String),
     Run(String),
     Task(String),
@@ -67,10 +60,7 @@ pub enum ProxyRuntimeError {
 impl ProxyRuntimeError {
     pub fn class(&self) -> &'static str {
         match self {
-            Self::Bind(_) => "bind",
             Self::BindSocket(_) => "socket_bind",
-            Self::SocketOption(_) => "socket_option",
-            Self::Bridge(_) => "bridge",
             Self::Build(_) => "proxy_build",
             Self::Run(_) => "proxy_run",
             Self::Task(_) => "task",
@@ -81,16 +71,10 @@ impl ProxyRuntimeError {
 impl fmt::Display for ProxyRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bind(_) => formatter.write_str("could not bind proxy listener"),
             Self::BindSocket(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 formatter.write_str("proxy Unix socket path already exists")
             }
             Self::BindSocket(_) => formatter.write_str("could not bind proxy Unix socket"),
-            Self::SocketOption(error) => write!(
-                formatter,
-                "could not enable TCP_NODELAY on an accepted proxy client socket: {error}"
-            ),
-            Self::Bridge(_) => formatter.write_str("proxy Unix socket bridge failed"),
             Self::Build(_) => formatter.write_str("could not build proxy"),
             Self::Run(_) => formatter.write_str("proxy runtime failed"),
             Self::Task(_) => formatter.write_str("proxy runtime task failed"),

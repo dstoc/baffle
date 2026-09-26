@@ -20,7 +20,7 @@ use std::{
 use rcgen::KeyPair;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UnixStream},
     sync::{Barrier, mpsc},
     task::JoinSet,
     time::sleep,
@@ -271,7 +271,7 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
     let mut all_latencies = Vec::with_capacity(TRIALS * MEASURED_REQUESTS);
     for trial in 0..TRIALS {
         let rss_before_connection = read_rss_kib()?;
-        let mut client = http1_client(runtime.local_addr(), &authority, &baffle_ca_der).await?;
+        let mut client = http1_client(runtime.socket_path(), &authority, &baffle_ca_der).await?;
         output.row(
             "sample",
             trial,
@@ -417,7 +417,7 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
     let mut tunnel_latencies = Vec::with_capacity(TRIALS * MEASURED_REQUESTS);
     for trial in 0..TRIALS {
         let mut client = http1_client(
-            tunnel_runtime.local_addr(),
+            tunnel_runtime.socket_path(),
             &authority,
             &origin_material.root_der,
         )
@@ -490,7 +490,7 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
     .await?;
     let h2_latencies = benchmark_http2(
         &output,
-        h2_runtime.local_addr(),
+        h2_runtime.socket_path(),
         &h2_authority,
         &baffle_ca_der,
     )
@@ -541,7 +541,6 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
 async fn runtime_http1_characterization() -> Result<(), BenchError> {
     let output = BenchOutput::new()?;
     let tcp_nodelay_mode = benchmark_tcp_nodelay_mode();
-    let client_tcp_nodelay = benchmark_tcp_nodelay_enabled("client");
     let concurrency_levels = benchmark_concurrency_levels()?;
     let request_body_bytes =
         benchmark_body_bytes("BAFFLE_BENCH_REQUEST_BYTES", REQUEST_BODY_BYTES)?;
@@ -630,10 +629,8 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
             for _ in 0..concurrency {
                 let authority = authority.clone();
                 let root = baffle_ca_der.clone();
-                let proxy = runtime.local_addr();
-                opening.spawn(async move {
-                    http1_client_with_nodelay(proxy, &authority, &root, client_tcp_nodelay).await
-                });
+                let proxy = runtime.socket_path().to_path_buf();
+                opening.spawn(async move { http1_client(&proxy, &authority, &root).await });
             }
             let mut clients = Vec::with_capacity(concurrency);
             while let Some(client) = opening.join_next().await {
@@ -904,7 +901,6 @@ async fn start_runtime(
         ca,
         socket_path,
         128,
-        Duration::from_secs(2),
         Duration::from_secs(30),
         Arc::new(Metrics::default()),
         events,
@@ -1068,25 +1064,12 @@ async fn serve_http1(
 }
 
 async fn tls_over_connect(
-    proxy: std::net::SocketAddr,
+    proxy: &Path,
     authority: &str,
     root_der: &[u8],
     alpn: &[&[u8]],
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>, BenchError> {
-    tls_over_connect_with_nodelay(proxy, authority, root_der, alpn, false).await
-}
-
-async fn tls_over_connect_with_nodelay(
-    proxy: std::net::SocketAddr,
-    authority: &str,
-    root_der: &[u8],
-    alpn: &[&[u8]],
-    tcp_nodelay: bool,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>, BenchError> {
-    let mut stream = TcpStream::connect(proxy).await?;
-    if tcp_nodelay {
-        stream.set_nodelay(true)?;
-    }
+) -> Result<tokio_rustls::client::TlsStream<UnixStream>, BenchError> {
+    let mut stream = UnixStream::connect(proxy).await?;
     stream
         .write_all(format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes())
         .await?;
@@ -1120,29 +1103,17 @@ async fn tls_over_connect_with_nodelay(
 }
 
 async fn http1_client(
-    proxy: std::net::SocketAddr,
+    proxy: &Path,
     authority: &str,
     root_der: &[u8],
-) -> Result<BufReader<tokio_rustls::client::TlsStream<TcpStream>>, BenchError> {
+) -> Result<BufReader<tokio_rustls::client::TlsStream<UnixStream>>, BenchError> {
     Ok(BufReader::new(
         tls_over_connect(proxy, authority, root_der, &[b"http/1.1"]).await?,
     ))
 }
 
-async fn http1_client_with_nodelay(
-    proxy: std::net::SocketAddr,
-    authority: &str,
-    root_der: &[u8],
-    tcp_nodelay: bool,
-) -> Result<BufReader<tokio_rustls::client::TlsStream<TcpStream>>, BenchError> {
-    Ok(BufReader::new(
-        tls_over_connect_with_nodelay(proxy, authority, root_der, &[b"http/1.1"], tcp_nodelay)
-            .await?,
-    ))
-}
-
 async fn send_http1_request(
-    stream: &mut BufReader<tokio_rustls::client::TlsStream<TcpStream>>,
+    stream: &mut BufReader<tokio_rustls::client::TlsStream<UnixStream>>,
     authority: &str,
     request_body_bytes: usize,
 ) -> Result<(), BenchError> {
@@ -1178,7 +1149,7 @@ async fn send_http1_request(
 
 async fn benchmark_http2(
     output: &BenchOutput,
-    proxy: std::net::SocketAddr,
+    proxy: &Path,
     authority: &str,
     baffle_ca_der: &[u8],
 ) -> Result<Vec<f64>, BenchError> {

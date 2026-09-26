@@ -19,7 +19,7 @@ credential state, data socket, and counters.
 | CLI and daemon entry point | `src/main.rs`, `src/cli.rs`, `src/daemon.rs` | Parse `daemon` and `ca export` commands, load configuration, start the control server, and handle Ctrl-C. |
 | Configuration | `src/config.rs` | Parse strict daemon and session TOML, normalize exact host rules, and reject invalid policy before provisioning. |
 | Control server and session manager | `src/control.rs` | Authenticate Unix peers, frame requests and responses, create/list/stop sessions, track leases, enforce limits, and remove sockets. |
-| Proxy runtime and bridge | `src/proxy_runtime.rs`, `src/proxy_runtime/rama.rs` | Expose the opaque session lifecycle to the daemon. Rama binds the loopback TCP listener and Unix data socket, applies connection limits and timeouts, and supervises failures. |
+| Proxy runtime | `src/proxy_runtime.rs`, `src/proxy_runtime/rama.rs` | Expose the opaque session lifecycle to the daemon. Baffle binds the Unix data socket and Rama handles accepted Unix streams with connection limits, timeouts, and supervised tasks. |
 | Policy and Rama adapter | `src/policy.rs`, `src/proxy_runtime/rama.rs` | Map Rama requests to shared request facts and apply exact destination, port, mode, canonical path, TLS identity, and header-injection rules. |
 | CA manager | `src/ca.rs` | Validate CA files, retain daemon-owned signing material, provide cloned handles to the runtime, and export only the public certificate. |
 | Secret store | `src/secrets.rs` | Authorize symbolic secret names, validate private files, and keep values inside the owning session. |
@@ -35,8 +35,8 @@ The control flow is:
    schema, and policy.
 4. For `create`, Baffle checks secret entitlements and files before it starts a
    proxy. It reserves capacity, creates a session ID, and starts the proxy
-   runtime. The runtime binds its loopback TCP listener and Unix data socket,
-   then starts the stream bridge.
+   runtime. The runtime binds its Unix data socket and accepts connections
+   directly on it.
 5. Baffle returns the session ID, data socket path, and persistence setting in
    one JSON response.
 
@@ -46,11 +46,10 @@ The request and response formats are specified in the
 ## Data flow and policy boundaries
 
 The client's application connects to the session's Unix data socket and sends
-standard HTTP proxy traffic. The bridge streams bytes to the session's
-pre-bound `127.0.0.1` TCP listener. The Rama runtime handles CONNECT,
-interception, and upstream traffic. It inspects ClientHello and serves
-intercepted HTTP through Rama middleware. The bridge does not buffer complete
-requests or responses.
+standard HTTP proxy traffic. The Rama runtime handles CONNECT, interception,
+and upstream traffic directly from that Unix stream. It inspects ClientHello
+and serves intercepted HTTP through Rama middleware. TCP is used only for
+connections from Baffle to authorized HTTPS origins.
 
 Before forwarding, the policy handler checks the exact host and destination
 port. Only CONNECT can establish an outbound destination. It checks paths for
@@ -80,8 +79,8 @@ client; a new request is evaluated against policy again.
 
 These rules protect traffic that reaches Baffle. They do not stop a sandboxed
 process from making a direct network connection. Deployment must force client
-egress through the assigned proxy and must isolate Baffle's internal loopback
-listeners as described in the [security guide](security-deployment.md).
+egress through the assigned proxy as described in the
+[security guide](security-deployment.md).
 
 ## Request admission boundary
 
@@ -120,25 +119,27 @@ grace period, then aborts work that did not stop in time and removes socket
 paths.
 
 The session registry enforces `max_sessions`. The control server limits
-parallel creation with `max_provisioning_requests`. The bridge enforces
-`max_connections_per_session`, `connection_timeout_ms`, and `io_timeout_ms`.
+parallel creation with `max_provisioning_requests`. Each Unix listener enforces
+`max_connections_per_session`; `io_timeout_ms` bounds stalled client and
+tunnel operations. The legacy `connection_timeout_ms` setting is accepted for
+configuration compatibility and has no runtime effect.
 
 ## Proxy runtime boundary
 
 `src/proxy_runtime.rs` is the daemon-facing runtime boundary. Its opaque
 `ProxyRuntime` handle covers session startup, readiness through successful
-return after binding, bound listener details, runtime exit events, cancellation,
+return after binding, the Unix socket path, runtime exit events, cancellation,
 and bounded shutdown. The daemon and control protocol use Baffle-owned session,
 policy, CA, secret, and metrics types; they do not use Rama networking or
 request types.
 
 The private `src/proxy_runtime/rama.rs` module owns Rama-specific TLS and HTTP
-processing as well as the existing Unix-to-TCP bridge, accepted-socket
-configuration, and inode-safe socket cleanup. It accepts CONNECT only,
-authorizes the CONNECT authority before dialing, preserves explicit tunnel-only
-behavior, and fails closed when required TLS interception or authority checks
-fail. It verifies upstream TLS against the approved CONNECT hostname, disables
-TLS key logging, and enables `TCP_NODELAY` on accepted client sockets.
+processing, direct Unix-stream ingress, and inode-safe socket cleanup. It
+accepts CONNECT only, authorizes the CONNECT authority before dialing,
+preserves explicit tunnel-only behavior, and fails closed when required TLS
+interception or authority checks fail. It verifies upstream TLS against the
+approved CONNECT hostname, disables TLS key logging, and adapts Unix streams to
+Rama's TLS relay interface.
 
 Rama is the only runtime implementation. This boundary keeps Rama networking
 types out of daemon and control-protocol code. No backend selector is exposed
@@ -150,8 +151,8 @@ note](runtime-migration.md) for the completed removal of Hudsucker.
 Invalid client requests receive a safe stable protocol error. Internal setup
 failures receive `internal_error`; the daemon logs an error class rather than
 the policy body or credentials. Proxy denials return a denial response and
-increment session/process counters. Upstream and bridge failures are logged as
-structured events and are isolated to their session when possible.
+increment session/process counters. Upstream failures are logged as structured
+events and are isolated to their session when possible.
 
 Logs include lifecycle IDs, host/port decision metadata, counters, and error
 classes. Baffle does not log request paths, queries, headers, credentials, or

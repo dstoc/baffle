@@ -39,7 +39,6 @@ max_connections_per_session = 128
 shutdown_grace_seconds = 2
 control_read_timeout_ms = 5000
 max_provisioning_requests = 8
-connection_timeout_ms = 5000
 io_timeout_ms = 30000
 
 [ca]

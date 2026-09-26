@@ -1,16 +1,16 @@
 # Runtime migration note
 
-baffle/34 made Rama 0.4.0 Baffle's only supported proxy runtime after baffle/33
-enabled and verified `TCP_NODELAY` on accepted client sockets. The change
+baffle/34 made Rama 0.4.0 Baffle's only supported proxy runtime. The change
 removed the Hudsucker adapter, vendored source, Cargo patch, backend feature
 switches, backend-specific policy and CA branches, and dual-backend CI and
 benchmark code. The normal Cargo build and test commands now use Rama.
 
 The daemon-facing boundary remains in `src/proxy_runtime.rs`. It provisions an
-opaque session handle, returns only after listeners are bound, exposes the
-bound listener address and Unix socket path, reports runtime exit events, and
-supports cancellation with bounded shutdown. The private Rama implementation
-owns TLS and HTTP processing, the Unix-to-TCP bridge, socket cleanup, and task
+opaque session handle, returns only after the Unix data socket is bound,
+exposes its path, reports runtime exit events, and supports cancellation with
+bounded shutdown. baffle/40 removed the per-session loopback TCP listener and
+Unix-to-TCP bridge. The private Rama implementation owns TLS and HTTP
+processing directly over accepted Unix streams, socket cleanup, and task
 supervision. The daemon retains ownership of policy, session leases, CA
 material, credentials, and the control protocol.
 

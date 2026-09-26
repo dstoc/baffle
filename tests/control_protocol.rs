@@ -205,15 +205,21 @@ fn control_listener_handles_requests_and_rejects_bad_connections() {
 fn file_only_creates_nested_sessions_from_fresh_policy_snapshots_and_keeps_ephemeral_leases() {
     let daemon = start_file_only_daemon(250);
     let name = "cladding/github.toml";
-    write_session_policy(&daemon, name, "github.com", false);
+    let named_socket = "file-backed/named.sock";
+    write_session_policy_contents(
+        &daemon,
+        name,
+        &session_policy_with_socket_name("github.com", false, named_socket),
+    );
 
     let (lease_one, created_one) = create_from_file(&daemon.socket, name);
     assert_eq!(created_one["ok"], true);
     assert_eq!(created_one["result"]["persistent"], false);
     let first_socket = PathBuf::from(created_one["result"]["socket"].as_str().unwrap());
+    assert_eq!(first_socket, daemon.socket_dir.join(named_socket));
     assert!(
         first_socket.exists(),
-        "the returned generated socket should exist"
+        "the returned nested named socket should exist"
     );
     assert_proxy_available(&first_socket);
     assert_eq!(list_sessions(&daemon.socket).len(), 1);
@@ -239,6 +245,7 @@ fn file_only_creates_nested_sessions_from_fresh_policy_snapshots_and_keeps_ephem
     let (lease_two, created_two) = create_from_file(&daemon.socket, name);
     assert_eq!(created_two["ok"], true);
     let second_socket = PathBuf::from(created_two["result"]["socket"].as_str().unwrap());
+    assert_eq!(second_socket.parent(), Some(daemon.socket_dir.as_path()));
     assert_ne!(first_socket, second_socket);
     assert_proxy_available(&second_socket);
     assert_eq!(list_sessions(&daemon.socket).len(), 2);
@@ -252,6 +259,10 @@ fn file_only_creates_nested_sessions_from_fresh_policy_snapshots_and_keeps_ephem
     assert!(
         second_socket.exists(),
         "disconnect must preserve the other lease"
+    );
+    assert!(
+        !daemon.socket_dir.join("file-backed").exists(),
+        "disconnect must remove the empty Baffle-created named socket directory"
     );
     drop(lease_two);
     wait_for_session_count(&daemon.socket, 0);
@@ -428,8 +439,8 @@ fn file_only_rolls_back_when_runtime_provisioning_fails() {
 #[test]
 fn failed_session_creation_leaves_no_socket_or_registry_entry() {
     // Unix-domain socket paths are limited to 107 bytes on Linux. This makes
-    // runtime startup fail after the loopback listener is provisioned but
-    // before a session can be registered or its socket can be created.
+    // runtime startup fail before a session can be registered or its socket
+    // can be created.
     let daemon = start_daemon_with_socket_dir(250, &"s".repeat(80));
     let failed = request(
         &daemon.socket,
@@ -741,6 +752,12 @@ fn session_policy(host: &str, persistent: bool) -> String {
     )
 }
 
+fn session_policy_with_socket_name(host: &str, persistent: bool, socket_name: &str) -> String {
+    format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\nsocket_name = {socket_name:?}\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n"
+    )
+}
+
 fn write_session_policy_contents(daemon: &DaemonProcess, name: &str, contents: &str) {
     let root = daemon
         .session_config_dir
@@ -802,7 +819,7 @@ fn assert_proxy_available(socket_path: &PathBuf) {
             || status.starts_with("HTTP/1.0 400")
             || status.starts_with("HTTP/1.1 403")
             || status.starts_with("HTTP/1.0 403"),
-        "running deny-all proxy should respond through its own bridge: {status:?}"
+        "running deny-all proxy should respond through its own Unix socket: {status:?}"
     );
 }
 

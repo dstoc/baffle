@@ -39,16 +39,11 @@ class NamespaceInvariantTests(unittest.TestCase):
             CHECK.main()
         return output.getvalue()
 
-    def test_passes_for_separate_namespaces_and_loopback_listeners(self):
-        output = self.run_check(
-            ["net:[100]", "net:[200]"], [("127.0.0.1", 43123), ("::1", 43124)]
-        )
+    def test_passes_for_separate_namespaces_without_tcp_listeners(self):
+        output = self.run_check(["net:[100]", "net:[200]"], [])
 
         self.assertIn("different network namespaces", output)
-        self.assertIn("127.0.0.1:43123 is bound to loopback", output)
-        self.assertIn("::1:43124 is bound to loopback", output)
-        self.assertNotIn("cannot reach", output)
-        self.assertNotIn("confine", output)
+        self.assertIn("Baffle has no internal TCP listeners", output)
 
     def test_fails_when_namespaces_are_shared(self):
         with (
@@ -59,9 +54,9 @@ class NamespaceInvariantTests(unittest.TestCase):
         ):
             CHECK.main()
 
-    def test_fails_for_non_loopback_listener(self):
+    def test_fails_when_baffle_has_any_tcp_listener(self):
         with self.assertRaises(SystemExit):
-            self.run_check(["net:[100]", "net:[200]"], [("0.0.0.0", 43123)])
+            self.run_check(["net:[100]", "net:[200]"], [("127.0.0.1", 43123)])
 
 
 if __name__ == "__main__":

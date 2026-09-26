@@ -69,9 +69,9 @@ workflows.
 
 - The Baffle policy is not a firewall. Sandboxed clients must have no direct
   path to external networks.
-- Internal Rama listeners bind to loopback in Baffle's network namespace.
-  Sandboxed clients must not share that namespace or otherwise reach those
-  listeners.
+- baffle/40 removed the internal Rama TCP listeners. Use network namespaces
+  or firewalls for outbound destination restrictions and client egress policy,
+  not to hide an internal proxy port.
 - `.github/workflows/ci.yml` runs the privileged Linux namespace fixture on
   pull requests and main-branch pushes. The separate
   `.github/workflows/network-namespace.yml` workflow runs the same fixture only

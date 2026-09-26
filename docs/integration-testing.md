@@ -14,9 +14,9 @@ check remains exactly `Format, lint, and test`. The manually dispatched
 | --- | --- |
 | Client and control protocol | `tests/client.rs` and `tests/control_protocol.rs` cover typed client calls, framed requests, errors, leases, persistence, independent sessions, and response redaction. |
 | Daemon lifecycle | `tests/daemon_lifecycle.rs` starts the executable and checks startup, graceful shutdown, and missing CA handling. |
-| Policy through the daemon | `tests/daemon_proxy.rs` starts the real daemon, provisions sessions over the control socket, and sends traffic through assigned Unix sockets. It checks destination and port policy, tunnel-only traffic, plaintext denial, session separation, lease revocation, capacity, secret entitlements, HTTP/1.1 and HTTP/2 credential isolation, path denial, redaction, and inode-safe cleanup. |
+| Policy through the daemon | `tests/daemon_proxy.rs` starts the real daemon, provisions generated and named nested sessions over the control socket, and sends traffic through assigned Unix sockets. It checks destination and port policy, tunnel-only traffic, plaintext denial, session separation, lease revocation, capacity, secret entitlements, HTTP/1.1 and HTTP/2 credential isolation across simultaneous sessions, path denial, redaction, and inode-safe cleanup. |
 | Direct proxy runtime | `tests/proxy_runtime.rs` checks HTTPS-only admission, exact CONNECT host and port, CONNECT/SNI/HTTP authority binding, fragmented valid ClientHello handling, upstream TLS verification, required interception, explicit tunnel mode, HTTP/1.1 and HTTP/2 reused-connection policy, and resource limits. |
-| Shared policy and lifecycle | `src/policy.rs`, `src/control.rs`, `src/secrets.rs`, and `src/proxy_runtime/rama.rs` test canonical paths, session ownership, secret handling, socket cleanup, cancellation, fatal runtime reporting, accepted-socket `TCP_NODELAY`, and bounded shutdown. |
+| Shared policy and lifecycle | `src/policy.rs`, `src/control.rs`, `src/secrets.rs`, and `src/proxy_runtime/rama.rs` test canonical paths, session ownership, secret handling, generated and named nested sockets, socket cleanup, cancellation, fatal runtime reporting, and bounded shutdown. |
 | Documentation examples | `tests/documentation.rs` parses checked-in TOML examples. `cargo check --examples` compiles all Rust examples. |
 
 The runtime admits only CONNECT. Required path or credential interception
@@ -50,12 +50,11 @@ from source. A prebuilt release binary does not need them at runtime.
 
 The CI namespace job builds the default Rama daemon and runs
 `scripts/test-network-namespace-isolation.py` as root. The fixture creates
-daemon and client network namespaces joined by a veth pair. The client uses its
-assigned Unix data socket to reach an allowed HTTPS upstream. A route canary
-proves that the client can reach the daemon namespace. A second probe targets
-the daemon's actual internal TCP listener through the daemon veth address and
-requires `ECONNREFUSED`. The checker also verifies that Baffle's TCP listeners
-bind only to loopback.
+daemon and client network namespaces joined by a veth pair. It provisions a
+named nested Unix socket, checks mode `0600` and denies an untrusted UID. The
+isolated authorized client uses that socket to reach an allowed HTTPS upstream.
+A route canary proves that the client can reach the daemon namespace. The
+checker confirms that the Baffle process created no TCP listening port.
 
 The negative cases remain active. The checker rejects two processes in the same
 namespace and a listener bound to `0.0.0.0`. The fixture cleans up processes and
