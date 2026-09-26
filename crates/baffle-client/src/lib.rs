@@ -112,6 +112,36 @@ impl Client {
         Ok(())
     }
 
+    /// Reload one file-backed session by ID.
+    ///
+    /// This operation uses a short-lived control connection and does not
+    /// acquire, release, or replace the session's creator lease.
+    pub async fn reload(&self, session_id: impl AsRef<str>) -> Result<ReloadResult, ClientError> {
+        let request = ReloadRequest {
+            version: PROTOCOL_VERSION,
+            operation: "reload",
+            session_id: session_id.as_ref(),
+        };
+        let mut stream = self.open_control().await?;
+        let response = exchange(&mut stream, &request).await?;
+        success_result(response)
+    }
+
+    /// Reload every active file-backed session owned by the caller.
+    ///
+    /// Results are returned in stable session-ID order. Each result is
+    /// independent and may report `failed` while other sessions succeed.
+    pub async fn reload_all(&self) -> Result<Vec<ReloadResult>, ClientError> {
+        let request = ReloadAllRequest {
+            version: PROTOCOL_VERSION,
+            operation: "reload_all",
+        };
+        let mut stream = self.open_control().await?;
+        let response = exchange(&mut stream, &request).await?;
+        let result: ReloadAllResult = success_result(response)?;
+        Ok(result.results)
+    }
+
     /// List sessions owned by the authenticated control-socket user.
     pub async fn list(&self) -> Result<Vec<SessionInfo>, ClientError> {
         let request = ListRequest {
@@ -345,6 +375,35 @@ pub struct SessionInfo {
     pub persistent: bool,
     /// Current daemon lifecycle state.
     pub state: SessionState,
+    /// Number of the current immutable policy generation.
+    #[serde(default)]
+    pub generation: u64,
+    /// Number of superseded listeners still draining accepted connections.
+    #[serde(default)]
+    pub draining_generations: usize,
+}
+
+/// Outcome for one session in a reload operation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ReloadResult {
+    /// Opaque session ID.
+    pub id: String,
+    /// Outcome for this session.
+    pub status: ReloadStatus,
+    /// Current data-socket path, including on a failed reload.
+    #[serde(rename = "socket")]
+    pub socket_path: PathBuf,
+    /// Safe, non-secret failure category when `status` is `Failed`.
+    pub reason: Option<String>,
+}
+
+/// Reload status for one file-backed session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReloadStatus {
+    Reloaded,
+    Unchanged,
+    Failed,
 }
 
 /// Current lifecycle state of a proxy session.
@@ -460,6 +519,24 @@ struct StopRequest<'a> {
 struct ListRequest {
     version: u16,
     operation: &'static str,
+}
+
+#[derive(Serialize)]
+struct ReloadRequest<'a> {
+    version: u16,
+    operation: &'static str,
+    session_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct ReloadAllRequest {
+    version: u16,
+    operation: &'static str,
+}
+
+#[derive(Deserialize)]
+struct ReloadAllResult {
+    results: Vec<ReloadResult>,
 }
 
 #[derive(Deserialize)]

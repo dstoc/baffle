@@ -36,6 +36,17 @@ impl ResolvedSecrets {
         self.0.get(name)
     }
 
+    /// Compare effective credential values without formatting them.
+    pub(crate) fn has_same_values(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().all(|(name, value)| {
+                other
+                    .0
+                    .get(name)
+                    .is_some_and(|other| value.as_str() == other.as_str())
+            })
+    }
+
     #[cfg(test)]
     pub(crate) fn from_values(values: impl IntoIterator<Item = (String, String)>) -> Self {
         Self(

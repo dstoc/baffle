@@ -10,7 +10,10 @@ use std::{
         unix::{ffi::OsStrExt, net::UnixStream as StdUnixStream},
     },
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -435,15 +438,17 @@ impl ControlServer {
                     }
                 }
                 Some(event) = self.runtime_events.recv() => {
-                    let ProxyRuntimeEvent { runtime_id, result } = event;
+                    let ProxyRuntimeEvent { runtime_id, listener_generation, retired, result } = event;
                     match result {
-                        Ok(()) => info!(event = "session_lifecycle", session_id = %runtime_id.as_str(), state = "stopped", "proxy runtime stopped"),
+                        Ok(()) => info!(event = "session_lifecycle", session_id = %runtime_id.as_str(), state = if retired { "drained" } else { "stopped" }, "proxy runtime stopped"),
                         Err(error) => warn!(event = "session_lifecycle", session_id = %runtime_id.as_str(), state = "failed", error_class = error.class(), error = %error, "proxy runtime failed"),
                     }
                     let sessions = self.state.sessions.clone();
                     let session_id = runtime_id.as_str().to_owned();
                     self.session_cleanups.spawn(async move {
-                        sessions.remove(&session_id, "runtime_exit").await;
+                        sessions
+                            .runtime_exit(&session_id, listener_generation)
+                            .await;
                     });
                 }
             }
@@ -690,8 +695,15 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
             } else {
                 match state.provisioning_slots.clone().try_acquire_owned() {
                     Ok(permit) => {
-                        create_session_response(&state, client_uid, session, permit, &mut lease_id)
-                            .await
+                        create_session_response(
+                            &state,
+                            client_uid,
+                            session,
+                            None,
+                            permit,
+                            &mut lease_id,
+                        )
+                        .await
                     }
                     Err(_) => error_value(ERR_BUSY),
                 }
@@ -734,7 +746,15 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
                         return;
                     }
                 };
-                create_session_response(&state, client_uid, session, permit, &mut lease_id).await
+                create_session_response(
+                    &state,
+                    client_uid,
+                    session,
+                    Some(name),
+                    permit,
+                    &mut lease_id,
+                )
+                .await
             }
         }
         ControlRequest::Stop { session_id, .. } => {
@@ -743,6 +763,32 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
             } else {
                 error_value(ERR_SESSION_NOT_FOUND)
             }
+        }
+        ControlRequest::Reload { session_id, .. } => {
+            match state
+                .sessions
+                .reload(
+                    &session_id,
+                    client_uid,
+                    state.session_configs.as_ref(),
+                    &state.secret_store,
+                )
+                .await
+            {
+                Ok(result) => success(json!(result)),
+                Err(()) => error_value(ERR_SESSION_NOT_FOUND),
+            }
+        }
+        ControlRequest::ReloadAll { .. } => {
+            let results = state
+                .sessions
+                .reload_all(
+                    client_uid,
+                    state.session_configs.as_ref(),
+                    &state.secret_store,
+                )
+                .await;
+            success(json!({ "results": results }))
         }
         ControlRequest::List { .. } => success(json!({
             "sessions": state.sessions.list(client_uid).await,
@@ -769,6 +815,7 @@ async fn create_session_response(
     state: &ControlState,
     client_uid: u32,
     session: SessionConfig,
+    config_source: Option<String>,
     permit: tokio::sync::OwnedSemaphorePermit,
     lease_id: &mut Option<String>,
 ) -> Value {
@@ -780,7 +827,10 @@ async fn create_session_response(
             | SecretStoreError::Unavailable,
         ) => return error_value(ERR_SECRET_UNAVAILABLE),
     };
-    let result = state.sessions.create(client_uid, session, secrets).await;
+    let result = state
+        .sessions
+        .create(client_uid, session, secrets, config_source)
+        .await;
     drop(permit);
     match result {
         Ok(created) => {
@@ -886,6 +936,8 @@ struct SessionManager {
     metrics: Arc<Metrics>,
 }
 
+const MAX_RETIRED_LISTENERS: usize = 8;
+
 struct SessionRegistry {
     accepting_sessions: bool,
     sessions: HashMap<String, ManagedSession>,
@@ -921,6 +973,7 @@ impl SessionManager {
         owner_uid: u32,
         session: SessionConfig,
         secrets: ResolvedSecrets,
+        config_source: Option<String>,
     ) -> std::result::Result<SessionInfo, SessionError> {
         let secrets = Arc::new(secrets);
         let id = new_session_id().map_err(|_| SessionError::Internal)?;
@@ -943,7 +996,8 @@ impl SessionManager {
             .clone()
             .unwrap_or_else(|| format!("{id}.sock"));
         let socket_path = self.socket_dir.join(socket_name);
-        let runtime = match ProxyRuntime::start_with_metrics(
+        let listener_gate = Arc::new(AtomicU64::new(1));
+        let runtime = match ProxyRuntime::start_session_with_metrics(
             RuntimeId::new(id.clone()),
             session.clone(),
             Arc::clone(&secrets),
@@ -953,6 +1007,8 @@ impl SessionManager {
             self.io_timeout,
             Arc::clone(&self.metrics),
             self.runtime_events.clone(),
+            Arc::clone(&listener_gate),
+            1,
         )
         .await
         {
@@ -967,6 +1023,8 @@ impl SessionManager {
             id: id.clone(),
             persistent,
             state: SessionLifecycle::Running,
+            generation: 1,
+            draining_generations: 0,
         };
         let mut registry = self.registry.lock().await;
         registry.provisioning.remove(&id);
@@ -980,9 +1038,14 @@ impl SessionManager {
             ManagedSession {
                 info: info.clone(),
                 owner_uid,
-                _configuration: session,
-                _secrets: secrets,
+                configuration: session,
+                secrets,
+                config_source,
                 runtime: Some(runtime),
+                retired_runtimes: Vec::new(),
+                reload_lock: Arc::new(Mutex::new(())),
+                listener_gate,
+                listener_generation: 1,
             },
         );
         let active_sessions = self.metrics.session_started();
@@ -1001,7 +1064,18 @@ impl SessionManager {
     }
 
     async fn stop(&self, id: &str, owner_uid: u32) -> bool {
-        let runtime = {
+        let reload_lock = {
+            let registry = self.registry.lock().await;
+            let Some(session) = registry.sessions.get(id) else {
+                return false;
+            };
+            if session.owner_uid != owner_uid {
+                return false;
+            }
+            Arc::clone(&session.reload_lock)
+        };
+        let _serial = reload_lock.lock().await;
+        let runtimes = {
             let mut registry = self.registry.lock().await;
             let Some(session) = registry.sessions.get_mut(id) else {
                 return false;
@@ -1013,11 +1087,11 @@ impl SessionManager {
                 return true;
             }
             session.info.state = SessionLifecycle::Stopping;
-            session.runtime.take()
+            let mut runtimes = std::mem::take(&mut session.retired_runtimes);
+            runtimes.extend(session.runtime.take());
+            runtimes
         };
-        if let Some(runtime) = runtime {
-            runtime.shutdown(self.shutdown_grace).await;
-        }
+        self.shutdown_runtimes(runtimes).await;
         if self.registry.lock().await.sessions.remove(id).is_some() {
             let active_sessions = self.metrics.session_stopped();
             tracing::info!(
@@ -1033,7 +1107,15 @@ impl SessionManager {
     }
 
     async fn remove(&self, id: &str, reason: &'static str) {
-        let runtime = {
+        let reload_lock = {
+            let registry = self.registry.lock().await;
+            let Some(session) = registry.sessions.get(id) else {
+                return;
+            };
+            Arc::clone(&session.reload_lock)
+        };
+        let _serial = reload_lock.lock().await;
+        let runtimes = {
             let mut registry = self.registry.lock().await;
             let Some(session) = registry.sessions.get_mut(id) else {
                 return;
@@ -1042,11 +1124,11 @@ impl SessionManager {
                 return;
             }
             session.info.state = SessionLifecycle::Stopping;
-            session.runtime.take()
+            let mut runtimes = std::mem::take(&mut session.retired_runtimes);
+            runtimes.extend(session.runtime.take());
+            runtimes
         };
-        if let Some(runtime) = runtime {
-            runtime.shutdown(self.shutdown_grace).await;
-        }
+        self.shutdown_runtimes(runtimes).await;
         if self.registry.lock().await.sessions.remove(id).is_some() {
             let active_sessions = self.metrics.session_stopped();
             tracing::info!(
@@ -1060,41 +1142,102 @@ impl SessionManager {
         }
     }
 
+    async fn runtime_exit(&self, id: &str, listener_generation: u64) {
+        let reload_lock = {
+            let registry = self.registry.lock().await;
+            let Some(session) = registry.sessions.get(id) else {
+                return;
+            };
+            Arc::clone(&session.reload_lock)
+        };
+        let _serial = reload_lock.lock().await;
+        let runtimes = {
+            let mut registry = self.registry.lock().await;
+            let Some(session) = registry.sessions.get_mut(id) else {
+                return;
+            };
+            if session.listener_generation != listener_generation {
+                session
+                    .retired_runtimes
+                    .retain(|runtime| runtime.listener_generation() != listener_generation);
+                session.info.draining_generations = session.retired_runtimes.len();
+                return;
+            }
+            if session.info.state == SessionLifecycle::Stopping && session.runtime.is_none() {
+                return;
+            }
+            session.info.state = SessionLifecycle::Stopping;
+            let mut runtimes = std::mem::take(&mut session.retired_runtimes);
+            runtimes.extend(session.runtime.take());
+            runtimes
+        };
+        self.shutdown_runtimes(runtimes).await;
+        if self.registry.lock().await.sessions.remove(id).is_some() {
+            let active_sessions = self.metrics.session_stopped();
+            tracing::info!(
+                event = "session_lifecycle",
+                session_id = id,
+                state = "stopped",
+                reason = "runtime_exit",
+                active_sessions,
+                "proxy session removed"
+            );
+        }
+    }
+
     async fn shutdown_all(&self) {
-        let (runtimes, session_count) = {
+        let session_ids = {
             let mut registry = self.registry.lock().await;
             registry.accepting_sessions = false;
             registry.provisioning.clear();
-            let session_count = registry.sessions.len();
-            let runtimes = registry
-                .sessions
-                .values_mut()
-                .filter_map(|session| {
-                    session.info.state = SessionLifecycle::Stopping;
-                    session.runtime.take()
-                })
-                .collect::<Vec<_>>();
-            (runtimes, session_count)
+            registry.sessions.keys().cloned().collect::<Vec<_>>()
         };
-        let mut shutdowns = JoinSet::new();
-        for runtime in runtimes {
-            let grace = self.shutdown_grace;
-            shutdowns.spawn(async move {
-                runtime.shutdown(grace).await;
-            });
+        let mut runtimes = Vec::new();
+        let mut session_count = 0;
+        for id in session_ids {
+            let reload_lock = {
+                let registry = self.registry.lock().await;
+                registry
+                    .sessions
+                    .get(&id)
+                    .map(|session| Arc::clone(&session.reload_lock))
+            };
+            let Some(reload_lock) = reload_lock else {
+                continue;
+            };
+            let _serial = reload_lock.lock().await;
+            if let Some(session) = self.registry.lock().await.sessions.get_mut(&id) {
+                session.info.state = SessionLifecycle::Stopping;
+                runtimes.append(&mut session.retired_runtimes);
+                runtimes.extend(session.runtime.take());
+                session_count += 1;
+            }
         }
-        while shutdowns.join_next().await.is_some() {}
+        self.shutdown_runtimes(runtimes).await;
         self.registry.lock().await.sessions.clear();
         for _ in 0..session_count {
             self.metrics.session_stopped();
         }
     }
 
+    async fn shutdown_runtimes(&self, runtimes: Vec<ProxyRuntime>) {
+        let mut shutdowns = JoinSet::new();
+        for runtime in runtimes {
+            let grace = self.shutdown_grace;
+            shutdowns.spawn(async move { runtime.shutdown(grace).await });
+        }
+        while shutdowns.join_next().await.is_some() {}
+    }
+
     async fn list(&self, owner_uid: u32) -> Vec<SessionInfo> {
-        let mut sessions = self
-            .registry
-            .lock()
-            .await
+        let mut registry = self.registry.lock().await;
+        for session in registry.sessions.values_mut() {
+            session
+                .retired_runtimes
+                .retain(|runtime| !runtime.is_finished());
+            session.info.draining_generations = session.retired_runtimes.len();
+        }
+        let mut sessions = registry
             .sessions
             .values()
             .filter(|session| session.owner_uid == owner_uid)
@@ -1103,6 +1246,271 @@ impl SessionManager {
         sessions.sort_by(|left, right| left.id.cmp(&right.id));
         sessions
     }
+
+    async fn reload(
+        &self,
+        id: &str,
+        owner_uid: u32,
+        configs: Option<&SessionConfigStore>,
+        secret_store: &SecretStore,
+    ) -> std::result::Result<SessionReloadResult, ()> {
+        let reload_lock = {
+            let registry = self.registry.lock().await;
+            let Some(session) = registry.sessions.get(id) else {
+                return Err(());
+            };
+            if session.owner_uid != owner_uid {
+                return Err(());
+            }
+            Arc::clone(&session.reload_lock)
+        };
+        let _serial = reload_lock.lock().await;
+        Ok(self
+            .reload_locked(id, owner_uid, configs, secret_store)
+            .await)
+    }
+
+    async fn reload_all(
+        &self,
+        owner_uid: u32,
+        configs: Option<&SessionConfigStore>,
+        secret_store: &SecretStore,
+    ) -> Vec<SessionReloadResult> {
+        let sessions = {
+            let registry = self.registry.lock().await;
+            let mut sessions = registry
+                .sessions
+                .values()
+                .filter(|session| {
+                    session.owner_uid == owner_uid
+                        && session.config_source.is_some()
+                        && session.info.state == SessionLifecycle::Running
+                })
+                .map(|session| (session.info.id.clone(), session.info.socket.clone()))
+                .collect::<Vec<_>>();
+            sessions.sort_by(|left, right| left.0.cmp(&right.0));
+            sessions
+        };
+        let mut results = Vec::with_capacity(sessions.len());
+        for (id, socket) in sessions {
+            match self.reload(&id, owner_uid, configs, secret_store).await {
+                Ok(result) => results.push(result),
+                Err(()) => results.push(SessionReloadResult::failed(
+                    &id,
+                    socket,
+                    "session_unavailable",
+                )),
+            }
+        }
+        results
+    }
+
+    async fn reload_locked(
+        &self,
+        id: &str,
+        owner_uid: u32,
+        configs: Option<&SessionConfigStore>,
+        secret_store: &SecretStore,
+    ) -> SessionReloadResult {
+        let (config_source, current_secrets, current_socket, persistent) = {
+            let mut registry = self.registry.lock().await;
+            let accepting = registry.accepting_sessions;
+            let Some(session) = registry.sessions.get_mut(id) else {
+                return SessionReloadResult::failed(id, "".to_owned(), "session_unavailable");
+            };
+            if session.owner_uid != owner_uid {
+                return SessionReloadResult::failed(id, "".to_owned(), "session_unavailable");
+            }
+            session
+                .retired_runtimes
+                .retain(|runtime| !runtime.is_finished());
+            session.info.draining_generations = session.retired_runtimes.len();
+            if session.info.state != SessionLifecycle::Running || !accepting {
+                return SessionReloadResult::failed(
+                    id,
+                    session.info.socket.clone(),
+                    "session_stopping",
+                );
+            }
+            let Some(source) = session.config_source.clone() else {
+                return SessionReloadResult::failed(
+                    id,
+                    session.info.socket.clone(),
+                    "inline_session",
+                );
+            };
+            (
+                source,
+                Arc::clone(&session.secrets),
+                session.info.socket.clone(),
+                session.configuration.persistent,
+            )
+        };
+
+        let Some(configs) = configs else {
+            return SessionReloadResult::failed(id, current_socket, "configuration_unavailable");
+        };
+        let text = match configs.read_snapshot(&config_source) {
+            Ok(text) => text,
+            Err(SessionConfigFileError::NotFound) => {
+                return SessionReloadResult::failed(id, current_socket, "configuration_not_found");
+            }
+            Err(SessionConfigFileError::Unavailable) => {
+                return SessionReloadResult::failed(
+                    id,
+                    current_socket,
+                    "configuration_unavailable",
+                );
+            }
+            Err(SessionConfigFileError::Invalid) => {
+                return SessionReloadResult::failed(id, current_socket, "configuration_invalid");
+            }
+        };
+        let mut candidate = match ControlRequest::from_toml(&text) {
+            Ok(ControlRequest::Create { session, .. }) => session,
+            _ => {
+                return SessionReloadResult::failed(id, current_socket, "configuration_invalid");
+            }
+        };
+        // Persistence is the lifetime chosen at creation. A file edit cannot
+        // turn a leased session into a persistent one or end its lease.
+        candidate.persistent = persistent;
+        let candidate_secrets = match secret_store.resolve(owner_uid, &candidate) {
+            Ok(secrets) => Arc::new(secrets),
+            Err(_) => {
+                return SessionReloadResult::failed(id, current_socket, "credentials_unavailable");
+            }
+        };
+        let target_path = self.socket_dir.join(
+            candidate
+                .socket_name
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{id}.sock")),
+        );
+        let current_path = PathBuf::from(&current_socket);
+        let same_path = target_path == current_path;
+        let configuration_unchanged = same_effective_rules(&candidate.rules, &{
+            let registry = self.registry.lock().await;
+            let Some(session) = registry.sessions.get(id) else {
+                return SessionReloadResult::failed(id, current_socket, "session_unavailable");
+            };
+            session.configuration.rules.clone()
+        });
+        if configuration_unchanged
+            && same_path
+            && current_secrets.has_same_values(&candidate_secrets)
+        {
+            return SessionReloadResult::unchanged(id, current_socket);
+        }
+
+        if same_path {
+            let mut registry = self.registry.lock().await;
+            if !registry.accepting_sessions {
+                return SessionReloadResult::failed(id, current_socket, "session_stopping");
+            }
+            let Some(session) = registry.sessions.get_mut(id) else {
+                return SessionReloadResult::failed(id, current_socket, "session_unavailable");
+            };
+            let Some(runtime) = session.runtime.as_ref() else {
+                return SessionReloadResult::failed(id, current_socket, "session_stopping");
+            };
+            if runtime
+                .replace_generation(&candidate, Arc::clone(&candidate_secrets))
+                .is_err()
+            {
+                return SessionReloadResult::failed(id, current_socket, "generation_limit");
+            }
+            session.configuration = candidate;
+            session.secrets = candidate_secrets;
+            session.info.generation = session.info.generation.saturating_add(1);
+            session.info.draining_generations = session.retired_runtimes.len();
+            return SessionReloadResult::reloaded(id, current_socket);
+        }
+
+        let (permits, listener_gate, next_listener_generation, can_retire) = {
+            let mut registry = self.registry.lock().await;
+            if !registry.accepting_sessions {
+                return SessionReloadResult::failed(id, current_socket, "session_stopping");
+            }
+            let Some(session) = registry.sessions.get_mut(id) else {
+                return SessionReloadResult::failed(id, current_socket, "session_unavailable");
+            };
+            session
+                .retired_runtimes
+                .retain(|runtime| !runtime.is_finished());
+            let Some(runtime) = session.runtime.as_ref() else {
+                return SessionReloadResult::failed(id, current_socket, "session_stopping");
+            };
+            let Some(next_listener_generation) = session.listener_generation.checked_add(1) else {
+                return SessionReloadResult::failed(id, current_socket, "generation_limit");
+            };
+            (
+                runtime.connection_permits(),
+                Arc::clone(&session.listener_gate),
+                next_listener_generation,
+                session.retired_runtimes.len() < MAX_RETIRED_LISTENERS,
+            )
+        };
+        if !can_retire {
+            return SessionReloadResult::failed(id, current_socket, "generation_limit");
+        }
+        let replacement = match ProxyRuntime::start_replacement_with_metrics(
+            RuntimeId::new(id.to_owned()),
+            candidate.clone(),
+            Arc::clone(&candidate_secrets),
+            Arc::clone(&self.ca),
+            target_path.clone(),
+            permits,
+            self.io_timeout,
+            Arc::clone(&self.metrics),
+            self.runtime_events.clone(),
+            Arc::clone(&listener_gate),
+            next_listener_generation,
+        )
+        .await
+        {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                return SessionReloadResult::failed(id, current_socket, "listener_unavailable");
+            }
+        };
+
+        let mut registry = self.registry.lock().await;
+        if !registry.accepting_sessions {
+            drop(registry);
+            replacement.shutdown(self.shutdown_grace).await;
+            return SessionReloadResult::failed(id, current_socket, "session_stopping");
+        }
+        let Some(session) = registry.sessions.get_mut(id) else {
+            drop(registry);
+            replacement.shutdown(self.shutdown_grace).await;
+            return SessionReloadResult::failed(id, current_socket, "session_unavailable");
+        };
+        if session.info.state != SessionLifecycle::Running {
+            drop(registry);
+            replacement.shutdown(self.shutdown_grace).await;
+            return SessionReloadResult::failed(id, current_socket, "session_stopping");
+        }
+        let Some(old_runtime) = session.runtime.replace(replacement) else {
+            session.runtime = None;
+            drop(registry);
+            return SessionReloadResult::failed(id, current_socket, "session_stopping");
+        };
+        session.configuration = candidate;
+        session.secrets = candidate_secrets;
+        session.info.socket = target_path.to_string_lossy().into_owned();
+        session.info.generation = session.info.generation.saturating_add(1);
+        session.listener_generation = next_listener_generation;
+        old_runtime.mark_retiring();
+        session
+            .listener_gate
+            .store(next_listener_generation, Ordering::Release);
+        old_runtime.retire();
+        session.retired_runtimes.push(old_runtime);
+        session.info.draining_generations = session.retired_runtimes.len();
+        SessionReloadResult::reloaded(id, session.info.socket.clone())
+    }
 }
 
 struct ManagedSession {
@@ -1110,10 +1518,15 @@ struct ManagedSession {
     owner_uid: u32,
     // Keep the validated configuration with its runtime. Secret values are
     // held separately and neither value is included in list responses.
-    _configuration: SessionConfig,
+    configuration: SessionConfig,
     // Secret values remain scoped to this session and are never serialized.
-    _secrets: Arc<ResolvedSecrets>,
+    secrets: Arc<ResolvedSecrets>,
+    config_source: Option<String>,
     runtime: Option<ProxyRuntime>,
+    retired_runtimes: Vec<ProxyRuntime>,
+    reload_lock: Arc<Mutex<()>>,
+    listener_gate: Arc<AtomicU64>,
+    listener_generation: u64,
 }
 
 #[derive(Debug)]
@@ -1130,6 +1543,76 @@ struct SessionInfo {
     socket: String,
     persistent: bool,
     state: SessionLifecycle,
+    generation: u64,
+    draining_generations: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionReloadResult {
+    id: String,
+    status: ReloadStatus,
+    socket: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+impl SessionReloadResult {
+    fn reloaded(id: &str, socket: String) -> Self {
+        Self {
+            id: id.to_owned(),
+            status: ReloadStatus::Reloaded,
+            socket,
+            reason: None,
+        }
+    }
+
+    fn unchanged(id: &str, socket: String) -> Self {
+        Self {
+            id: id.to_owned(),
+            status: ReloadStatus::Unchanged,
+            socket,
+            reason: None,
+        }
+    }
+
+    fn failed(id: &str, socket: String, reason: &'static str) -> Self {
+        Self {
+            id: id.to_owned(),
+            status: ReloadStatus::Failed,
+            socket,
+            reason: Some(reason),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReloadStatus {
+    Reloaded,
+    Unchanged,
+    Failed,
+}
+
+fn same_effective_rules(
+    left: &[crate::config::HostRule],
+    right: &[crate::config::HostRule],
+) -> bool {
+    fn canonical(rules: &[crate::config::HostRule]) -> Vec<crate::config::HostRule> {
+        let mut rules = rules.to_vec();
+        for rule in &mut rules {
+            rule.ports.sort_unstable();
+            rule.paths.sort_by_key(|path| path.as_str());
+            for injection in &mut rule.inject {
+                injection.header.make_ascii_lowercase();
+            }
+            rule.inject
+                .sort_by(|left, right| left.header.cmp(&right.header));
+        }
+        rules.sort_by(|left, right| left.host.cmp(&right.host));
+        rules
+    }
+
+    canonical(left) == canonical(right)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1420,8 +1903,8 @@ mod tests {
             .expect("empty secret requirements should resolve");
 
         let (first, second) = tokio::join!(
-            manager.create(uid, session.clone(), first_secrets),
-            manager.create(uid, session.clone(), second_secrets),
+            manager.create(uid, session.clone(), first_secrets, None),
+            manager.create(uid, session.clone(), second_secrets, None),
         );
         assert_eq!(u8::from(first.is_ok()) + u8::from(second.is_ok()), 1);
         let created = match (first, second) {
@@ -1438,6 +1921,7 @@ mod tests {
                     secret_store
                         .resolve(uid, &session)
                         .expect("empty secret requirements should resolve"),
+                    None,
                 )
                 .await,
             Err(super::SessionError::AtCapacity)
@@ -1479,10 +1963,10 @@ mod tests {
             .get(id)
             .expect("session should be retained");
         assert_eq!(created.owner_uid, uid);
-        assert_eq!(created._configuration.rules[0].host, "example.com");
+        assert_eq!(created.configuration.rules[0].host, "example.com");
         assert_eq!(
             created
-                ._secrets
+                .secrets
                 .get("api-token")
                 .expect("session should own its resolved secret")
                 .as_str(),

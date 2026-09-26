@@ -4,13 +4,17 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::Shutdown,
+    net::TcpListener as StdTcpListener,
     os::unix::{
         fs::{MetadataExt, PermissionsExt, symlink},
         net::UnixStream,
     },
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::{Arc, Barrier},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -25,6 +29,7 @@ struct DaemonProcess {
     socket: PathBuf,
     socket_dir: PathBuf,
     session_config_dir: Option<PathBuf>,
+    secret_dir: PathBuf,
 }
 
 struct DaemonProcesses(Vec<Child>);
@@ -156,7 +161,17 @@ fn control_listener_handles_requests_and_rejects_bad_connections() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        assert_eq!(keys, ["id", "persistent", "socket", "state"]);
+        assert_eq!(
+            keys,
+            [
+                "draining_generations",
+                "generation",
+                "id",
+                "persistent",
+                "socket",
+                "state"
+            ]
+        );
     }
     let list_json = serde_json::to_string(&listed).expect("list should serialize");
     assert!(
@@ -267,6 +282,471 @@ fn file_only_creates_nested_sessions_from_fresh_policy_snapshots_and_keeps_ephem
     drop(lease_two);
     wait_for_session_count(&daemon.socket, 0);
     assert!(!second_socket.exists());
+}
+
+#[test]
+fn file_backed_reload_keeps_old_tunnels_and_cuts_over_new_connections_and_socket_paths() {
+    let daemon = start_file_only_daemon(250);
+    let upstream = StdTcpListener::bind(("127.0.0.1", 0)).expect("local tunnel origin should bind");
+    let port = upstream
+        .local_addr()
+        .expect("local tunnel origin should have an address")
+        .port();
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+    let origin_task = thread::spawn(move || {
+        let (mut origin, _) = upstream
+            .accept()
+            .expect("proxy should connect to the tunnel origin");
+        origin
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("origin timeout should be set");
+        accepted_tx.send(()).expect("accepted signal should send");
+        let mut bytes = [0; 256];
+        loop {
+            match origin.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(length) => origin
+                    .write_all(&bytes[..length])
+                    .expect("origin should echo tunnel bytes"),
+            }
+        }
+    });
+
+    let name = "reload/tunnel.toml";
+    write_session_policy_contents(&daemon, name, &tunnel_policy("localhost", port, true, None));
+    let (creator, created) = create_from_file(&daemon.socket, name);
+    assert_eq!(created["ok"], true);
+    drop(creator);
+    let session_id = created["result"]["id"]
+        .as_str()
+        .expect("created session should return its ID")
+        .to_owned();
+    let old_socket = PathBuf::from(
+        created["result"]["socket"]
+            .as_str()
+            .expect("created session should return its socket"),
+    );
+    let before = fs::symlink_metadata(&old_socket).expect("data socket should exist");
+
+    write_session_policy_contents(
+        &daemon,
+        name,
+        &format!(
+            "# Equivalent TOML must not replace the current generation.\n\n{}",
+            tunnel_policy("localhost", port, false, None)
+        ),
+    );
+    let unchanged = reload_session(&daemon.socket, &session_id);
+    assert_eq!(unchanged["result"]["status"], "unchanged");
+    assert_eq!(
+        unchanged["result"]["socket"],
+        old_socket.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        fs::symlink_metadata(&old_socket)
+            .expect("no-op reload must keep the listener")
+            .ino(),
+        before.ino()
+    );
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 1);
+
+    let mut old_tunnel = connect_tunnel(&old_socket, port);
+    accepted_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("old generation should connect to the origin");
+    tunnel_round_trip(&mut old_tunnel, b"before reload");
+
+    write_session_policy_contents(
+        &daemon,
+        name,
+        &tunnel_policy("other.example", port, false, None),
+    );
+    let reloaded = reload_session(&daemon.socket, &session_id);
+    assert_eq!(reloaded["result"]["status"], "reloaded");
+    assert_eq!(
+        reloaded["result"]["socket"],
+        old_socket.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        fs::symlink_metadata(&old_socket)
+            .expect("same-path reload must reuse the listener")
+            .ino(),
+        before.ino()
+    );
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 2);
+
+    tunnel_round_trip(&mut old_tunnel, b"old tunnel remains alive");
+    let mut denied = UnixStream::connect(&old_socket).expect("same listener should accept clients");
+    denied
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("proxy timeout should be set");
+    denied
+        .write_all(
+            format!("CONNECT localhost:{port} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n")
+                .as_bytes(),
+        )
+        .expect("CONNECT request should be written");
+    assert!(
+        read_http_headers(&mut denied).starts_with("HTTP/1.1 403"),
+        "new connections should use the replacement policy"
+    );
+
+    let nested_name = "reloaded/current.sock";
+    write_session_policy_contents(
+        &daemon,
+        name,
+        &tunnel_policy("localhost", port, false, Some(nested_name)),
+    );
+    let path_changed = reload_session(&daemon.socket, &session_id);
+    assert_eq!(path_changed["result"]["status"], "reloaded");
+    let current_socket = PathBuf::from(
+        path_changed["result"]["socket"]
+            .as_str()
+            .expect("reload result should report the current socket"),
+    );
+    assert_eq!(current_socket, daemon.socket_dir.join(nested_name));
+    assert!(
+        current_socket.exists(),
+        "new listener should be ready at cutover"
+    );
+    assert_proxy_available(&current_socket);
+    assert!(
+        !old_socket.exists(),
+        "old owned socket should be unlinked at cutover"
+    );
+    assert_eq!(
+        list_sessions(&daemon.socket)[0]["socket"],
+        current_socket.to_string_lossy().as_ref()
+    );
+    assert_eq!(list_sessions(&daemon.socket)[0]["persistent"], true);
+    assert!(
+        list_sessions(&daemon.socket)[0]["draining_generations"]
+            .as_u64()
+            .unwrap_or_default()
+            <= 1,
+        "one superseded listener should be tracked while it drains"
+    );
+    tunnel_round_trip(&mut old_tunnel, b"path change preserves old tunnel");
+
+    drop(old_tunnel);
+    let stopped = request(
+        &daemon.socket,
+        &format!("version = 1\noperation = \"stop\"\nsession_id = {session_id:?}\n"),
+    );
+    assert_eq!(stopped["result"]["stopped"], true);
+    assert!(!current_socket.exists());
+    assert!(!daemon.socket_dir.join("reloaded").exists());
+    origin_task
+        .join()
+        .expect("tunnel origin should stop after disconnect");
+}
+
+#[test]
+fn concurrent_reload_stop_and_creator_disconnect_do_not_resurrect_a_session() {
+    let daemon = start_file_only_daemon(250);
+    let name = "concurrent/reload.toml";
+    write_session_policy(&daemon, name, "old.example", false);
+    let (creator, created) = create_from_file(&daemon.socket, name);
+    let id = created["result"]["id"]
+        .as_str()
+        .expect("created session should return its ID")
+        .to_owned();
+    let old_socket = PathBuf::from(created["result"]["socket"].as_str().unwrap());
+
+    write_session_policy_contents(
+        &daemon,
+        name,
+        &session_policy_with_socket_name("new.example", false, "concurrent/new.sock"),
+    );
+
+    let start = Arc::new(Barrier::new(4));
+    let reload_start = Arc::clone(&start);
+    let reload_control = daemon.socket.clone();
+    let reload_id = id.clone();
+    let reload = thread::spawn(move || {
+        reload_start.wait();
+        reload_session(&reload_control, &reload_id)
+    });
+
+    let stop_start = Arc::clone(&start);
+    let stop_control = daemon.socket.clone();
+    let stop_id = id.clone();
+    let stop = thread::spawn(move || {
+        stop_start.wait();
+        request(
+            &stop_control,
+            &format!("version = 1\noperation = \"stop\"\nsession_id = {stop_id:?}\n"),
+        )
+    });
+
+    let disconnect_start = Arc::clone(&start);
+    let disconnect = thread::spawn(move || {
+        disconnect_start.wait();
+        drop(creator);
+    });
+
+    start.wait();
+    let reload_result = reload.join().expect("reload worker should finish");
+    let stop_result = stop.join().expect("stop worker should finish");
+    disconnect
+        .join()
+        .expect("creator disconnect worker should finish");
+    assert!(
+        reload_result["ok"] == true || reload_result["error"]["code"] == "session_not_found",
+        "reload should either finish independently or observe the stopped session: {reload_result}"
+    );
+    assert!(
+        stop_result["ok"] == true || stop_result["error"]["code"] == "session_not_found",
+        "stop should either stop the session or observe its completed cleanup: {stop_result}"
+    );
+
+    wait_for_session_count(&daemon.socket, 0);
+    assert!(
+        !old_socket.exists(),
+        "concurrent cleanup must remove the original socket"
+    );
+    assert!(
+        !daemon.socket_dir.join("concurrent/new.sock").exists(),
+        "a completed reload must not leave its replacement socket behind"
+    );
+    assert!(
+        !daemon.socket_dir.join("concurrent").exists(),
+        "cleanup must remove the Baffle-created empty socket directory"
+    );
+}
+
+#[test]
+fn reload_failures_preserve_active_socket_and_reload_all_reports_each_file_session() {
+    let daemon = start_file_only_daemon(250);
+    write_session_policy(&daemon, "first.toml", "first.example", true);
+    write_session_policy(&daemon, "second.toml", "second.example", true);
+    let (_first_creator, first) = create_from_file(&daemon.socket, "first.toml");
+    let (_second_creator, second) = create_from_file(&daemon.socket, "second.toml");
+    let first_id = first["result"]["id"].as_str().unwrap().to_owned();
+    let second_id = second["result"]["id"].as_str().unwrap().to_owned();
+    let first_socket = PathBuf::from(first["result"]["socket"].as_str().unwrap());
+    let before = fs::symlink_metadata(&first_socket).expect("active listener should exist");
+
+    let occupied_path = daemon.socket_dir.join("occupied.sock");
+    fs::write(&occupied_path, "operator-owned file").expect("occupied path should be created");
+    write_session_policy_contents(
+        &daemon,
+        "first.toml",
+        &session_policy_with_socket_name("first.example", true, "occupied.sock"),
+    );
+    let occupied = reload_session(&daemon.socket, &first_id);
+    assert_eq!(occupied["result"]["status"], "failed");
+    assert_eq!(occupied["result"]["reason"], "listener_unavailable");
+    assert_eq!(
+        occupied["result"]["socket"],
+        first_socket.to_string_lossy().as_ref()
+    );
+    assert!(
+        occupied_path.is_file(),
+        "rollback must leave an unowned collision alone"
+    );
+    assert_eq!(
+        fs::symlink_metadata(&first_socket)
+            .expect("original listener should remain active")
+            .ino(),
+        before.ino()
+    );
+
+    write_session_policy_contents(&daemon, "first.toml", "not valid TOML = [\n");
+    let invalid = reload_session(&daemon.socket, &first_id);
+    assert_eq!(invalid["result"]["status"], "failed");
+    assert_eq!(invalid["result"]["reason"], "configuration_invalid");
+    assert!(first_socket.exists());
+
+    let first_config = daemon
+        .session_config_dir
+        .as_ref()
+        .unwrap()
+        .join("first.toml");
+    let outside_config = daemon._directory.path().join("outside-session.toml");
+    fs::write(&outside_config, session_policy("outside.example", true))
+        .expect("outside policy should be written");
+    fs::set_permissions(&outside_config, fs::Permissions::from_mode(0o600))
+        .expect("outside policy should be private");
+    fs::remove_file(&first_config).expect("original policy should be removed");
+    symlink(&outside_config, &first_config).expect("malicious replacement symlink should be made");
+    let symlinked = reload_session(&daemon.socket, &first_id);
+    assert_eq!(symlinked["result"]["status"], "failed");
+    assert_eq!(symlinked["result"]["reason"], "configuration_unavailable");
+    assert!(
+        first_socket.exists(),
+        "unsafe replacement must not affect the session"
+    );
+
+    fs::remove_file(&first_config).expect("replacement symlink should be removed");
+    let missing = reload_session(&daemon.socket, &first_id);
+    assert_eq!(missing["result"]["status"], "failed");
+    assert_eq!(missing["result"]["reason"], "configuration_not_found");
+    assert!(first_socket.exists());
+
+    write_session_policy(&daemon, "first.toml", "first.example", true);
+    fs::remove_file(
+        daemon
+            .session_config_dir
+            .as_ref()
+            .unwrap()
+            .join("second.toml"),
+    )
+    .expect("second policy should be removed before reload-all");
+    let all = request(&daemon.socket, "version = 1\noperation = \"reload_all\"\n");
+    assert_eq!(all["ok"], true);
+    let results = all["result"]["results"]
+        .as_array()
+        .expect("reload_all should return per-session results");
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result["status"] == "unchanged")
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result["status"] == "failed")
+            .count(),
+        1
+    );
+    let failed = results
+        .iter()
+        .find(|result| result["status"] == "failed")
+        .expect("one session should fail");
+    assert_eq!(failed["id"], second_id);
+    assert_eq!(failed["reason"], "configuration_not_found");
+    assert_eq!(list_sessions(&daemon.socket).len(), 2);
+
+    for id in [first_id, second_id] {
+        let stopped = request(
+            &daemon.socket,
+            &format!("version = 1\noperation = \"stop\"\nsession_id = {id:?}\n"),
+        );
+        assert_eq!(stopped["result"]["stopped"], true);
+    }
+}
+
+#[test]
+fn inline_session_reload_is_rejected_with_a_safe_reason() {
+    let daemon = start_daemon(250);
+    let (_creator, created) = create_session(&daemon.socket, true, "inline.example");
+    let id = created["result"]["id"].as_str().unwrap();
+    let result = reload_session(&daemon.socket, id);
+    assert_eq!(result["result"]["status"], "failed");
+    assert_eq!(result["result"]["reason"], "inline_session");
+    assert_eq!(result["result"]["socket"], created["result"]["socket"]);
+    assert_eq!(list_sessions(&daemon.socket).len(), 1);
+}
+
+#[test]
+fn credential_rotation_is_an_effective_change_and_unavailable_credentials_roll_back() {
+    let daemon = start_file_only_daemon(250);
+    let secret_path = daemon.secret_dir.join("api-token");
+    fs::write(&secret_path, "old-sensitive-value\n").expect("credential should be written");
+    fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o600))
+        .expect("credential should be private");
+    write_session_policy_contents(
+        &daemon,
+        "credentials.toml",
+        &intercept_policy_with_secret("api.example", true),
+    );
+    let (_creator, created) = create_from_file(&daemon.socket, "credentials.toml");
+    assert_eq!(created["ok"], true);
+    let id = created["result"]["id"].as_str().unwrap().to_owned();
+    let socket = PathBuf::from(created["result"]["socket"].as_str().unwrap());
+
+    fs::write(&secret_path, "new-sensitive-value\n").expect("rotated credential should be written");
+    fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o600))
+        .expect("rotated credential should remain private");
+    let reloaded = reload_session(&daemon.socket, &id);
+    assert_eq!(reloaded["result"]["status"], "reloaded");
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 2);
+    let response = serde_json::to_string(&reloaded).expect("reload result should serialize");
+    assert!(!response.contains("old-sensitive-value"));
+    assert!(!response.contains("new-sensitive-value"));
+
+    fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o644))
+        .expect("unsafe credential mode should be set");
+    let failed = reload_session(&daemon.socket, &id);
+    assert_eq!(failed["result"]["status"], "failed");
+    assert_eq!(failed["result"]["reason"], "credentials_unavailable");
+    assert_eq!(
+        failed["result"]["socket"],
+        socket.to_string_lossy().as_ref()
+    );
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 2);
+    assert!(
+        socket.exists(),
+        "credential failure must preserve the active listener"
+    );
+
+    let stopped = request(
+        &daemon.socket,
+        &format!("version = 1\noperation = \"stop\"\nsession_id = {id:?}\n"),
+    );
+    assert_eq!(stopped["result"]["stopped"], true);
+}
+
+#[test]
+fn reload_limits_pinned_policy_generations_without_closing_old_tunnels() {
+    const GENERATIONS: usize = 8;
+    let daemon = start_file_only_daemon(250);
+    let (port, stop_origin, origin_task) = start_echo_origin();
+    let name = "generation-limit.toml";
+    write_session_policy_contents(&daemon, name, &generation_policy(1, port));
+    let (_creator, created) = create_from_file(&daemon.socket, name);
+    let id = created["result"]["id"].as_str().unwrap().to_owned();
+    let socket = PathBuf::from(created["result"]["socket"].as_str().unwrap());
+
+    let mut tunnels = Vec::new();
+    tunnels.push(connect_tunnel(&socket, port));
+    for generation in 2..=GENERATIONS {
+        write_session_policy_contents(&daemon, name, &generation_policy(generation, port));
+        let result = reload_session(&daemon.socket, &id);
+        assert_eq!(result["result"]["status"], "reloaded");
+        tunnels.push(connect_tunnel(&socket, port));
+    }
+
+    write_session_policy_contents(&daemon, name, &generation_policy(9, port));
+    let limited = reload_session(&daemon.socket, &id);
+    assert_eq!(limited["result"]["status"], "failed");
+    assert_eq!(limited["result"]["reason"], "generation_limit");
+    assert_eq!(
+        limited["result"]["socket"],
+        socket.to_string_lossy().as_ref()
+    );
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], GENERATIONS);
+    tunnel_round_trip(&mut tunnels[0], b"oldest tunnel is still active");
+    tunnel_round_trip(
+        &mut tunnels[GENERATIONS - 1],
+        b"newest tunnel is still active",
+    );
+
+    drop(tunnels);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let result = reload_session(&daemon.socket, &id);
+        if result["result"]["status"] == "reloaded" {
+            break;
+        }
+        assert_eq!(result["result"]["reason"], "generation_limit");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "drained generations should release the resource limit"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let stopped = request(
+        &daemon.socket,
+        &format!("version = 1\noperation = \"stop\"\nsession_id = {id:?}\n"),
+    );
+    assert_eq!(stopped["result"]["stopped"], true);
+    stop_origin.store(true, Ordering::Release);
+    origin_task.join().expect("echo origin should stop");
 }
 
 #[test]
@@ -653,6 +1133,10 @@ fn start_daemon_with_options(
     let socket = directory.path().join("run/control.sock");
     let socket_dir = directory.path().join(socket_dir_name);
     let config_path = directory.path().join("daemon.toml");
+    let secret_dir = directory.path().join("secrets");
+    fs::create_dir(&secret_dir).expect("secret directory should be created");
+    fs::set_permissions(&secret_dir, fs::Permissions::from_mode(0o700))
+        .expect("secret directory should be private");
     let session_config_dir = file_only.then(|| directory.path().join("session-configs"));
     if let Some(session_config_dir) = &session_config_dir {
         fs::create_dir(session_config_dir).expect("session config directory should be created");
@@ -673,11 +1157,12 @@ fn start_daemon_with_options(
         })
         .unwrap_or_default();
     let config = format!(
-        "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\ncontrol_read_timeout_ms = {read_timeout_ms}\n{file_settings}\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"unused-secrets\"\n",
+        "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\ncontrol_read_timeout_ms = {read_timeout_ms}\n{file_settings}\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"{}\"\nallowed = [\"api-token\"]\n",
         socket.display(),
         socket_dir.display(),
         certificate_path.display(),
         private_key_path.display(),
+        secret_dir.display(),
     );
     fs::write(&config_path, config).expect("daemon config should be written");
     let child = Command::new(env!("CARGO_BIN_EXE_baffle"))
@@ -694,6 +1179,7 @@ fn start_daemon_with_options(
         socket,
         socket_dir,
         session_config_dir,
+        secret_dir,
     };
 
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -750,6 +1236,124 @@ fn session_policy(host: &str, persistent: bool) -> String {
     format!(
         "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n"
     )
+}
+
+fn tunnel_policy(host: &str, port: u16, persistent: bool, socket_name: Option<&str>) -> String {
+    let socket_setting = socket_name
+        .map(|name| format!("socket_name = {name:?}\n"))
+        .unwrap_or_default();
+    format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n{socket_setting}\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\nports = [{port}]\n"
+    )
+}
+
+fn generation_policy(generation: usize, port: u16) -> String {
+    format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{port}]\n\n[[rules]]\nhost = \"generation-{generation}.example\"\nmode = \"tunnel\"\n"
+    )
+}
+
+fn start_echo_origin() -> (u16, Arc<AtomicBool>, thread::JoinHandle<()>) {
+    let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("echo origin should bind");
+    listener
+        .set_nonblocking(true)
+        .expect("echo origin should accept without blocking");
+    let port = listener
+        .local_addr()
+        .expect("echo origin should have an address")
+        .port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_signal = Arc::clone(&stop);
+    let task = thread::spawn(move || {
+        let mut clients = Vec::new();
+        while !stop_signal.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    clients.push(thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                        let mut bytes = [0; 256];
+                        loop {
+                            match stream.read(&mut bytes) {
+                                Ok(0) | Err(_) => break,
+                                Ok(length) => {
+                                    if stream.write_all(&bytes[..length]).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("echo origin accept failed: {error}"),
+            }
+        }
+        for client in clients {
+            let _ = client.join();
+        }
+    });
+    (port, stop, task)
+}
+
+fn intercept_policy_with_secret(host: &str, persistent: bool) -> String {
+    format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n\n[[rules]]\nhost = \"{host}\"\nmode = \"intercept\"\npaths = [\"/allowed\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n"
+    )
+}
+
+fn reload_session(control_socket: &PathBuf, session_id: &str) -> Value {
+    request(
+        control_socket,
+        &format!("version = 1\noperation = \"reload\"\nsession_id = {session_id:?}\n"),
+    )
+}
+
+fn connect_tunnel(socket_path: &PathBuf, port: u16) -> UnixStream {
+    let mut stream = UnixStream::connect(socket_path).expect("proxy should accept a tunnel");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("proxy timeout should be set");
+    stream
+        .write_all(
+            format!("CONNECT localhost:{port} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n")
+                .as_bytes(),
+        )
+        .expect("CONNECT request should be written");
+    let response = read_http_headers(&mut stream);
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "CONNECT should establish the old tunnel: {response:?}"
+    );
+    stream
+}
+
+fn tunnel_round_trip(stream: &mut UnixStream, payload: &[u8]) {
+    stream
+        .write_all(payload)
+        .expect("opaque tunnel payload should be written");
+    let mut echoed = vec![0; payload.len()];
+    stream
+        .read_exact(&mut echoed)
+        .expect("opaque tunnel payload should be echoed");
+    assert_eq!(echoed, payload);
+}
+
+fn read_http_headers(stream: &mut UnixStream) -> String {
+    let mut bytes = Vec::new();
+    let mut byte = [0; 1];
+    while !bytes.ends_with(b"\r\n\r\n") {
+        stream
+            .read_exact(&mut byte)
+            .expect("proxy response headers should be complete");
+        bytes.push(byte[0]);
+        assert!(
+            bytes.len() < 16 * 1024,
+            "proxy response headers should be small"
+        );
+    }
+    String::from_utf8(bytes).expect("proxy response headers should be UTF-8")
 }
 
 fn session_policy_with_socket_name(host: &str, persistent: bool, socket_name: &str) -> String {

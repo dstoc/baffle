@@ -17,6 +17,9 @@ async fn main() -> Result<()> {
         baffle_proxy::cli::Command::Stop(args) => {
             baffle_proxy::cli::stop(cli.control_socket, args).await
         }
+        baffle_proxy::cli::Command::Reload(args) => {
+            baffle_proxy::cli::reload(cli.control_socket, args).await
+        }
         baffle_proxy::cli::Command::Ca(args) => match args.command {
             baffle_proxy::cli::CaCommand::Export(args) => {
                 daemon::export_ca_certificate(&args.config, &args.output)

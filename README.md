@@ -103,6 +103,8 @@ baffle create cladding/github.toml
 
 baffle list
 baffle stop <session-id>
+baffle reload <session-id>
+baffle reload --all
 ```
 
 The control socket is private. Run these commands as the configured
@@ -111,6 +113,15 @@ directory. An ephemeral create prints its session ID and data-socket path, then
 keeps running as the lease owner until Ctrl+C or process termination. A
 persistent create prints that it is persistent and returns; stop it with
 `baffle stop <session-id>`.
+
+For a file-backed session, update its administrator-managed TOML file and run
+`baffle reload <session-id>` to apply the validated configuration to newly
+accepted connections. `baffle reload --all` reports each file-backed session
+separately and exits unsuccessfully if any reload fails. Reload preserves the
+session ID and creator lease. Existing connections keep their policy and
+credentials until they close, so reload is not immediate credential
+revocation. See the [deployment guide](docs/security-deployment.md) for a
+safe update sequence.
 
 The two create forms are exclusive. `--config` names a local file and is
 available when the daemon accepts inline creates. The positional name is
@@ -139,8 +150,9 @@ authority. A trusted orchestrator creates a session over the control socket
 and gets the path to that session's Unix data socket. Rama handles proxy
 traffic directly on the Baffle-owned Unix listener.
 
-The current implementation gives every session an immutable policy, a
-Rama runtime, credential state, and resource counters. The runtime authorizes
+The current implementation gives every session immutable policy generations,
+a Rama runtime, credential state, and resource counters. Each accepted
+connection keeps the generation active when it was accepted. The runtime authorizes
 the configured hostname and port before dialing. Baffle does not filter or pin
 DNS answers. The session manager shares the Tokio runtime and CA material. See
 the [architecture guide](docs/architecture.md) for component details and data

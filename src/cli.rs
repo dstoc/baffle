@@ -6,8 +6,8 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use baffle_client::{
-    Client, ClientError, HeaderInjection, HostRule, InjectionFormat, RuleMode, Session,
-    SessionConfig, SessionInfo,
+    Client, ClientError, HeaderInjection, HostRule, InjectionFormat, ReloadResult, ReloadStatus,
+    RuleMode, Session, SessionConfig, SessionInfo,
 };
 use clap::{ArgGroup, Args, Parser, Subcommand};
 
@@ -20,7 +20,7 @@ const DEFAULT_CONTROL_SOCKET: &str = "/run/baffle/control.sock";
     about = "Policy-controlled HTTP/HTTPS proxy daemon"
 )]
 pub struct Cli {
-    /// Unix control socket for create, list, and stop.
+    /// Unix control socket for create, list, stop, and reload.
     #[arg(
         long,
         global = true,
@@ -42,6 +42,8 @@ pub enum Command {
     List,
     /// Stop an active session by ID.
     Stop(StopArgs),
+    /// Reload one file-backed session or all active file-backed sessions.
+    Reload(ReloadArgs),
     /// Manage the daemon certificate authority.
     Ca(CaArgs),
 }
@@ -62,6 +64,17 @@ pub struct StopArgs {
     /// Opaque session ID returned by `baffle create` or `baffle list`.
     #[arg(value_name = "SESSION_ID")]
     pub session_id: String,
+}
+
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("target").required(true).args(["session_id", "all"])))]
+pub struct ReloadArgs {
+    /// Opaque file-backed session ID returned by `create` or `list`.
+    #[arg(value_name = "SESSION_ID", conflicts_with = "all")]
+    pub session_id: Option<String>,
+    /// Reload every active file-backed session owned by the current user.
+    #[arg(long, conflicts_with = "session_id")]
+    pub all: bool,
 }
 
 #[derive(Debug, Args)]
@@ -134,6 +147,76 @@ pub async fn stop(control_socket: PathBuf, args: StopArgs) -> Result<()> {
         .map_err(|error| client_error(error, client.control_socket(), false))?;
     println!("Stopped session {}.", args.session_id);
     Ok(())
+}
+
+pub async fn reload(control_socket: PathBuf, args: ReloadArgs) -> Result<()> {
+    let client = Client::new(control_socket);
+    let results = if args.all {
+        client
+            .reload_all()
+            .await
+            .map_err(|error| client_error(error, client.control_socket(), false))?
+    } else {
+        let session_id = args
+            .session_id
+            .as_deref()
+            .expect("clap requires one reload target");
+        vec![
+            client
+                .reload(session_id)
+                .await
+                .map_err(|error| client_error(error, client.control_socket(), false))?,
+        ]
+    };
+    print_reload_results(&results)?;
+    if results
+        .iter()
+        .any(|result| result.status == ReloadStatus::Failed)
+    {
+        return Err(anyhow!("one or more sessions failed to reload"));
+    }
+    Ok(())
+}
+
+fn print_reload_results(results: &[ReloadResult]) -> Result<()> {
+    for result in results {
+        match result.status {
+            ReloadStatus::Reloaded => println!(
+                "Session {}: reloaded (socket {}).",
+                result.id,
+                result.socket_path.display()
+            ),
+            ReloadStatus::Unchanged => println!(
+                "Session {}: unchanged (socket {}).",
+                result.id,
+                result.socket_path.display()
+            ),
+            ReloadStatus::Failed => println!(
+                "Session {}: failed ({}) (socket {}).",
+                result.id,
+                reload_failure_text(result.reason.as_deref()),
+                result.socket_path.display()
+            ),
+        }
+    }
+    io::stdout()
+        .flush()
+        .context("could not flush reload results")
+}
+
+fn reload_failure_text(reason: Option<&str>) -> &str {
+    match reason {
+        Some("inline_session") => "inline-configured sessions cannot be reloaded",
+        Some("configuration_not_found") => "configuration file was not found",
+        Some("configuration_unavailable") => "configuration file could not be read safely",
+        Some("configuration_invalid") => "configuration file is invalid",
+        Some("credentials_unavailable") => "credentials are unavailable",
+        Some("listener_unavailable") => "replacement listener could not be created",
+        Some("generation_limit") => "reload resource limit reached",
+        Some("session_stopping") => "session is stopping",
+        Some("session_unavailable") => "session is unavailable",
+        _ => "reload failed",
+    }
 }
 
 fn load_local_session_config(path: &std::path::Path) -> Result<SessionConfig> {
@@ -322,6 +405,24 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn reload_requires_one_id_or_all() {
+        let one = Cli::try_parse_from(["baffle", "reload", "session_123"])
+            .expect("reload by ID should parse");
+        assert!(
+            matches!(one.command, Command::Reload(args) if args.session_id.as_deref() == Some("session_123") && !args.all)
+        );
+
+        let all =
+            Cli::try_parse_from(["baffle", "reload", "--all"]).expect("reload all should parse");
+        assert!(
+            matches!(all.command, Command::Reload(args) if args.all && args.session_id.is_none())
+        );
+
+        assert!(Cli::try_parse_from(["baffle", "reload"]).is_err());
+        assert!(Cli::try_parse_from(["baffle", "reload", "session_123", "--all"]).is_err());
     }
 
     #[test]

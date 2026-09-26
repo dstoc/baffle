@@ -14,7 +14,10 @@ use std::{
     },
     path::{Component, Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -41,7 +44,7 @@ use rama::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpStream, UnixListener},
-    sync::Semaphore,
+    sync::{Semaphore, watch},
     task::{AbortHandle, JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -55,15 +58,31 @@ use crate::{
 };
 
 const MAX_CONNECT_HEADER_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_POLICY_GENERATIONS: usize = 8;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RuntimeGenerationLimit;
 
 /// An opaque proxy session served directly on its private Unix socket.
 pub struct ProxyRuntime {
     runtime_id: RuntimeId,
+    listener_generation: u64,
     socket_path: PathBuf,
     cancellation: CancellationToken,
+    retirement: CancellationToken,
+    retired: Arc<AtomicBool>,
     task_abort: AbortHandle,
     task: JoinHandle<()>,
     metrics: Arc<Metrics>,
+    generation: watch::Sender<Arc<ProxyGeneration>>,
+    generations: Arc<Mutex<Vec<Weak<ProxyGeneration>>>>,
+    permits: Arc<Semaphore>,
+    socket_guard: Arc<Mutex<Option<UnixSocketGuard>>>,
+}
+
+struct ProxyGeneration {
+    policy: Arc<SessionPolicy>,
+    secrets: Arc<ResolvedSecrets>,
 }
 
 impl ProxyRuntime {
@@ -105,26 +124,130 @@ impl ProxyRuntime {
         metrics: Arc<Metrics>,
         events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
     ) -> Result<Self, ProxyRuntimeError> {
+        let permits = Arc::new(Semaphore::new(max_connections));
+        let listener_gate = Arc::new(AtomicU64::new(1));
+        Self::start_inner(
+            runtime_id,
+            session,
+            secrets,
+            ca,
+            socket_path,
+            permits,
+            io_timeout,
+            metrics,
+            events,
+            listener_gate,
+            1,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_session_with_metrics(
+        runtime_id: RuntimeId,
+        session: SessionConfig,
+        secrets: Arc<ResolvedSecrets>,
+        ca: Arc<ManagedCa>,
+        socket_path: PathBuf,
+        max_connections: usize,
+        io_timeout: Duration,
+        metrics: Arc<Metrics>,
+        events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
+        listener_gate: Arc<AtomicU64>,
+        listener_generation: u64,
+    ) -> Result<Self, ProxyRuntimeError> {
+        Self::start_inner(
+            runtime_id,
+            session,
+            secrets,
+            ca,
+            socket_path,
+            Arc::new(Semaphore::new(max_connections)),
+            io_timeout,
+            metrics,
+            events,
+            listener_gate,
+            listener_generation,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_replacement_with_metrics(
+        runtime_id: RuntimeId,
+        session: SessionConfig,
+        secrets: Arc<ResolvedSecrets>,
+        ca: Arc<ManagedCa>,
+        socket_path: PathBuf,
+        permits: Arc<Semaphore>,
+        io_timeout: Duration,
+        metrics: Arc<Metrics>,
+        events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
+        listener_gate: Arc<AtomicU64>,
+        listener_generation: u64,
+    ) -> Result<Self, ProxyRuntimeError> {
+        Self::start_inner(
+            runtime_id,
+            session,
+            secrets,
+            ca,
+            socket_path,
+            permits,
+            io_timeout,
+            metrics,
+            events,
+            listener_gate,
+            listener_generation,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_inner(
+        runtime_id: RuntimeId,
+        session: SessionConfig,
+        secrets: Arc<ResolvedSecrets>,
+        ca: Arc<ManagedCa>,
+        socket_path: PathBuf,
+        permits: Arc<Semaphore>,
+        io_timeout: Duration,
+        metrics: Arc<Metrics>,
+        events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
+        listener_gate: Arc<AtomicU64>,
+        listener_generation: u64,
+    ) -> Result<Self, ProxyRuntimeError> {
         let (unix_listener, socket_guard) =
             bind_unix_listener(&socket_path).map_err(ProxyRuntimeError::BindSocket)?;
+        let socket_guard = Arc::new(Mutex::new(Some(socket_guard)));
 
-        let policy = Arc::new(SessionPolicy::compile(&session));
+        let generation = Arc::new(ProxyGeneration {
+            policy: Arc::new(SessionPolicy::compile(&session)),
+            secrets,
+        });
+        let (generation_sender, generation_receiver) = watch::channel(Arc::clone(&generation));
+        let generations = Arc::new(Mutex::new(vec![Arc::downgrade(&generation)]));
         let cancellation = CancellationToken::new();
+        let retirement = CancellationToken::new();
+        let retired = Arc::new(AtomicBool::new(false));
         let mut proxy_task = tokio::spawn(run_proxy(
             unix_listener,
-            socket_guard,
+            Arc::clone(&socket_guard),
             ProxySettings {
-                policy,
-                secrets,
+                generations: generation_receiver,
                 ca,
-                permits: Arc::new(Semaphore::new(max_connections)),
+                permits: Arc::clone(&permits),
                 cancellation: cancellation.clone(),
+                retirement: retirement.clone(),
+                listener_gate: Arc::clone(&listener_gate),
+                listener_generation,
                 metrics: Arc::clone(&metrics),
                 io_timeout,
             },
         ));
         let task_abort = proxy_task.abort_handle();
         let event_id = runtime_id.clone();
+        let event_retired = Arc::clone(&retired);
+        let event_gate = Arc::clone(&listener_gate);
         let task = tokio::spawn(async move {
             let result = map_proxy_join((&mut proxy_task).await);
             if result.is_err() {
@@ -135,19 +258,31 @@ impl ProxyRuntime {
                     "Rama proxy session task failed"
                 );
             }
-            let _ = events.send(ProxyRuntimeEvent {
-                runtime_id: event_id,
-                result,
-            });
+            let retired = event_retired.load(Ordering::Acquire);
+            if retired || event_gate.load(Ordering::Acquire) == listener_generation {
+                let _ = events.send(ProxyRuntimeEvent {
+                    runtime_id: event_id,
+                    listener_generation,
+                    retired,
+                    result,
+                });
+            }
         });
 
         Ok(Self {
             runtime_id,
+            listener_generation,
             socket_path,
             cancellation,
+            retirement,
+            retired,
             task_abort,
             task,
             metrics,
+            generation: generation_sender,
+            generations,
+            permits,
+            socket_guard,
         })
     }
 
@@ -155,8 +290,55 @@ impl ProxyRuntime {
         &self.runtime_id
     }
 
+    pub(crate) fn listener_generation(&self) -> u64 {
+        self.listener_generation
+    }
+
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// Atomically select a new immutable policy for connections accepted next.
+    pub(crate) fn replace_generation(
+        &self,
+        session: &SessionConfig,
+        secrets: Arc<ResolvedSecrets>,
+    ) -> Result<(), RuntimeGenerationLimit> {
+        let generation = Arc::new(ProxyGeneration {
+            policy: Arc::new(SessionPolicy::compile(session)),
+            secrets,
+        });
+        let mut generations = self.generations.lock().expect("generation lock poisoned");
+        generations.retain(|generation| generation.strong_count() > 0);
+        if generations.len() >= MAX_POLICY_GENERATIONS {
+            return Err(RuntimeGenerationLimit);
+        }
+        self.generation.send_replace(Arc::clone(&generation));
+        generations.push(Arc::downgrade(&generation));
+        Ok(())
+    }
+
+    /// Stop accepting and drain connections already accepted by this listener.
+    pub(crate) fn mark_retiring(&self) {
+        self.retired.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn retire(&self) {
+        self.mark_retiring();
+        self.retirement.cancel();
+        if let Ok(guard) = self.socket_guard.lock()
+            && let Some(guard) = guard.as_ref()
+        {
+            guard.unlink_owned();
+        }
+    }
+
+    pub(crate) fn connection_permits(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.permits)
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.task.is_finished()
     }
 
     /// Cancel ingress, drain active work, then abort after the grace period.
@@ -167,6 +349,9 @@ impl ProxyRuntime {
             state = "stopping",
             "Rama proxy session shutdown started"
         );
+        if let Ok(mut guard) = self.socket_guard.lock() {
+            guard.take();
+        }
         self.cancellation.cancel();
         if tokio::time::timeout(grace, &mut self.task).await.is_err() {
             self.metrics.forced_shutdown();
@@ -182,6 +367,9 @@ impl Drop for ProxyRuntime {
         // If the session owner is cancelled while awaiting graceful shutdown,
         // do not detach the proxy connection tasks.
         self.task_abort.abort();
+        if let Ok(mut guard) = self.socket_guard.lock() {
+            guard.take();
+        }
     }
 }
 
@@ -192,26 +380,30 @@ fn map_proxy_join(
 }
 
 struct ProxySettings {
-    policy: Arc<SessionPolicy>,
-    secrets: Arc<ResolvedSecrets>,
+    generations: watch::Receiver<Arc<ProxyGeneration>>,
     ca: Arc<ManagedCa>,
     permits: Arc<Semaphore>,
     cancellation: CancellationToken,
+    retirement: CancellationToken,
+    listener_gate: Arc<AtomicU64>,
+    listener_generation: u64,
     metrics: Arc<Metrics>,
     io_timeout: Duration,
 }
 
 async fn run_proxy(
     listener: UnixListener,
-    socket_guard: UnixSocketGuard,
+    socket_guard: Arc<Mutex<Option<UnixSocketGuard>>>,
     settings: ProxySettings,
 ) -> Result<(), ProxyRuntimeError> {
     let ProxySettings {
-        policy,
-        secrets,
+        generations,
         ca,
         permits,
         cancellation,
+        retirement,
+        listener_gate,
+        listener_generation,
         metrics,
         io_timeout,
     } = settings;
@@ -220,6 +412,7 @@ async fn run_proxy(
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => break,
+            _ = retirement.cancelled() => break,
             Some(result) = connections.join_next(), if !connections.is_empty() => {
                 if let Err(error) = result {
                     return Err(ProxyRuntimeError::Task(error.to_string()));
@@ -227,19 +420,29 @@ async fn run_proxy(
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.map_err(ProxyRuntimeError::BindSocket)?;
+                if listener_gate.load(Ordering::Acquire) != listener_generation {
+                    drop(stream);
+                    continue;
+                }
+                let generation = Arc::clone(&generations.borrow());
                 let permit = match Arc::clone(&permits).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => continue,
                 };
-                let policy = Arc::clone(&policy);
-                let secrets = Arc::clone(&secrets);
                 let ca = Arc::clone(&ca);
                 let metrics = Arc::clone(&metrics);
                 connections.spawn(async move {
                     let _permit = permit;
                     metrics.connection_started();
                     let _guard = ConnectionGuard(Arc::clone(&metrics));
-                    if let Err(error) = handle_client(stream, policy, secrets, ca, metrics, io_timeout).await {
+                    if let Err(error) = handle_client(
+                        stream,
+                        Arc::clone(&generation.policy),
+                        Arc::clone(&generation.secrets),
+                        ca,
+                        metrics,
+                        io_timeout,
+                    ).await {
                         tracing::debug!(?error, "Rama connection closed after a proxy error");
                     }
                 });
@@ -247,7 +450,9 @@ async fn run_proxy(
         }
     }
     drop(listener);
-    drop(socket_guard);
+    if let Ok(mut socket_guard) = socket_guard.lock() {
+        socket_guard.take();
+    }
     while connections.join_next().await.is_some() {}
     Ok(())
 }
@@ -899,19 +1104,34 @@ impl UnixSocketGuard {
             && metadata.st_dev == self.device
             && metadata.st_ino == self.inode
     }
+
+    fn unlink_owned(&self) {
+        match stat_at(self.parent.as_raw_fd(), &self.name) {
+            Ok(Some(metadata)) if self.matches(&metadata) => {
+                if unsafe { libc::unlinkat(self.parent.as_raw_fd(), self.name.as_ptr(), 0) } == -1 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::NotFound {
+                        tracing::warn!(path = %self.path.display(), %error, "failed to remove Rama proxy Unix socket");
+                    }
+                }
+            }
+            Ok(Some(_)) => tracing::warn!(
+                path = %self.path.display(),
+                "Rama proxy socket path changed; leaving replacement untouched"
+            ),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                "could not inspect Rama proxy socket during cleanup"
+            ),
+        }
+    }
 }
 
 impl Drop for UnixSocketGuard {
     fn drop(&mut self) {
-        if let Ok(Some(metadata)) = stat_at(self.parent.as_raw_fd(), &self.name)
-            && self.matches(&metadata)
-            && unsafe { libc::unlinkat(self.parent.as_raw_fd(), self.name.as_ptr(), 0) } == -1
-        {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::NotFound {
-                tracing::warn!(path = %self.path.display(), %error, "failed to remove Rama proxy Unix socket");
-            }
-        }
+        self.unlink_owned();
     }
 }
 
@@ -1293,6 +1513,18 @@ mod tests {
         session
     }
 
+    fn intercept_session_with_path(port: u16, path: &str) -> SessionConfig {
+        let input = format!(
+            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [{port}]\npaths = [{path:?}]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"proxy-token\"\nformat = \"bearer\"\n"
+        );
+        let ControlRequest::Create { session, .. } =
+            ControlRequest::from_toml(&input).expect("interception policy should parse")
+        else {
+            panic!("expected create request");
+        };
+        session
+    }
+
     fn tunnel_session(port: u16) -> SessionConfig {
         let input = format!(
             "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{port}]\n"
@@ -1395,6 +1627,7 @@ mod tests {
                 }
             }
             let _ = seen.send(format!("{request_line}{authorization}"));
+            tokio::time::sleep(Duration::from_millis(200)).await;
             reader
                 .get_mut()
                 .write_all(
@@ -1405,7 +1638,21 @@ mod tests {
             // Keep the connection open so the client can exercise a second
             // request on the same intercepted TLS connection.
             let mut second = String::new();
-            let _ = reader.read_line(&mut second).await;
+            if reader.read_line(&mut second).await.unwrap_or_default() > 0 {
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.unwrap_or_default() == 0 || line == "\r\n"
+                    {
+                        break;
+                    }
+                }
+                let _ = reader
+                    .get_mut()
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                    )
+                    .await;
+            }
         });
         Ok((address, task, accepted_rx))
     }
@@ -1512,6 +1759,7 @@ mod tests {
                             .unwrap_or_default()
                             .to_owned();
                         let _ = sender.send((path, authority, authorization));
+                        tokio::time::sleep(Duration::from_millis(200)).await;
                         Ok::<_, std::convert::Infallible>(
                             rama::http::Response::builder()
                                 .status(rama::http::StatusCode::OK)
@@ -1664,14 +1912,24 @@ mod tests {
         )
         .await?;
         let mut reader = BufReader::new(tls);
+        let observed = seen_rx.await?;
+        assert!(observed.starts_with("GET /allowed HTTP/1.1"));
+        assert!(observed.contains("Bearer test-credential"));
+        let replacement = intercept_session_with_path(port, "/blocked");
+        runtime
+            .replace_generation(
+                &replacement,
+                Arc::new(ResolvedSecrets::from_values([(
+                    "proxy-token".to_owned(),
+                    "rotated-test-credential".to_owned(),
+                )])),
+            )
+            .expect("same-path HTTP/1.1 cutover should fit within the generation limit");
         let response = timeout(Duration::from_secs(3), read_http_response(&mut reader)).await??;
         assert!(
             response.starts_with("HTTP/1.1 200 OKok"),
             "unexpected origin response: {response}"
         );
-        let observed = seen_rx.await?;
-        assert!(observed.starts_with("GET /allowed HTTP/1.1"));
-        assert!(observed.contains("Bearer test-credential"));
 
         reader
             .get_mut()
@@ -1888,6 +2146,37 @@ mod tests {
                 .is_err(),
             "denied paths and mismatched authorities must not reach the origin"
         );
+
+        // Hold an HTTP/2 stream in the origin, then switch the listener's
+        // active generation. The stream must finish under its connection's
+        // original path and credential policy.
+        sender.ready().await?;
+        let mut pending_sender = sender.clone();
+        let pending_request = h2_request(
+            format!("https://{authority}/allowed"),
+            authority.clone(),
+            Some("Bearer attacker-inflight"),
+        );
+        let pending =
+            tokio::spawn(async move { pending_sender.send_request(pending_request).await });
+        let (path, seen_authority, authorization) = timeout(Duration::from_secs(2), seen.recv())
+            .await?
+            .ok_or_else(|| io::Error::other("origin should start the in-flight stream"))?;
+        assert_eq!(path, "/allowed");
+        assert_eq!(seen_authority, authority);
+        assert_eq!(authorization, "Bearer test-credential");
+        let replacement = intercept_session_with_path(port, "/blocked");
+        runtime
+            .replace_generation(
+                &replacement,
+                Arc::new(ResolvedSecrets::from_values([(
+                    "proxy-token".to_owned(),
+                    "rotated-test-credential".to_owned(),
+                )])),
+            )
+            .expect("one previous generation should fit within the limit");
+        let response = timeout(Duration::from_secs(2), pending).await???;
+        assert_eq!(response.status(), rama::http::StatusCode::OK);
 
         drop(sender);
         driver.abort();
