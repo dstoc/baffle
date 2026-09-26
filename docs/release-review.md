@@ -9,11 +9,13 @@ workflows.
   `baffle-client`.
 - `Cargo.lock` is committed. CI and the release workflow build with
   `--locked` so a build cannot silently change dependency resolution.
-- The release workflow accepts a `v<version>` tag only when it matches the
-  `baffle-proxy` package version. It builds the release binary for
-  `x86_64-unknown-linux-gnu`, packages the binary and documentation, and
-  publishes a SHA-256 checksum with the GitHub release. Before packaging, it
-  requires a non-empty top-level `LICENSE` file and Cargo license metadata.
+- Release Please creates the GitHub release and `v<version>` tag after its
+  reviewed release pull request is merged. The manually dispatched Linux
+  release workflow accepts only a matching, published Release Please tag. It
+  builds the binary for `x86_64-unknown-linux-gnu`, packages the binary and
+  documentation, and uploads a SHA-256 checksum to that existing release.
+  Before packaging, it requires a non-empty top-level `LICENSE` file and Cargo
+  license metadata.
   It includes `LICENSE` in the release archive. The root `LICENSE` applies the
   MIT License to Baffle's original code, and `baffle-proxy` declares the `MIT`
   SPDX identifier. `scripts/generate-third-party-notices.py` uses the locked

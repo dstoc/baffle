@@ -3,17 +3,79 @@ name: Linux release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing Release Please tag to package (for example, v0.2.0)
+        required: true
+        type: string
 
 permissions:
   contents: write
+  pull-requests: read
+
+concurrency:
+  group: linux-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   linux-x86_64:
     name: Package Linux x86-64 binary
     runs-on: ubuntu-24.04
     steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Expected a stable vX.Y.Z release tag; got '$tag'." >&2
+            exit 1
+          fi
+
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify Release Please tag and release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          local_tag_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          remote_tag_sha="$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" | awk '$2 ~ /\^\{\}$/ { peeled = $1 } END { if (peeled) print peeled; else if (NR > 0) print $1 }')"
+          if [[ -z "$remote_tag_sha" || "$local_tag_sha" != "$remote_tag_sha" ]]; then
+            echo "Tag '$RELEASE_TAG' is missing remotely or changed during checkout." >&2
+            exit 1
+          fi
+
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft)"
+          release_tag="$(jq -r '.tagName' <<< "$release_json")"
+          release_is_draft="$(jq -r '.isDraft' <<< "$release_json")"
+          if [[ "$release_tag" != "$RELEASE_TAG" || "$release_is_draft" != "false" ]]; then
+            echo "Expected a published GitHub Release for '$RELEASE_TAG'." >&2
+            exit 1
+          fi
+
+          release_prs="$(gh api "repos/$GITHUB_REPOSITORY/commits/$local_tag_sha/pulls")"
+          if ! jq -e 'any(.[]; .merged_at != null and any(.labels[]; .name == "autorelease: tagged"))' <<< "$release_prs" >/dev/null; then
+            echo "Tag '$RELEASE_TAG' does not point to a merged Release Please PR labeled 'autorelease: tagged'." >&2
+            exit 1
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.96
@@ -23,65 +85,42 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes build-essential cmake libclang-dev
 
-      - name: Require distribution terms metadata
-        shell: bash
-        run: |
-          test -s LICENSE
-          declared_license="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "baffle-proxy") | .license // empty')"
-          test "$declared_license" = "MIT"
-
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Check release tag against package version
-        shell: bash
-        run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "baffle-proxy") | .version')"
-          test "$tag_version" = "$package_version"
+      - name: Build and package release assets
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: ./scripts/package-release.sh "$RELEASE_TAG"
 
-      - name: Build release binary
-        run: cargo build --locked --release --package baffle-proxy --bin baffle
-
-      - name: Check binary version
-        run: ./target/release/baffle --version
-
-      - name: Package binary and documentation
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          target="x86_64-unknown-linux-gnu"
-          asset="baffle-proxy-v${version}-${target}.tar.gz"
-          stage="$(mktemp -d)"
-          mkdir -p "$stage/share/doc/baffle"
-          install -m 0755 target/release/baffle "$stage/baffle"
-          install -m 0644 LICENSE "$stage/LICENSE"
-          install -m 0644 README.md "$stage/share/doc/baffle/README.md"
-          python3 scripts/generate-third-party-notices.py \
-            --output "$stage/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt"
-          install -D -m 0644 licenses/webpki-root-certs-CDLA-Permissive-2.0.txt \
-            "$stage/share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt"
-          cp -R docs "$stage/share/doc/baffle/docs"
-          cp -R examples "$stage/share/doc/baffle/examples"
-          mkdir -p dist
-          tar -C "$stage" -czf "dist/$asset" .
-          tar -tzf "dist/$asset" | grep -Fx './LICENSE'
-          tar -tzf "dist/$asset" | grep -Fx \
-            './share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt'
-          tar -tzf "dist/$asset" | grep -Fx \
-            './share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt'
-          tar -xOf "dist/$asset" './share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt' | \
-            grep -F 'Package: tokio '
-          tar -xOf "dist/$asset" './share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt' | \
-            grep -F 'Package: rama-core '
-          (cd dist && sha256sum "$asset" > SHA256SUMS)
-
-      - name: Publish GitHub release assets
+      - name: Upload assets to the existing GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$GITHUB_REF_NAME"
-          "dist/baffle-proxy-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz"
-          dist/SHA256SUMS
-          --title "Baffle $GITHUB_REF_NAME"
-          --generate-notes
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          asset="baffle-proxy-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+          existing_assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          archive_exists=false
+          checksums_exist=false
+          if grep -Fxq "$asset" <<< "$existing_assets"; then archive_exists=true; fi
+          if grep -Fxq "SHA256SUMS" <<< "$existing_assets"; then checksums_exist=true; fi
+
+          if [[ "$archive_exists" == true && "$checksums_exist" == true ]]; then
+            existing_dir="$(mktemp -d)"
+            trap 'rm -rf "$existing_dir"' EXIT
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern "$asset" --pattern SHA256SUMS --dir "$existing_dir"
+            if ! cmp -s "dist/$asset" "$existing_dir/$asset" || \
+               ! cmp -s dist/SHA256SUMS "$existing_dir/SHA256SUMS"; then
+              echo "Release '$RELEASE_TAG' already has different assets; refusing to overwrite them." >&2
+              exit 1
+            fi
+            echo "Release '$RELEASE_TAG' already has identical assets; nothing to upload."
+          elif [[ "$archive_exists" == true || "$checksums_exist" == true ]]; then
+            echo "Release '$RELEASE_TAG' has only part of the expected asset set; refusing to overwrite it." >&2
+            exit 1
+          else
+            gh release upload "$RELEASE_TAG" "dist/$asset" dist/SHA256SUMS \
+              --repo "$GITHUB_REPOSITORY"
+          fi
