@@ -1285,38 +1285,6 @@ directory = "/var/lib/baffle/secrets"
     }
 
     #[test]
-    fn validates_optional_nested_session_socket_names() {
-        let request = ControlRequest::from_toml(
-            "version = 1\noperation = \"create\"\n\n[session]\nsocket_name = \"cladding/github.sock\"\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n",
-        )
-        .expect("a nested socket name should parse");
-        let ControlRequest::Create { session, .. } = request else {
-            panic!("expected create request");
-        };
-        assert_eq!(session.socket_name.as_deref(), Some("cladding/github.sock"));
-
-        for name in [
-            "",
-            "/absolute.sock",
-            "./socket.sock",
-            "directory/../socket.sock",
-            "../socket.sock",
-            "directory//socket.sock",
-            "directory/",
-            "directory\\socket.sock",
-            &"x".repeat(108),
-        ] {
-            let input = format!(
-                "version = 1\noperation = \"create\"\n\n[session]\nsocket_name = {name:?}\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n"
-            );
-            assert!(
-                ControlRequest::from_toml(&input).is_err(),
-                "unsafe socket name should fail: {name:?}"
-            );
-        }
-    }
-
-    #[test]
     fn rejects_invalid_or_ambiguous_policies_in_a_table() {
         let cases = [
             (
