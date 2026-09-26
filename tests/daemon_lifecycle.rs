@@ -1,6 +1,6 @@
 use std::process::{Command, Stdio};
 
-use hudsucker::rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
+use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 
 #[cfg(unix)]
 fn write_test_ca(directory: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {

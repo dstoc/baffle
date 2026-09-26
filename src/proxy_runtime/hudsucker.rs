@@ -20,7 +20,7 @@ use hudsucker::{
         Request, Response, StatusCode,
         header::{CONNECTION, HeaderName, HeaderValue, UPGRADE},
     },
-    rustls::crypto::aws_lc_rs,
+    rustls::{RootCertStore, crypto::aws_lc_rs, pki_types::CertificateDer},
     tokio_tungstenite::tungstenite::Message,
 };
 use tokio::{
@@ -118,11 +118,23 @@ impl ProxyRuntime {
             Arc::clone(&metrics),
             cancellation.clone(),
         );
+        let upstream_roots =
+            match super::integration_test_upstream_root().map_err(ProxyRuntimeError::Build)? {
+                Some(root) => {
+                    let mut roots = RootCertStore::empty();
+                    roots
+                        .add(CertificateDer::from(root))
+                        .map_err(|error| ProxyRuntimeError::Build(error.to_string()))?;
+                    Some(roots)
+                }
+                None => None,
+            };
         let proxy = Proxy::builder()
             .with_listener(listener)
             .with_ca(ca.for_proxy())
-            .with_rustls_connector_and_roots(
+            .with_rustls_connector_with_roots(
                 aws_lc_rs::default_provider(),
+                upstream_roots,
                 additional_upstream_roots(),
             )
             .with_http_handler(policy_handler.clone())

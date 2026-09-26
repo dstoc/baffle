@@ -48,7 +48,6 @@ pub enum ProxyRuntimeError {
     Build(String),
     Run(String),
     Task(String),
-    BackendUnavailable,
 }
 
 impl ProxyRuntimeError {
@@ -60,7 +59,6 @@ impl ProxyRuntimeError {
             Self::Build(_) => "proxy_build",
             Self::Run(_) => "proxy_run",
             Self::Task(_) => "task",
-            Self::BackendUnavailable => "backend_unavailable",
         }
     }
 }
@@ -77,9 +75,6 @@ impl fmt::Display for ProxyRuntimeError {
             Self::Build(_) => formatter.write_str("could not build proxy"),
             Self::Run(_) => formatter.write_str("proxy runtime failed"),
             Self::Task(_) => formatter.write_str("proxy runtime task failed"),
-            Self::BackendUnavailable => formatter.write_str(
-                "Rama backend is disabled until Baffle's upstream TLS and authority checks are integrated",
-            ),
         }
     }
 }
@@ -91,4 +86,24 @@ impl std::error::Error for ProxyRuntimeError {}
 pub struct ProxyRuntimeEvent {
     pub runtime_id: RuntimeId,
     pub result: Result<(), ProxyRuntimeError>,
+}
+
+#[cfg(any(feature = "backend-hudsucker", baffle_integration_test))]
+pub(super) fn integration_test_upstream_root() -> Result<Option<Vec<u8>>, String> {
+    #[cfg(baffle_integration_test)]
+    {
+        let Some(path) = std::env::var_os("BAFFLE_TEST_UPSTREAM_CA") else {
+            return Ok(None);
+        };
+        let pem = std::fs::read(path)
+            .map_err(|error| format!("could not read integration upstream CA: {error}"))?;
+        let (remainder, certificate) = x509_parser::pem::parse_x509_pem(&pem)
+            .map_err(|_| "could not parse integration upstream CA PEM".to_owned())?;
+        if certificate.label != "CERTIFICATE" || !remainder.iter().all(u8::is_ascii_whitespace) {
+            return Err("integration upstream CA must contain one certificate".to_owned());
+        }
+        return Ok(Some(certificate.contents));
+    }
+    #[cfg(not(baffle_integration_test))]
+    Ok(None)
 }

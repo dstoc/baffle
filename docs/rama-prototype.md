@@ -85,8 +85,8 @@ are for `target/{debug,release}/baffle`.
 
 | Check | Hudsucker | Rama |
 | --- | ---: | ---: |
-| Workspace debug tests | Passed: 98 | Passed: 46 |
-| Workspace release tests | Passed: 98 | Passed: 46 |
+| Workspace debug tests | Passed: 101 | Passed: 61 |
+| Workspace release tests | Passed: 101 | Passed: 61 |
 | Clean / incremental debug build | 18.51 / 0.14 s | 46.96 / 0.17 s |
 | Clean / incremental release build | 32.72 / 0.14 s | 69.46 / 0.18 s |
 | Debug / release binary size | 172,000,024 / 14,505,040 bytes | 312,003,680 / 18,165,256 bytes |

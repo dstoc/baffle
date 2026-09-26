@@ -17,7 +17,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio_rustls::rustls::{ClientConfig, crypto::CryptoProvider};
+use tokio_rustls::rustls::{ClientConfig, RootCertStore, crypto::CryptoProvider};
 use tokio_tungstenite::Connector;
 
 #[derive(Debug, Error)]
@@ -131,36 +131,49 @@ impl<CA> ProxyBuilder<WantsClient<CA>> {
         provider: CryptoProvider,
     ) -> ProxyBuilder<WantsHandlers<CA, impl Connect + Clone, NoopHandler, NoopHandler, Pending<()>>>
     {
-        self.with_rustls_connector_and_roots(provider, Vec::new())
+        self.with_rustls_connector_with_roots(provider, None, Vec::new())
     }
 
-    /// Use a hyper-rustls connector with additional trusted server roots.
+    /// Use a hyper-rustls connector with an optional explicit trust store.
     ///
-    /// The additional roots are added to the standard WebPKI root set.
+    /// `None` starts with the default WebPKI roots. A supplied store replaces
+    /// those roots. Additional roots are added to either store.
     #[cfg(feature = "rustls-client")]
-    pub fn with_rustls_connector_and_roots(
+    pub fn with_rustls_connector_with_roots(
         self,
         provider: CryptoProvider,
+        roots: Option<RootCertStore>,
         additional_roots: Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>>,
     ) -> ProxyBuilder<WantsHandlers<CA, impl Connect + Clone, NoopHandler, NoopHandler, Pending<()>>>
     {
-        let rustls_config = match ClientConfig::builder_with_provider(Arc::new(provider))
+        let rustls_config = ClientConfig::builder_with_provider(Arc::new(provider))
             .with_safe_default_protocol_versions()
-            .and_then(|config| {
-                let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-                roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            .and_then(|builder| {
+                let mut roots = roots.unwrap_or_else(|| {
+                    let mut roots = RootCertStore::empty();
+                    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                    roots
+                });
                 for root in additional_roots {
                     roots.add(root)?;
                 }
-                Ok(config.with_root_certificates(roots).with_no_client_auth())
-            })
-        {
+                Ok(builder.with_root_certificates(roots).with_no_client_auth())
+            });
+        self.with_rustls_config(rustls_config)
+    }
+
+    fn with_rustls_config(
+        self,
+        rustls_config: Result<ClientConfig, tokio_rustls::rustls::Error>,
+    ) -> ProxyBuilder<WantsHandlers<CA, impl Connect + Clone, NoopHandler, NoopHandler, Pending<()>>>
+    {
+        let rustls_config = match rustls_config {
             Ok(config) => config,
-            Err(e) => {
+            Err(error) => {
                 return ProxyBuilder(WantsHandlers {
                     al: self.0.al,
                     ca: self.0.ca,
-                    http_connector: Err(Error::from(e)),
+                    http_connector: Err(Error::from(error)),
                     client: None,
                     http_handler: NoopHandler::new(),
                     websocket_handler: NoopHandler::new(),

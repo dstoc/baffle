@@ -1,46 +1,101 @@
 # Integration test suite
 
-This table describes the current implementation and its regression tests.
-baffle/25 removed application-level destination-IP filtering and its
-classification tests. The deployment-egress policy is documented in the
-[security guide](security-deployment.md). Baffle also enforces HTTPS-only
-request admission and fail-closed interception.
+The backend matrix runs the same control-protocol, client, daemon-lifecycle,
+Unix-socket, tunnel, HTTPS-policy, and secret-injection scenarios against
+`backend-hudsucker` and `backend-rama`. Each matrix entry disables default
+features and selects exactly one backend.
 
-The suite checks that a fragmented ClientHello cannot obtain an opaque tunnel
-on an interception-required rule. It also checks unsupported CONNECT data,
-malformed TLS, authority binding, credential isolation, and per-request path
-checks on reused HTTP/1.1 and HTTP/2 connections.
+`.github/workflows/ci.yml` runs formatting, Clippy, debug tests, release tests,
+examples, and the privileged namespace fixture. The `checks` job has separate
+Hudsucker and Rama results. The exact required check, `Format, lint, and test`,
+fails unless both the backend checks and both namespace matrix entries pass.
+The `Network namespace isolation` workflow is manually dispatchable and also
+has separate backend entries. Its matrix entry records Rama's Rust minimum and
+native build packages.
 
-The Rust and Python tests run in `.github/workflows/ci.yml` on `ubuntu-latest`. CI also compiles all Rust examples, parses the checked-in daemon and session TOML examples, and runs the Rust suite in debug and release profiles. The tagged release workflow builds and packages the optimized Linux binary.
+| Area | Shared daemon coverage | Backend-specific coverage |
+| --- | --- | --- |
+| Client and control protocol | `tests/client.rs` and `tests/control_protocol.rs` run for both features. They cover the typed client, real framed requests, errors, leases, persistence, concurrent independent sessions, and response redaction. | Control and secret-store unit tests inspect internal state. They do not count as daemon parity. |
+| Daemon lifecycle | `tests/daemon_lifecycle.rs` runs for both features. It starts the executable and checks startup, graceful shutdown, and missing CA handling. | None. |
+| Proxy policy through the daemon | `tests/daemon_proxy.rs` starts the executable, creates sessions over the framed control socket, and uses each assigned Unix socket. It checks authorized and denied hosts and ports, tunnel-only traffic, plaintext HTTP rejection, session separation, lease revocation, capacity errors, daemon-held secret entitlements, HTTP/1.1 credential replacement, HTTP/2 stream policy, per-session secret isolation, path denial, redaction, and inode-safe socket cleanup. | None. The local upstream CA is available only in the integration-test build; normal daemon builds retain the default trust roots. |
+| Direct proxy runtime | Not counted as end-to-end daemon parity. | `tests/proxy_runtime.rs` runs shared live CONNECT, TLS, one-byte ClientHello fragmentation with a bounded close, tunnel-only, and upstream TLS denial fixtures under both features. Hudsucker-only runtime cases cover HTTP/1.1 reuse and HTTP/2 path and authority checks. Rama has live HTTP/2, path, credential, certificate, fragmentation, and resource-limit tests in `src/proxy_runtime/rama.rs`; these test the adapter without launching the daemon. |
+| Secret and policy internals | The real-daemon target verifies entitlement, injection, path denial, HTTP/2 stream enforcement, session secret isolation, and control-response redaction under both features. | `src/control.rs`, `src/secrets.rs`, and each backend runtime have unit tests for internal checks. Unit tests alone do not establish parity. |
+| Documentation examples | `tests/documentation.rs` parses the checked-in TOML examples. `cargo check --examples` compiles client examples under both backend selections. | None. |
 
-| Area | Coverage |
-| --- | --- |
-| Control protocol and session lifecycle | `tests/control_protocol.rs`, `tests/client.rs`, `tests/daemon_lifecycle.rs`: framing errors, failed provisioning rollback, leases, persistent sessions, independent sessions, capacity, graceful shutdown, and crash recovery. |
-| Proxy policy and TLS | `tests/proxy_runtime.rs`: non-CONNECT HTTP and HTTPS rejection before dialing, configured TLS on port 80, authorized CONNECT dialing, upstream TLS verification, intercepted path checks, unchanged redirects and rejected downgrades, unsupported CONNECT payloads, fragmented and malformed ClientHello data, SNI mismatch, HTTP/2 authority and scheme checks, and established connections after revocation. |
-| Secret handling | `src/secrets.rs`, `src/proxy_runtime.rs`, and `src/control.rs`: entitlement checks, redaction, supported authorization formats, host/path/port/scheme/authority boundaries, and WebSocket rejection. |
-| Runtime resilience | `src/proxy_runtime.rs`, `src/control.rs`, `tests/daemon_lifecycle.rs`: connection and provisioning limits, I/O timeouts, task failures, bounded shutdown, and socket cleanup. |
-| Documentation examples | `tests/documentation.rs`: parses the daemon, session, credential, port-80 TLS, list, and stop TOML examples using the public configuration types. `cargo check --examples` compiles the Rust client and `socat` examples. Live upstream requests are not part of CI. |
+The `proxy_runtime` integration target runs under both backend features. Its
+shared CONNECT, TLS, and fragmentation fixtures exercise each live proxy. The
+Hudsucker-specific protocol cases are feature-gated, and Rama has backend
+runtime tests in `src/proxy_runtime/rama.rs`. The `client`, `daemon_lifecycle`,
+`control_protocol`, and `daemon_proxy` targets run for both backends. The three
+Rust examples also compile for both backends. Adapter unit tests do not replace
+the shared real-daemon target.
 
-The unit suite exercises policy and peer credentials. The Linux process tests
-exercise the assembled daemon and Unix sockets.
+The backends use different denial status codes for plaintext forward requests.
+Hudsucker returns 403. Rama rejects the non-CONNECT request with 400. Shared
+tests accept either denial status and also check that the request does not
+reach the upstream.
+
+## Run the backend matrix locally
+
+Use the integration-test build flag to run the local TLS upstream scenario.
+It enables a temporary trust anchor only in this test build. The fixture passes
+the generated test CA to the child daemon. The production build has no such
+hook.
+
+```sh
+RUSTFLAGS='--cfg baffle_integration_test' cargo test --locked --no-default-features --features backend-hudsucker
+RUSTFLAGS='--cfg baffle_integration_test' cargo test --locked --no-default-features --features backend-rama
+cargo clippy --locked --all-targets --no-default-features --features backend-hudsucker -- -D warnings
+cargo clippy --locked --all-targets --no-default-features --features backend-rama -- -D warnings
+cargo check --locked --examples --no-default-features --features backend-hudsucker
+cargo check --locked --examples --no-default-features --features backend-rama
+cargo fmt --check
+```
+
+Without the `RUSTFLAGS` value, `tests/daemon_proxy.rs` still checks control
+protocol entitlement and redaction. It skips the local-origin TLS requests
+that need the test trust anchor. The ordinary developer commands in the
+README remain unchanged.
 
 ## Privileged network namespace integration
 
-GitHub Actions runs `Network namespace isolation` on every pull request and push to `main`. To start it manually, open **Actions → Network namespace isolation → Run workflow**, or run `gh workflow run network-namespace.yml --ref <branch>`. The job runs on a GitHub-hosted `ubuntu-latest` VM, installs `iproute2`, builds Baffle, and runs the privileged fixture as root.
+The `Network namespace integration` job in `.github/workflows/ci.yml` runs on
+GitHub-hosted Ubuntu VMs for both backend features. It builds with
+`--no-default-features --features backend-hudsucker` or
+`--no-default-features --features backend-rama`, then runs the privileged
+fixture as root. The separate `Network namespace isolation` workflow supports
+manual dispatch with the same two feature entries.
 
-The fixture creates daemon and client network namespaces joined by a veth pair. It starts Baffle with a persistent proxy session and its internal TCP listener. The client process uses the assigned Unix socket to fetch a response from the session's allowed upstream. A separate listener on the daemon's veth address proves that the client can route to the daemon namespace. The client then tries the daemon's veth address at Baffle's actual internal listener port; the connection must be refused. This probe does not use the client's loopback address.
+The fixture creates daemon and client network namespaces joined by a veth pair.
+The client uses its assigned Unix data socket to fetch an HTTPS response from
+an allowed upstream. A route canary proves that the client can reach the daemon
+namespace. A second probe targets the daemon's actual internal TCP listener
+through the daemon veth address and requires `ECONNREFUSED`. The checker also
+verifies that Baffle's TCP listeners bind only to loopback.
 
-The checker runs against the real Baffle and client PIDs. It verifies that their network namespace identities differ and that Baffle's TCP listeners bind only to loopback. The fixture also confirms that the checker fails when both PIDs are in one namespace and when a test listener binds to `0.0.0.0`. It removes its processes and temporary namespaces in cleanup, including after a failed assertion.
+The negative cases remain active. The checker must reject two processes in the
+same namespace and a listener bound to `0.0.0.0`. The fixture cleans up
+processes and namespaces after a failed assertion.
 
-This CI result verifies the topology created by the fixture. A deployment with a different namespace, mount, routing, or socket setup still needs its own isolation validation.
-
-Run the privileged fixture locally only when you want to test namespace creation. It is not part of `cargo test`, `cargo test --all-features`, or the routine development checks. Build the daemon, then run:
+Run this privileged test locally only when you want to test namespace
+creation. It is separate from `cargo test` and requires Linux root access with
+permission to create network namespaces and veth devices, Python 3, `iproute2`,
+`nsenter`, and OpenSSL. Build one backend, then run the fixture:
 
 ```sh
-cargo build --bin baffle
+cargo build --locked --bin baffle --no-default-features --features backend-hudsucker
+sudo python3 scripts/test-network-namespace-isolation.py --binary target/debug/baffle
+
+cargo build --locked --bin baffle --no-default-features --features backend-rama
 sudo python3 scripts/test-network-namespace-isolation.py --binary target/debug/baffle
 ```
 
-The local command requires Linux, root with permission to create network namespaces and veth devices, Python 3, `iproute2` (`ip` and `ss`), `nsenter`, and OpenSSL. It builds no Rust code itself and does not need `socat`.
+See the Rama matrix entry in `.github/workflows/ci.yml` for its build
+prerequisites. The namespace job verifies the topology created by the fixture.
+A deployment with a different namespace, mount, route, or socket setup still
+needs its own isolation validation.
 
-The standalone Cladding example is [`examples/cladding_socat.rs`](../examples/cladding_socat.rs). It creates a Baffle session and uses Cladding's existing `socat` bridge from a local TCP proxy endpoint to the assigned Unix socket. It does not depend on Cladding code. Use `cargo run --example cladding_socat -- github.com` to run it. Use `examples/measure_sessions.rs` with an idle Linux daemon to measure create latency, concurrent session creation, and idle-session RSS. The observed values for this run are in [performance observations](performance-observations.md); the example does not enforce a performance target.
+The standalone Cladding example is [`examples/cladding_socat.rs`](../examples/cladding_socat.rs).
+It uses Cladding's existing `socat` bridge to expose the assigned Unix socket
+as a local TCP proxy. It does not depend on Cladding code. Use
+`cargo run --example cladding_socat -- github.com` to run it.

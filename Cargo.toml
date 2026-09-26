@@ -14,6 +14,9 @@ default = ["backend-hudsucker"]
 backend-hudsucker = ["dep:hudsucker", "dep:rcgen"]
 backend-rama = ["dep:rama", "dep:rcgen"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(baffle_integration_test)'] }
+
 [[bin]]
 name = "baffle"
 path = "src/main.rs"
@@ -43,38 +46,34 @@ url = "2.5.8"
 x509-parser = "0.18.1"
 
 [dev-dependencies]
+h2 = "=0.4.19"
+http = "=1.5.0"
 tempfile = "3.27.0"
 tokio-rustls = "0.26.5"
 
 [[test]]
 name = "client"
 path = "tests/client.rs"
-required-features = ["backend-hudsucker"]
 
 [[test]]
 name = "daemon_lifecycle"
 path = "tests/daemon_lifecycle.rs"
-required-features = ["backend-hudsucker"]
 
 [[test]]
 name = "control_protocol"
 path = "tests/control_protocol.rs"
-required-features = ["backend-hudsucker"]
 
 [[test]]
 name = "proxy_runtime"
 path = "tests/proxy_runtime.rs"
-required-features = ["backend-hudsucker"]
 
 [[example]]
 name = "cladding_socat"
 path = "examples/cladding_socat.rs"
-required-features = ["backend-hudsucker"]
 
 [[example]]
 name = "client"
 path = "examples/client.rs"
-required-features = ["backend-hudsucker"]
 
 [[example]]
 name = "measure_sessions"
