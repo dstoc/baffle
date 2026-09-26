@@ -3,21 +3,28 @@
 ## Result
 
 This report compares the Hudsucker and Rama backend selections. Hudsucker
-remains the default. The measurements do not support a backend migration
-decision on their own.
+remains the default. These measurements do not support a backend migration
+decision or a performance-parity claim.
 
-The clearest result is a repeatable HTTP/1.1 latency difference in the local
-release workload. Hudsucker's median request latency was 0.108 ms. Rama's was
-41.979 ms. Both used the same pinned TLS fixtures, 4 KiB request body, 32 KiB
-response body, path rule, credential injection, CONNECT authority, and
-keep-alive pattern. The cause of Rama's delay needs profiling. It may be
-sensitive to TCP acknowledgement and buffering behavior on this sequential
-loopback workload.
+Issue 32 measured a 41.979 ms Rama median and a 0.108 ms Hudsucker median on a
+Rust-origin HTTP/1.1 keep-alive workload. Issue 33 repeats that workload with
+the production Rama ingress setting and a reproducible off control. Rama's
+production medians are 0.136, 0.129, and 1.631 ms at 1, 4, and 16 clients.
+The off control stays near 41 ms. This confirms that the accepted-socket
+setting removes the delay for the Rust-origin workload.
 
-The HTTP/2 medians were 0.088 ms for Hudsucker and 0.114 ms for Rama. The
-tunnel-only medians were close in throughput at about 24 requests per second
-for both backends. Session provisioning and teardown were also close. Idle RSS
-changes were below useful resolution at these session counts.
+The same production Rama setting does not change the 41 ms result with the
+independent Python TLS origin. Hudsucker, Rama production, and the Rama-off
+control all measure about 41 ms there. The origin and socket path still affect
+the result.
+
+The new HTTP/2 run measures empty requests and responses on one reused TLS
+connection. Rama's median is 0.095 ms and Hudsucker's is 0.080 ms. The 1 MiB
+HTTP/1.1 transfer has a bimodal Rama latency distribution and wider trial
+variation. Its throughput does not show a clear regression, but it is
+inconclusive. The small-payload run also records higher Rama process CPU per
+request and more host-wide loopback packets than Hudsucker. The detailed
+measurements and limits are in the Issue 33 section below.
 
 ## Environment and fixtures
 
@@ -253,10 +260,11 @@ traced durations include `strace` overhead and are diagnostic; use the
 untraced CSVs for latency.
 
 The runner was Linux `7.0.0-31-generic`, x86-64, an AMD Ryzen 9 5900X, and Rust
-`1.98.1`. The benchmark-only `benchmark-tcp-nodelay` feature enables these
-socket toggles for the experiment. It does not change the default runtime
-socket settings. This investigation does not make a backend migration
-decision.
+`1.98.1`. These Issue 32 rows are diagnostic measurements from before the
+production Rama ingress change. The `benchmark-tcp-nodelay` feature enabled
+socket toggles for that experiment. It did not change the production socket
+settings at that revision. This investigation does not make a backend
+migration decision.
 
 Reproduce the two-origin and all-socket comparison, the one-leg Rama runs, and
 the socket profile with:
@@ -264,12 +272,161 @@ the socket profile with:
 ```sh
 python3 scripts/benchmark_http1.py \
   --backends hudsucker,rama --origins rust,python \
-  --tcp-nodelay off,all --cpu 0
+  --tcp-nodelay off,all --result-prefix issue32 --cpu 0
 
 python3 scripts/benchmark_http1.py \
   --backends rama --origins rust \
-  --tcp-nodelay proxy-ingress,proxy-egress --cpu 0
+  --tcp-nodelay proxy-ingress,proxy-egress --result-prefix issue32 --cpu 0
 
 python3 scripts/profile_http1_sockets.py \
   --backends hudsucker,rama --cpu 0
 ```
+
+## Issue 33: production Rama ingress behavior
+
+Rama now enables `TCP_NODELAY` on every accepted client-facing TCP socket in
+normal builds. The setting applies before CONNECT parsing, TLS peeking, or HTTP
+handling. The `benchmark-tcp-nodelay` feature remains opt-in. It supports an
+explicit `off` control for repeatable comparisons; compiling that feature does
+not turn the production ingress setting off by default.
+
+The `production` benchmark mode builds without the diagnostic feature. It
+measures Rama with the production ingress setting and Hudsucker with its
+unchanged default. The `off` mode enables the diagnostic feature and explicitly
+disables the Rama ingress setting. The current
+`runtime_http1_characterization` test uses the same TLS proxy policy,
+credential injection, CONNECT authority, keep-alive pattern, and payload sizes
+across these modes.
+
+The characterization measures five trials at 1, 4, and 16 HTTP/1.1 clients.
+Each client warms its keep-alive connection with 16 requests and sends 80
+measured requests per trial. Use `--payloads 4096:32768` for the Issue 32
+payload pair. Use `--payloads 1048576:1048576` for a 1 MiB request and response
+transfer. Each raw file records request latency, median, p95, request rate,
+payload throughput, and process CPU per trial. It also records loopback packet
+deltas when Linux exposes the interface counters. Those counters are host
+wide, so other loopback traffic can affect them. Process CPU includes the
+client, proxy runtime, and in-process Rust origin. It is not daemon-only CPU.
+
+Run matched production-mode HTTP/1.1 measurements against the Rust TLS origin:
+
+```sh
+python3 scripts/benchmark_http1.py \
+  --backends hudsucker,rama --origins rust --tcp-nodelay production \
+  --payloads 4096:32768 --concurrency-levels 1,4,16 \
+  --result-prefix issue33-production --cpu 0
+
+python3 scripts/benchmark_http1.py \
+  --backends hudsucker,rama --origins rust --tcp-nodelay production \
+  --payloads 1048576:1048576 --concurrency-levels 1 \
+  --result-prefix issue33-bulk-production --cpu 0
+```
+
+Run Rama's reproducible `TCP_NODELAY`-off control with the same workloads:
+
+```sh
+python3 scripts/benchmark_http1.py \
+  --backends rama --origins rust --tcp-nodelay off \
+  --payloads 4096:32768 --concurrency-levels 1,4,16 \
+  --result-prefix issue33-control --cpu 0
+
+python3 scripts/benchmark_http1.py \
+  --backends rama --origins rust --tcp-nodelay off \
+  --payloads 1048576:1048576 --concurrency-levels 1 \
+  --result-prefix issue33-bulk-control --cpu 0
+```
+
+Run `runtime_benchmark` for sequential HTTP/1.1 and HTTP/2 results. Its HTTP/1.1
+requests use the original 4 KiB request and 32 KiB response. Its HTTP/2
+requests and responses are empty and reuse one TLS connection. HTTP/2 results
+therefore describe request-path latency and rate, not bulk transfer speed.
+
+```sh
+taskset -c 0 env BAFFLE_BENCH_RAW=bench/results/issue33-hudsucker-runtime.csv \
+  cargo test --locked --release --lib --no-default-features \
+  --features backend-hudsucker runtime_benchmark -- \
+  --ignored --nocapture --test-threads=1
+
+taskset -c 0 env BAFFLE_BENCH_RAW=bench/results/issue33-rama-runtime.csv \
+  cargo test --locked --release --lib --no-default-features \
+  --features backend-rama runtime_benchmark -- \
+  --ignored --nocapture --test-threads=1
+```
+
+### Issue 33 measurements on `ld-cladding`
+
+The runs used Linux `7.0.0-31-generic`, x86-64, an AMD Ryzen 9 5900X, Rust
+`1.98.1`, and CPU 0 affinity. The HTTP/1.1 characterization used five trials.
+Each trial measured 80 requests per client after 16 warm-up requests. The
+request and response bodies were 4 KiB and 32 KiB. The table reports the
+median and p95 across measured requests, median trial request rate, and median
+process CPU per request. Process CPU includes the client, proxy runtime, and
+Rust origin in the same test process.
+
+| Clients | Hudsucker median / p95 | Hudsucker req/s | Hudsucker CPU/request | Rama median / p95 | Rama req/s | Rama CPU/request |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.106 / 0.136 ms | 8,658 | 0.116 ms | 0.136 / 0.238 ms | 6,005 | 0.167 ms |
+| 4 | 0.107 / 0.427 ms | 8,999 | 0.111 ms | 0.129 / 0.481 ms | 7,502 | 0.133 ms |
+| 16 | 1.433 / 1.858 ms | 8,894 | 0.112 ms | 1.631 / 2.072 ms | 7,985 | 0.125 ms |
+
+The Rama-off control measured 41.002 / 42.011 ms, 41.068 / 42.425 ms, and
+41.725 / 42.876 ms at 1, 4, and 16 clients. Its median rates were 24, 97, and
+384 requests per second. The production setting reduces the median by more
+than 99% in this workload. Rama's request rate remains 10–31% below Hudsucker
+in these runs, and its process CPU per request is 12–44% higher. These are
+backend comparisons from one runner; they do not isolate CPU use by the socket
+option.
+
+The host-wide loopback counter recorded 93,355 packets for the combined Rama
+production run, 84,641 for the Rama-off control, and 43,976 for Hudsucker.
+The counter is not per socket and does not classify packet sizes. Background
+loopback traffic can affect it. It indicates a packet-count increase after
+the setting, but does not show how many additional packets were small TCP
+segments.
+
+The HTTP/2 runtime benchmark used one reused TLS connection with empty request
+and response bodies. It ran five 80-request trials after a 16-request warm-up.
+
+| Backend | Median / p95 latency | Median request rate | Median process CPU per trial |
+| --- | ---: | ---: | ---: |
+| Hudsucker | 0.080 / 0.093 ms | 11,038 req/s | 7.26 ms |
+| Rama production | 0.095 / 0.110 ms | 9,385 req/s | 8.54 ms |
+
+For bulk transfer, the harness sent a 1 MiB request and received a 1 MiB
+response on one reused HTTP/1.1 connection. It measured 80 requests in each of
+five trials.
+
+| Backend and setting | Median / p95 request latency | Median trial rate | Median payload rate | Median process CPU per trial | Loopback packets |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Hudsucker production | 44.126 / 46.204 ms | 35.5 req/s | 71.1 MiB/s | 290.6 ms | 67,379 |
+| Rama production | 6.306 / 47.873 ms | 37.9 req/s | 75.7 MiB/s | 379.8 ms | 90,285 |
+| Rama off control | 45.045 / 86.643 ms | 24.3 req/s | 48.6 MiB/s | 371.5 ms | 68,506 |
+
+The Rama production bulk latencies were bimodal: 200 of 400 measured
+requests completed below 10 ms and 200 took more than 40 ms. The trial rate
+varied from 35.0 to 46.8 requests per second. The p95 was close to Hudsucker's,
+but the changing median and loopback packet count make this bulk run
+inconclusive. The off control had lower throughput and a higher p95. Issue
+baffle/35 tracks a follow-up with per-flow packet capture, process-level CPU
+accounting, and a repeat under lower host noise. Do not claim throughput or
+packet-size parity until those measurements explain the differences.
+
+The Python TLS origin check measured a 41.015 / 42.013 ms Hudsucker median / p95,
+41.019 / 42.019 ms for Rama production, and 41.032 / 42.034 ms for the Rama-off
+control. The origin verified all 480 requests and injected credentials in each
+run. Enabling `TCP_NODELAY` on Rama ingress alone did not remove this Python
+origin delay. The Issue 32 `all` mode also changed the client, outbound proxy,
+and origin sockets, so those results are not an equivalent comparison.
+
+Raw Issue 33 rows are in the [benchmark results directory](../bench/results/):
+
+- [Hudsucker small-payload HTTP/1.1](../bench/results/issue33-hudsucker-production-hudsucker-rust-nodelay-production-req4096-resp32768.csv)
+- [Rama production small-payload HTTP/1.1](../bench/results/issue33-rama-production-rama-rust-nodelay-production-req4096-resp32768.csv)
+- [Rama-off small-payload HTTP/1.1](../bench/results/issue33-rama-control-rama-rust-nodelay-off-req4096-resp32768.csv)
+- 1 MiB transfers: [Hudsucker](../bench/results/issue33-bulk-production-hudsucker-rust-nodelay-production-req1048576-resp1048576-c1.csv), [Rama production](../bench/results/issue33-bulk-production-rama-rust-nodelay-production-req1048576-resp1048576-c1.csv), and [Rama off](../bench/results/issue33-bulk-control-rama-rust-nodelay-off-req1048576-resp1048576-c1.csv)
+- [Hudsucker HTTP/2 and sequential HTTP/1.1](../bench/results/issue33-hudsucker-runtime.csv)
+- [Rama HTTP/2 and sequential HTTP/1.1](../bench/results/issue33-rama-runtime.csv)
+- Python-origin runs: [Hudsucker production](../bench/results/issue33-python-production-hudsucker-python-nodelay-production-req4096-resp32768-c1.csv), [Rama production](../bench/results/issue33-python-production-rama-python-nodelay-production-req4096-resp32768-c1.csv), and [Rama off](../bench/results/issue33-python-control-rama-python-nodelay-off-req4096-resp32768-c1.csv)
+
+The timing benchmarks remain opt-in. They do not add thresholds to the
+required `Format, lint, and test` CI check.

@@ -27,8 +27,9 @@ shared CONNECT, TLS, and fragmentation fixtures exercise each live proxy. The
 Hudsucker-specific protocol cases are feature-gated, and Rama has backend
 runtime tests in `src/proxy_runtime/rama.rs`. The `client`, `daemon_lifecycle`,
 `control_protocol`, and `daemon_proxy` targets run for both backends. The three
-Rust examples also compile for both backends. Adapter unit tests do not replace
-the shared real-daemon target.
+Rust examples also compile for both backends. The Rama runtime tests inspect
+the accepted client socket's `TCP_NODELAY` setting in production feature builds.
+Adapter unit tests do not replace the shared real-daemon target.
 
 The backends use different denial status codes for plaintext forward requests.
 Hudsucker returns 403. Rama rejects the non-CONNECT request with 400. Shared

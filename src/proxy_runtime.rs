@@ -16,15 +16,22 @@ pub use backend::ProxyRuntime;
 
 #[cfg(any(test, all(feature = "benchmark-tcp-nodelay", feature = "backend-rama")))]
 pub(crate) fn benchmark_tcp_nodelay_mode() -> String {
-    if cfg!(feature = "benchmark-tcp-nodelay") {
-        std::env::var("BAFFLE_BENCH_TCP_NODELAY").unwrap_or_else(|_| "off".to_owned())
-    } else {
-        "off".to_owned()
+    #[cfg(feature = "benchmark-tcp-nodelay")]
+    {
+        std::env::var("BAFFLE_BENCH_TCP_NODELAY").unwrap_or_else(|_| "production".to_owned())
+    }
+    #[cfg(not(feature = "benchmark-tcp-nodelay"))]
+    {
+        "production".to_owned()
     }
 }
 
 #[cfg(any(test, all(feature = "benchmark-tcp-nodelay", feature = "backend-rama")))]
 pub(crate) fn benchmark_tcp_nodelay_enabled(socket_leg: &str) -> bool {
+    #[cfg(feature = "benchmark-tcp-nodelay")]
+    if std::env::var_os("BAFFLE_BENCH_TCP_NODELAY").is_none() {
+        return socket_leg == "proxy-ingress";
+    }
     let mode = benchmark_tcp_nodelay_mode();
     mode == socket_leg || mode == "all"
 }
@@ -59,6 +66,7 @@ impl RuntimeId {
 pub enum ProxyRuntimeError {
     Bind(io::Error),
     BindSocket(io::Error),
+    SocketOption(io::Error),
     Bridge(io::Error),
     Build(String),
     Run(String),
@@ -70,6 +78,7 @@ impl ProxyRuntimeError {
         match self {
             Self::Bind(_) => "bind",
             Self::BindSocket(_) => "socket_bind",
+            Self::SocketOption(_) => "socket_option",
             Self::Bridge(_) => "bridge",
             Self::Build(_) => "proxy_build",
             Self::Run(_) => "proxy_run",
@@ -86,6 +95,10 @@ impl fmt::Display for ProxyRuntimeError {
                 formatter.write_str("proxy Unix socket path already exists")
             }
             Self::BindSocket(_) => formatter.write_str("could not bind proxy Unix socket"),
+            Self::SocketOption(error) => write!(
+                formatter,
+                "could not enable TCP_NODELAY on an accepted Rama client socket: {error}"
+            ),
             Self::Bridge(_) => formatter.write_str("proxy Unix socket bridge failed"),
             Self::Build(_) => formatter.write_str("could not build proxy"),
             Self::Run(_) => formatter.write_str("proxy runtime failed"),

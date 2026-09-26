@@ -46,6 +46,7 @@ const MEASURED_REQUESTS: usize = 80;
 const CHARACTERIZATION_CONCURRENCY: [usize; 3] = [1, 4, 16];
 const REQUEST_BODY_BYTES: usize = 4096;
 const RESPONSE_BODY_BYTES: usize = 32768;
+const MAX_CHARACTERIZATION_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 const BAFFLE_CA_SHA256: &str = "88:0E:ED:ED:4A:CC:4E:9E:3A:5B:C6:31:3B:AC:F2:84:64:DF:41:D5:5E:01:71:F9:7E:21:78:8E:AB:BE:35:D6";
 const ORIGIN_ROOT_SHA256: &str = "37:F2:22:D7:81:9C:58:33:75:B8:E6:86:50:B9:CF:09:BE:13:50:D3:38:25:31:98:81:D8:36:64:AE:9B:02:5B";
@@ -81,6 +82,7 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
     output.row("meta", 0, 0, "backend", BACKEND)?;
     output.row("meta", 0, 0, "profile", PROFILE)?;
     output.row("meta", 0, 0, "rustc", &rustc_version())?;
+    output.row("meta", 0, 0, "tcp_nodelay", &benchmark_tcp_nodelay_mode())?;
     output.row("meta", 0, 0, "baffle_ca_sha256", BAFFLE_CA_SHA256)?;
     output.row("meta", 0, 0, "origin_root_sha256", ORIGIN_ROOT_SHA256)?;
     output.row("meta", 0, 0, "origin_leaf_sha256", ORIGIN_LEAF_SHA256)?;
@@ -89,7 +91,7 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
     let ca = managed_ca(ca_dir.path())?;
     let (baffle_ca_der, origin_material) = tls_material(&ca)?;
     set_test_upstream_trust_anchor(origin_material.root_der.clone());
-    let origin = start_http1_origin(origin_material.tls.clone()).await?;
+    let origin = start_http1_origin(origin_material.tls.clone(), RESPONSE_BODY_BYTES).await?;
     let authority = format!("localhost:{}", origin.address.port());
     let session = intercept_session(origin.address.port());
 
@@ -544,6 +546,10 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
     let tcp_nodelay_mode = benchmark_tcp_nodelay_mode();
     let client_tcp_nodelay = benchmark_tcp_nodelay_enabled("client");
     let concurrency_levels = benchmark_concurrency_levels()?;
+    let request_body_bytes =
+        benchmark_body_bytes("BAFFLE_BENCH_REQUEST_BYTES", REQUEST_BODY_BYTES)?;
+    let response_body_bytes =
+        benchmark_body_bytes("BAFFLE_BENCH_RESPONSE_BYTES", RESPONSE_BODY_BYTES)?;
     let external_origin = std::env::var("BAFFLE_BENCH_ORIGIN_ADDR").ok();
     let origin_name = if external_origin.is_some() {
         "python"
@@ -563,6 +569,20 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
         &std::env::var("BAFFLE_BENCH_CPU").unwrap_or_else(|_| "unrecorded".to_owned()),
     )?;
     output.row("meta", 0, 0, "tcp_nodelay", &tcp_nodelay_mode)?;
+    output.row(
+        "meta",
+        0,
+        0,
+        "request_body_bytes",
+        &request_body_bytes.to_string(),
+    )?;
+    output.row(
+        "meta",
+        0,
+        0,
+        "response_body_bytes",
+        &response_body_bytes.to_string(),
+    )?;
     output.row(
         "meta",
         0,
@@ -589,7 +609,8 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
             (address, None)
         }
         None => {
-            let origin = start_http1_origin(origin_material.tls.clone()).await?;
+            let origin =
+                start_http1_origin(origin_material.tls.clone(), response_body_bytes).await?;
             (origin.address, Some(origin))
         }
     };
@@ -603,7 +624,9 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
     .await?;
 
     for concurrency in concurrency_levels.iter().copied() {
-        let metric = format!("http1_{origin_name}_nodelay_{tcp_nodelay_mode}_c{concurrency}");
+        let metric = format!(
+            "http1_{origin_name}_nodelay_{tcp_nodelay_mode}_req{request_body_bytes}_resp{response_body_bytes}_c{concurrency}"
+        );
         let mut all_latencies = Vec::with_capacity(TRIALS * concurrency * MEASURED_REQUESTS);
         for trial in 0..TRIALS {
             let mut opening = JoinSet::new();
@@ -625,7 +648,7 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
                 let authority = authority.clone();
                 warming.spawn(async move {
                     for _ in 0..WARMUP_REQUESTS {
-                        send_http1_request(&mut client, &authority, REQUEST_BODY_BYTES).await?;
+                        send_http1_request(&mut client, &authority, request_body_bytes).await?;
                     }
                     Ok::<_, BenchError>(client)
                 });
@@ -636,6 +659,7 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
             }
 
             let barrier = Arc::new(Barrier::new(concurrency));
+            let trial_cpu_before = cpu_time_us()?;
             let started = Instant::now();
             let mut requests = JoinSet::new();
             for (client_index, mut client) in warmed_clients.into_iter().enumerate() {
@@ -646,7 +670,7 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
                     let mut latencies = Vec::with_capacity(MEASURED_REQUESTS);
                     for _ in 0..MEASURED_REQUESTS {
                         let request_started = Instant::now();
-                        send_http1_request(&mut client, &authority, REQUEST_BODY_BYTES).await?;
+                        send_http1_request(&mut client, &authority, request_body_bytes).await?;
                         latencies.push(request_started.elapsed().as_secs_f64() * 1_000.0);
                     }
                     Ok::<_, BenchError>((client_index, latencies))
@@ -699,6 +723,25 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
                 request_count,
                 &format!("{metric}_wall_ms"),
                 &format!("{:.3}", elapsed.as_secs_f64() * 1_000.0),
+            )?;
+            output.row(
+                "trial",
+                trial,
+                request_count,
+                &format!("{metric}_mib_per_second"),
+                &format!(
+                    "{:.3}",
+                    (request_count * (request_body_bytes + response_body_bytes)) as f64
+                        / 1_048_576.0
+                        / elapsed.as_secs_f64()
+                ),
+            )?;
+            output.row(
+                "trial",
+                trial,
+                request_count,
+                &format!("{metric}_process_cpu_us"),
+                &cpu_time_us()?.saturating_sub(trial_cpu_before).to_string(),
             )?;
             all_latencies.extend(trial_latencies);
         }
@@ -766,6 +809,20 @@ fn benchmark_concurrency_levels() -> Result<Vec<usize>, BenchError> {
         return Err("benchmark concurrency must use 1, 4, and/or 16".into());
     }
     Ok(levels)
+}
+
+fn benchmark_body_bytes(variable: &str, default: usize) -> Result<usize, BenchError> {
+    let Some(value) = std::env::var_os(variable) else {
+        return Ok(default);
+    };
+    let value = value.to_string_lossy().parse::<usize>()?;
+    if value == 0 || value > MAX_CHARACTERIZATION_BODY_BYTES {
+        return Err(format!(
+            "{variable} must be between 1 and {MAX_CHARACTERIZATION_BODY_BYTES} bytes"
+        )
+        .into());
+    }
+    Ok(value)
 }
 
 fn managed_ca(directory: &Path) -> Result<Arc<ManagedCa>, BenchError> {
@@ -858,7 +915,10 @@ async fn start_runtime(
     .await?)
 }
 
-async fn start_http1_origin(config: Arc<rustls::ServerConfig>) -> Result<Origin, BenchError> {
+async fn start_http1_origin(
+    config: Arc<rustls::ServerConfig>,
+    response_body_bytes: usize,
+) -> Result<Origin, BenchError> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let requests = Arc::new(AtomicUsize::new(0));
@@ -881,7 +941,8 @@ async fn start_http1_origin(config: Arc<rustls::ServerConfig>) -> Result<Origin,
             let requests = Arc::clone(&request_counter);
             let credentials = Arc::clone(&credential_counter);
             tokio::spawn(async move {
-                if let Err(error) = serve_http1(stream, acceptor, requests, credentials).await
+                if let Err(error) =
+                    serve_http1(stream, acceptor, requests, credentials, response_body_bytes).await
                     && error.kind() != io::ErrorKind::UnexpectedEof
                 {
                     tracing::debug!(%error, "benchmark origin connection closed");
@@ -999,10 +1060,11 @@ async fn serve_http1(
     acceptor: TlsAcceptor,
     requests: Arc<AtomicUsize>,
     credentials: Arc<AtomicUsize>,
+    response_body_bytes: usize,
 ) -> io::Result<()> {
     let stream = acceptor.accept(stream).await?;
     let mut reader = BufReader::new(stream);
-    let response_body = vec![b'R'; RESPONSE_BODY_BYTES];
+    let response_body = vec![b'R'; response_body_bytes];
     loop {
         let mut request_line = String::new();
         if reader.read_line(&mut request_line).await? == 0 {

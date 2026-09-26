@@ -228,7 +228,7 @@ impl ControlServer {
                     let ProxyRuntimeEvent { runtime_id, result } = event;
                     match result {
                         Ok(()) => info!(event = "session_lifecycle", session_id = %runtime_id.as_str(), state = "stopped", "proxy runtime stopped"),
-                        Err(error) => warn!(event = "session_lifecycle", session_id = %runtime_id.as_str(), state = "failed", error_class = error.class(), "proxy runtime failed"),
+                        Err(error) => warn!(event = "session_lifecycle", session_id = %runtime_id.as_str(), state = "failed", error_class = error.class(), error = %error, "proxy runtime failed"),
                     }
                     let sessions = self.state.sessions.clone();
                     let session_id = runtime_id.as_str().to_owned();
