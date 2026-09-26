@@ -332,7 +332,7 @@ def publish_release(tag: str, workspace: Path, registry: CratesIo, token: str) -
             confirmed_this_run.append(name)
             print(f"Published and verified {name} {version}.")
     except PublishError as error:
-        if uploaded_this_run:
+        if uploaded_this_run or already_published:
             completed = [*already_published, *confirmed_this_run]
             pending_confirmation = [name for name in uploaded_this_run if name not in confirmed_this_run]
             remaining = [name for name in packages if name not in uploaded_this_run]

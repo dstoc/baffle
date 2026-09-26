@@ -12,6 +12,8 @@ from scripts import publish_crates
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 40
+RELEASE_VERSION = publish_crates.parse_manifest_versions(REPO_ROOT)["baffle-proxy"]
+RELEASE_TAG = f"v{RELEASE_VERSION}"
 
 
 class FakeResponse:
@@ -52,9 +54,10 @@ class PublishCratesTests(unittest.TestCase):
                 publish_crates.version_from_tag(tag)
 
     def test_checked_out_cargo_versions_match_release_tag(self):
-        self.assertEqual(publish_crates.validate_tag_versions("v0.1.0", REPO_ROOT), "0.1.0")
+        self.assertEqual(publish_crates.validate_tag_versions(RELEASE_TAG, REPO_ROOT), RELEASE_VERSION)
         with self.assertRaisesRegex(publish_crates.PublishError, "does not match"):
-            publish_crates.validate_tag_versions("v9.9.9", REPO_ROOT)
+            wrong_version = "0.0.0" if RELEASE_VERSION != "0.0.0" else "0.0.1"
+            publish_crates.validate_tag_versions(f"v{wrong_version}", REPO_ROOT)
 
     def test_release_verification_matches_github_release_and_tag_commit(self):
         completed = [
@@ -66,10 +69,15 @@ class PublishCratesTests(unittest.TestCase):
         with patch.object(
             publish_crates,
             "request_json",
-            return_value={"tag_name": "v0.1.0", "draft": False, "prerelease": False},
+            return_value={"tag_name": RELEASE_TAG, "draft": False, "prerelease": False},
         ), patch("scripts.publish_crates.subprocess.run", side_effect=completed) as run:
-            self.assertEqual(publish_crates.verify_release("dstoc/baffle", "v0.1.0", SHA, REPO_ROOT, "gh-token"), "0.1.0")
-        self.assertEqual(run.call_args_list[0].args[0], ["git", "rev-parse", "refs/tags/v0.1.0^{commit}"])
+            self.assertEqual(
+                publish_crates.verify_release("dstoc/baffle", RELEASE_TAG, SHA, REPO_ROOT, "gh-token"),
+                RELEASE_VERSION,
+            )
+        self.assertEqual(
+            run.call_args_list[0].args[0], ["git", "rev-parse", f"refs/tags/{RELEASE_TAG}^{{commit}}"]
+        )
         self.assertEqual(run.call_args_list[1].args[0], ["git", "rev-parse", "HEAD"])
         self.assertEqual(run.call_args_list[3].args[0][-1], "refs/remotes/origin/main")
 
@@ -77,10 +85,10 @@ class PublishCratesTests(unittest.TestCase):
         with patch.object(
             publish_crates,
             "request_json",
-            return_value={"tag_name": "v0.1.0", "draft": False, "prerelease": True},
+            return_value={"tag_name": RELEASE_TAG, "draft": False, "prerelease": True},
         ), patch("scripts.publish_crates.subprocess.run") as run:
             with self.assertRaisesRegex(publish_crates.PublishError, "prerelease"):
-                publish_crates.verify_release("dstoc/baffle", "v0.1.0", SHA, REPO_ROOT, "gh-token")
+                publish_crates.verify_release("dstoc/baffle", RELEASE_TAG, SHA, REPO_ROOT, "gh-token")
         run.assert_not_called()
 
     def test_tag_versions_require_both_packages_and_registry_dependency_to_match(self):
@@ -168,14 +176,14 @@ class PublishCratesTests(unittest.TestCase):
         matching = publish_crates.RegistryState(True, True)
         registry = FakeRegistry(client=matching, proxy=matching)
         with patch.object(publish_crates, "run_cargo") as run_cargo:
-            publish_crates.publish_release("v0.1.0", REPO_ROOT, registry, "opaque-test-token")
+            publish_crates.publish_release(RELEASE_TAG, REPO_ROOT, registry, "opaque-test-token")
         run_cargo.assert_not_called()
 
     def test_publish_checks_client_first_then_proxy_dry_run_and_publish(self):
         registry = FakeRegistry()
         calls = []
         with patch.object(publish_crates, "run_cargo", side_effect=lambda args, **_kwargs: calls.append(args)):
-            publish_crates.publish_release("v0.1.0", REPO_ROOT, registry, "opaque-test-token")
+            publish_crates.publish_release(RELEASE_TAG, REPO_ROOT, registry, "opaque-test-token")
         self.assertEqual(
             calls,
             [
@@ -195,9 +203,25 @@ class PublishCratesTests(unittest.TestCase):
         with patch.object(publish_crates, "run_cargo", side_effect=fail_proxy_dry_run):
             with self.assertRaisesRegex(publish_crates.PublishError, "proxy packaging failed"):
                 with patch("sys.stdout", new_callable=io.StringIO) as output:
-                    publish_crates.publish_release("v0.1.0", REPO_ROOT, registry, "opaque-test-token")
+                    publish_crates.publish_release(RELEASE_TAG, REPO_ROOT, registry, "opaque-test-token")
         self.assertIn("PARTIAL OR UNCONFIRMED RELEASE", output.getvalue())
-        self.assertIn("baffle-client 0.1.0", output.getvalue())
+        self.assertIn(f"baffle-client {RELEASE_VERSION}", output.getvalue())
+
+    def test_proxy_failure_after_resumed_client_reports_partial_release(self):
+        matching_client = publish_crates.RegistryState(True, True)
+        registry = FakeRegistry(client=matching_client)
+
+        def fail_proxy_dry_run(args, **_kwargs):
+            if args[-1] == "baffle-proxy" and "--dry-run" in args:
+                raise publish_crates.PublishError("proxy packaging failed")
+
+        with patch.object(publish_crates, "run_cargo", side_effect=fail_proxy_dry_run):
+            with self.assertRaisesRegex(publish_crates.PublishError, "proxy packaging failed"):
+                with patch("sys.stdout", new_callable=io.StringIO) as output:
+                    publish_crates.publish_release(RELEASE_TAG, REPO_ROOT, registry, "opaque-test-token")
+        self.assertIn("PARTIAL OR UNCONFIRMED RELEASE", output.getvalue())
+        self.assertIn(f"registry confirmed baffle-client {RELEASE_VERSION}", output.getvalue())
+        self.assertIn(f"not yet uploaded: baffle-proxy {RELEASE_VERSION}", output.getvalue())
 
     def test_dry_run_does_not_receive_registry_token(self):
         observed = {}
@@ -250,6 +274,8 @@ class PublishCratesTests(unittest.TestCase):
         self.assertIn("ref: ${{ needs.release-please.outputs.sha }}", workflow)
         self.assertIn("workflow_call:", ci)
         self.assertIn("ref: ${{ inputs.ref || github.sha }}", ci)
+        namespace_job = ci.split("  namespace-integration:", 1)[1].split("  required-checks:", 1)[0]
+        self.assertIn("ref: ${{ inputs.ref || github.sha }}", namespace_job)
         self.assertIn("needs: [release-please, validate-release]", workflow)
         self.assertIn("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}", workflow)
         self.assertEqual(workflow.count("secrets.CARGO_REGISTRY_TOKEN"), 1)
