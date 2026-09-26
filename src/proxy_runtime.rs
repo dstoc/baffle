@@ -42,7 +42,6 @@ pub enum ProxyRuntimeError {
     Build(String),
     Run(String),
     Task(String),
-    BackendUnavailable,
 }
 
 impl ProxyRuntimeError {
@@ -54,7 +53,6 @@ impl ProxyRuntimeError {
             Self::Build(_) => "proxy_build",
             Self::Run(_) => "proxy_run",
             Self::Task(_) => "task",
-            Self::BackendUnavailable => "backend_unavailable",
         }
     }
 }
@@ -71,9 +69,6 @@ impl fmt::Display for ProxyRuntimeError {
             Self::Build(_) => formatter.write_str("could not build proxy"),
             Self::Run(_) => formatter.write_str("proxy runtime failed"),
             Self::Task(_) => formatter.write_str("proxy runtime task failed"),
-            Self::BackendUnavailable => formatter.write_str(
-                "Rama backend is disabled until Baffle's upstream TLS and authority checks are integrated",
-            ),
         }
     }
 }

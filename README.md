@@ -99,17 +99,16 @@ isolation described in the [deployment guide](docs/security-deployment.md).
 
 The daemon owns a private Unix control socket and a managed certificate
 authority. A trusted orchestrator creates a session over the control socket
-and gets the path to that session's Unix data socket. Hudsucker handles HTTP
-and HTTPS traffic. A bounded in-process bridge connects the data socket to a
-private, pre-bound loopback TCP listener used by Hudsucker.
+and gets the path to that session's Unix data socket. The selected backend
+handles proxy traffic. A bounded in-process bridge connects the data socket to
+the private, pre-bound loopback TCP listener used by that backend.
 
-The current implementation gives every session a separate immutable policy,
-Hudsucker runtime, credential state, and resource counters. Hudsucker's default
-outbound connectors resolve and dial authorized hostnames; Baffle does not
-filter or pin DNS answers. The session manager shares the Tokio runtime and CA
-material. See the
-[architecture guide](docs/architecture.md) for component details and data
-flows.
+The current implementation gives every session an immutable policy, a
+feature-selected backend runtime, credential state, and resource counters. Both
+backend selections authorize the configured hostname and port before dialing.
+Baffle does not filter or pin DNS answers. The session manager shares the Tokio
+runtime and CA material. See the [architecture guide](docs/architecture.md)
+for component details and data flows.
 
 The deployment must enforce the isolation described in [Security model and
 limitations](#security-model-and-limitations).
@@ -129,10 +128,13 @@ cargo check --locked --examples --no-default-features --features backend-hudsuck
 ```
 
 The default feature is `backend-hudsucker`. The experimental Rama feature uses
-Rama 0.4.0 with `http-full` and `boring`. See the Rama matrix entry in
-`.github/workflows/ci.yml` for its build prerequisites, and the
-[Rama prototype report](docs/rama-prototype.md) for the current security gap
-and build measurements.
+Rama 0.4.0 with `http-full` and `boring`; it requires Rust 1.96 or newer,
+`libclang`, CMake, and a C++ toolchain. See the Rama matrix entry in
+`.github/workflows/ci.yml` for its build prerequisites, the
+[Rama backend evaluation](docs/rama-prototype.md) for implementation and
+runtime/build observations, and the
+[backend comparison](docs/backend-comparison.md) for Baffle-authored code,
+security, and maintenance analysis.
 
 GitHub Actions runs these checks, parses the checked-in TOML examples, and runs
 the privileged Linux network-namespace integration job. See
