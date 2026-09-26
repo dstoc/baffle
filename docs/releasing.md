@@ -1,5 +1,19 @@
 # Release process
 
+## Repository setup
+
+Before Release Please can open a release pull request, enable **Allow GitHub
+Actions to create and approve pull requests** in the repository's **Settings >
+Actions > General > Workflow permissions**. Save the setting after you enable
+it. The workflow already grants `GITHUB_TOKEN` the required `contents: write`,
+`issues: write`, and `pull-requests: write` permissions, but those workflow
+permissions do not enable this repository setting.
+
+GitHub disables this setting by default for new personal repositories. An
+organization policy can control the setting for repositories in that
+organization. See [GitHub's repository Actions settings
+documentation](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#preventing-github-actions-from-creating-or-approving-pull-requests).
+
 ## Version and changelog pull requests
 
 The `Release Please` workflow runs when commits reach `main`. It uses the
