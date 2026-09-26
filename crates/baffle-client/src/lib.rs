@@ -21,6 +21,7 @@ pub const PROTOCOL_VERSION: u16 = 1;
 
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SESSION_CONFIG_NAME_BYTES: usize = 1_024;
 
 /// A client that opens one control connection for each operation.
 #[derive(Debug, Clone)]
@@ -54,6 +55,31 @@ impl Client {
                 persistent: config.persistent,
             },
             rules: config.rules,
+        };
+        let mut stream = self.open_control().await?;
+        let response = exchange(&mut stream, &request).await?;
+        let created: CreateResult = success_result(response)?;
+
+        Ok(Session {
+            id: created.id,
+            socket_path: PathBuf::from(created.socket),
+            persistent: created.persistent,
+            lease: (!created.persistent).then_some(stream),
+        })
+    }
+
+    /// Create a proxy session from a TOML file provisioned by the daemon administrator.
+    ///
+    /// `name` is a relative path beneath the daemon's configured session
+    /// configuration directory. The returned handle owns the control
+    /// connection while the session is ephemeral.
+    pub async fn create_from_file(&self, name: impl AsRef<str>) -> Result<Session, ClientError> {
+        let name = name.as_ref();
+        validate_session_config_name(name)?;
+        let request = CreateFromFileRequest {
+            version: PROTOCOL_VERSION,
+            operation: "create_from_file",
+            name,
         };
         let mut stream = self.open_control().await?;
         let response = exchange(&mut stream, &request).await?;
@@ -335,6 +361,14 @@ pub enum ClientError {
     Provisioning(String),
     /// The requested session does not exist or is not owned by this user.
     SessionNotFound(String),
+    /// The daemon could not find the named session configuration file.
+    SessionConfigNotFound(String),
+    /// The named session configuration file could not be safely read.
+    SessionConfigUnavailable(String),
+    /// The named session configuration file is not a valid session policy.
+    SessionConfigInvalid(String),
+    /// The requested create operation is disabled by daemon configuration.
+    OperationNotAllowed(String),
     /// The control transport failed.
     Transport(io::Error),
     /// The request could not be encoded as TOML.
@@ -354,6 +388,18 @@ impl fmt::Display for ClientError {
             Self::ProtocolMismatch(message) => write!(formatter, "protocol mismatch: {message}"),
             Self::Provisioning(message) => write!(formatter, "provisioning failed: {message}"),
             Self::SessionNotFound(message) => write!(formatter, "session not found: {message}"),
+            Self::SessionConfigNotFound(message) => {
+                write!(formatter, "session configuration not found: {message}")
+            }
+            Self::SessionConfigUnavailable(message) => {
+                write!(formatter, "session configuration unavailable: {message}")
+            }
+            Self::SessionConfigInvalid(message) => {
+                write!(formatter, "invalid session configuration: {message}")
+            }
+            Self::OperationNotAllowed(message) => {
+                write!(formatter, "operation not allowed: {message}")
+            }
             Self::Transport(error) => write!(formatter, "control transport failed: {error}"),
             Self::Serialization(error) => write!(formatter, "could not encode request: {error}"),
             Self::Protocol(message) => write!(formatter, "control protocol error: {message}"),
@@ -378,6 +424,13 @@ struct CreateRequest {
     operation: &'static str,
     session: SessionSettings,
     rules: Vec<HostRule>,
+}
+
+#[derive(Serialize)]
+struct CreateFromFileRequest<'a> {
+    version: u16,
+    operation: &'static str,
+    name: &'a str,
 }
 
 #[derive(Serialize)]
@@ -499,16 +552,38 @@ fn map_remote_error(error: RemoteError) -> ClientError {
         "unsupported_version" => ClientError::ProtocolMismatch(message),
         "busy" | "session_limit" => ClientError::CapacityLimit(message),
         "session_not_found" => ClientError::SessionNotFound(message),
+        "config_file_not_found" => ClientError::SessionConfigNotFound(message),
+        "config_file_unavailable" => ClientError::SessionConfigUnavailable(message),
+        "config_file_invalid" => ClientError::SessionConfigInvalid(message),
+        "operation_not_allowed" => ClientError::OperationNotAllowed(message),
         "internal_error" | "shutting_down" => ClientError::Provisioning(message),
         _ => ClientError::Server { code, message },
     }
 }
 
+fn validate_session_config_name(name: &str) -> Result<(), ClientError> {
+    if name.is_empty()
+        || name.len() > MAX_SESSION_CONFIG_NAME_BYTES
+        || !name.ends_with(".toml")
+        || name.contains('\\')
+        || name.contains(':')
+        || name.chars().any(char::is_control)
+        || name.split('/').any(|component| {
+            component.is_empty() || component == "." || component == ".." || component.len() > 255
+        })
+    {
+        return Err(ClientError::InvalidPolicy(
+            "session configuration name is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientError, CreateRequest, HostRule, InjectionFormat, SessionConfig, SessionSettings,
-        map_remote_error,
+        ClientError, CreateFromFileRequest, CreateRequest, HostRule, InjectionFormat,
+        SessionConfig, SessionSettings, map_remote_error, validate_session_config_name,
     };
 
     #[test]
@@ -563,5 +638,39 @@ mod tests {
             }),
             ClientError::Provisioning(_)
         ));
+        assert!(matches!(
+            map_remote_error(super::RemoteError {
+                code: "config_file_invalid".into(),
+                message: "session configuration file is invalid".into(),
+            }),
+            ClientError::SessionConfigInvalid(_)
+        ));
+    }
+
+    #[test]
+    fn serializes_file_create_and_validates_relative_toml_names() {
+        let request = CreateFromFileRequest {
+            version: 1,
+            operation: "create_from_file",
+            name: "cladding/github.toml",
+        };
+        let encoded = toml::to_string(&request).expect("file request should serialize");
+        assert!(encoded.contains("operation = \"create_from_file\""));
+        assert!(encoded.contains("name = \"cladding/github.toml\""));
+        assert!(validate_session_config_name("cladding/github.toml").is_ok());
+        for invalid in [
+            "",
+            "/etc/passwd.toml",
+            "../outside.toml",
+            "cladding/../outside.toml",
+            "cladding//github.toml",
+            "cladding\\github.toml",
+            "cladding/name.txt",
+        ] {
+            assert!(
+                validate_session_config_name(invalid).is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
     }
 }

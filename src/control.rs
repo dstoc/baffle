@@ -4,10 +4,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, Read},
-    os::unix::net::UnixStream as StdUnixStream,
+    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     os::{
-        fd::AsRawFd,
-        unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        fd::{AsRawFd, FromRawFd},
+        unix::{ffi::OsStrExt, net::UnixStream as StdUnixStream},
     },
     path::{Path, PathBuf},
     sync::Arc,
@@ -26,7 +26,9 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::config::{ControlRequest, DaemonConfig, DaemonSettings, PROTOCOL_VERSION};
+use crate::config::{
+    ControlRequest, DaemonConfig, DaemonSettings, PROTOCOL_VERSION, SessionCreateMode,
+};
 use crate::secrets::{ResolvedSecrets, SecretStore, SecretStoreError};
 use crate::{
     ca::ManagedCa,
@@ -36,6 +38,7 @@ use crate::{
 };
 
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
+const MAX_SESSION_CONFIG_BYTES: usize = 256 * 1024;
 
 const ERR_UNAUTHORIZED: (&str, &str) = ("unauthorized", "client is not authorized");
 const ERR_INVALID_REQUEST: (&str, &str) = ("invalid_request", "request is invalid");
@@ -54,6 +57,22 @@ const ERR_SECRET_UNAVAILABLE: (&str, &str) = (
 );
 const ERR_INTERNAL: (&str, &str) = ("internal_error", "request could not be completed");
 const ERR_SHUTTING_DOWN: (&str, &str) = ("shutting_down", "daemon is shutting down");
+const ERR_OPERATION_NOT_ALLOWED: (&str, &str) = (
+    "operation_not_allowed",
+    "session creation operation is not allowed by daemon configuration",
+);
+const ERR_CONFIG_FILE_NOT_FOUND: (&str, &str) = (
+    "config_file_not_found",
+    "session configuration file was not found",
+);
+const ERR_CONFIG_FILE_UNAVAILABLE: (&str, &str) = (
+    "config_file_unavailable",
+    "session configuration file is unavailable",
+);
+const ERR_CONFIG_FILE_INVALID: (&str, &str) = (
+    "config_file_invalid",
+    "session configuration file is invalid",
+);
 
 pub struct ControlServer {
     listener: Option<UnixListener>,
@@ -67,10 +86,188 @@ pub struct ControlServer {
 
 struct ControlState {
     trusted_operator_uid: u32,
+    create_mode: SessionCreateMode,
     read_timeout: Duration,
     secret_store: SecretStore,
     sessions: SessionManager,
     provisioning_slots: Arc<Semaphore>,
+    session_configs: Option<SessionConfigStore>,
+}
+
+#[derive(Clone)]
+struct SessionConfigStore {
+    directory: Arc<File>,
+    trusted_uid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionConfigFileError {
+    NotFound,
+    Unavailable,
+    Invalid,
+}
+
+impl SessionConfigStore {
+    fn open(directory: &Path, trusted_uid: u32) -> Result<Self> {
+        let directory = open_trusted_directory_tree(directory, trusted_uid)?;
+        Ok(Self {
+            directory: Arc::new(directory),
+            trusted_uid,
+        })
+    }
+
+    fn read_snapshot(&self, name: &str) -> std::result::Result<String, SessionConfigFileError> {
+        let mut components = name.split('/').peekable();
+        let mut directory = self
+            .directory
+            .try_clone()
+            .map_err(|_| SessionConfigFileError::Unavailable)?;
+
+        while let Some(component) = components.next() {
+            let component = std::ffi::CString::new(component.as_bytes())
+                .map_err(|_| SessionConfigFileError::Unavailable)?;
+            if components.peek().is_some() {
+                directory = openat_file(
+                    directory.as_raw_fd(),
+                    &component,
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+                .map_err(classify_config_file_io)?;
+                let metadata = directory
+                    .metadata()
+                    .map_err(|_| SessionConfigFileError::Unavailable)?;
+                validate_config_directory_metadata(&metadata, self.trusted_uid, false)
+                    .map_err(|_| SessionConfigFileError::Unavailable)?;
+            } else {
+                let file = openat_file(
+                    directory.as_raw_fd(),
+                    &component,
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                )
+                .map_err(classify_config_file_io)?;
+                let metadata = file
+                    .metadata()
+                    .map_err(|_| SessionConfigFileError::Unavailable)?;
+                let mode = metadata.permissions().mode();
+                if !metadata.is_file()
+                    || !trusted_owner(metadata.uid(), self.trusted_uid)
+                    || mode & 0o7022 != 0
+                    || mode & 0o444 == 0
+                {
+                    return Err(SessionConfigFileError::Unavailable);
+                }
+                if metadata.len() > MAX_SESSION_CONFIG_BYTES as u64 {
+                    return Err(SessionConfigFileError::Invalid);
+                }
+                let mut bytes = Vec::with_capacity(metadata.len() as usize);
+                file.take((MAX_SESSION_CONFIG_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| SessionConfigFileError::Unavailable)?;
+                if bytes.len() > MAX_SESSION_CONFIG_BYTES {
+                    return Err(SessionConfigFileError::Invalid);
+                }
+                return String::from_utf8(bytes).map_err(|_| SessionConfigFileError::Invalid);
+            }
+        }
+        Err(SessionConfigFileError::Invalid)
+    }
+}
+
+fn open_trusted_directory_tree(path: &Path, trusted_uid: u32) -> Result<File> {
+    if !path.is_absolute() {
+        bail!("session configuration directory must be absolute");
+    }
+    let mut directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open("/")
+        .context("could not open filesystem root for session configuration")?;
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::RootDir => None,
+            std::path::Component::Normal(component) => Some(Ok(component)),
+            _ => Some(Err(())),
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| anyhow::anyhow!("session configuration directory path is invalid"))?;
+    if components.is_empty() {
+        bail!("session configuration directory must not be the filesystem root");
+    }
+
+    for (index, component) in components.iter().enumerate() {
+        let component = std::ffi::CString::new(component.as_bytes())
+            .map_err(|_| anyhow::anyhow!("session configuration directory path is invalid"))?;
+        directory = openat_file(
+            directory.as_raw_fd(),
+            &component,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+        .context("could not securely open session configuration directory")?;
+        let is_root = index + 1 == components.len();
+        let metadata = directory
+            .metadata()
+            .context("could not inspect session configuration directory")?;
+        validate_config_directory_metadata(&metadata, trusted_uid, !is_root)
+            .context("session configuration directory has unsafe ownership or permissions")?;
+    }
+    Ok(directory)
+}
+
+fn validate_config_directory_metadata(
+    metadata: &fs::Metadata,
+    trusted_uid: u32,
+    allow_sticky_parent: bool,
+) -> io::Result<()> {
+    if !metadata.is_dir() || !trusted_owner(metadata.uid(), trusted_uid) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe session configuration directory",
+        ));
+    }
+    let mode = metadata.permissions().mode();
+    let sticky_parent = allow_sticky_parent && mode & 0o1000 != 0;
+    if mode & 0o022 != 0 && !sticky_parent {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "writable session configuration directory",
+        ));
+    }
+    let executable = if metadata.uid() == trusted_uid {
+        mode & 0o100 != 0
+    } else {
+        mode & 0o111 != 0
+    };
+    if !executable {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "untraversable session configuration directory",
+        ));
+    }
+    Ok(())
+}
+
+fn trusted_owner(owner_uid: u32, trusted_uid: u32) -> bool {
+    owner_uid == trusted_uid || owner_uid == 0
+}
+
+fn openat_file(parent_fd: i32, name: &std::ffi::CStr, flags: i32) -> io::Result<File> {
+    // SAFETY: the path is a NUL-terminated CString and the descriptor remains
+    // owned by the caller for the duration of openat.
+    let fd = unsafe { libc::openat(parent_fd, name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new descriptor, now owned by this File.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn classify_config_file_io(error: io::Error) -> SessionConfigFileError {
+    if error.kind() == io::ErrorKind::NotFound {
+        SessionConfigFileError::NotFound
+    } else {
+        SessionConfigFileError::Unavailable
+    }
 }
 
 struct SocketGuard {
@@ -171,12 +368,24 @@ impl ControlServer {
 
         let (runtime_event_sender, runtime_events) = tokio::sync::mpsc::unbounded_channel();
         let metrics = Arc::new(Metrics::default());
+        let session_configs = match config.daemon.create_mode {
+            SessionCreateMode::Inline => None,
+            SessionCreateMode::FileOnly => Some(SessionConfigStore::open(
+                config
+                    .daemon
+                    .session_config_dir
+                    .as_deref()
+                    .context("file-only mode requires a session configuration directory")?,
+                trusted_uid,
+            )?),
+        };
 
         Ok(Self {
             listener: Some(listener),
             socket_guard: Some(socket_guard),
             state: Arc::new(ControlState {
                 trusted_operator_uid: trusted_uid,
+                create_mode: config.daemon.create_mode,
                 read_timeout: Duration::from_millis(config.daemon.control_read_timeout_ms),
                 secret_store: SecretStore::new(
                     config.secrets.directory.clone(),
@@ -192,6 +401,7 @@ impl ControlServer {
                 provisioning_slots: Arc::new(Semaphore::new(
                     config.daemon.max_provisioning_requests,
                 )),
+                session_configs,
             }),
             connections: JoinSet::new(),
             session_cleanups: JoinSet::new(),
@@ -477,47 +687,56 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
     let mut lease_id = None;
     let response = match request {
         ControlRequest::Create { session, .. } => {
-            let permit = match state.provisioning_slots.clone().try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    let _ = write_error(&mut stream, ERR_BUSY).await;
-                    return;
-                }
-            };
-            let secrets = match state.secret_store.resolve(client_uid, &session) {
-                Ok(secrets) => secrets,
-                Err(
-                    SecretStoreError::UnauthorizedClient
-                    | SecretStoreError::NotEntitled
-                    | SecretStoreError::Unavailable,
-                ) => {
-                    let _ = write_error(&mut stream, ERR_SECRET_UNAVAILABLE).await;
-                    return;
-                }
-            };
-            let result = {
-                let result = state.sessions.create(client_uid, session, secrets).await;
-                drop(permit);
-                result
-            };
-            match result {
-                Ok(created) => {
-                    if !created.persistent {
-                        lease_id = Some(created.id.clone());
+            if state.create_mode != SessionCreateMode::Inline {
+                error_value(ERR_OPERATION_NOT_ALLOWED)
+            } else {
+                match state.provisioning_slots.clone().try_acquire_owned() {
+                    Ok(permit) => {
+                        create_session_response(&state, client_uid, session, permit, &mut lease_id)
+                            .await
                     }
-                    success(json!({
-                        "id": created.id,
-                        "socket": created.socket,
-                        "persistent": created.persistent,
-                    }))
+                    Err(_) => error_value(ERR_BUSY),
                 }
-                Err(SessionError::AtCapacity) => error_value(ERR_SESSION_LIMIT),
-                Err(SessionError::Runtime(error)) => {
-                    warn!(error_class = error.class(), "failed to start proxy runtime");
-                    error_value(ERR_INTERNAL)
-                }
-                Err(SessionError::ShuttingDown) => error_value(ERR_SHUTTING_DOWN),
-                Err(SessionError::Internal) => error_value(ERR_INTERNAL),
+            }
+        }
+        ControlRequest::CreateFromFile { name, .. } => {
+            if state.create_mode != SessionCreateMode::FileOnly {
+                error_value(ERR_OPERATION_NOT_ALLOWED)
+            } else {
+                let permit = match state.provisioning_slots.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let _ = write_error(&mut stream, ERR_BUSY).await;
+                        return;
+                    }
+                };
+                let Some(store) = &state.session_configs else {
+                    let _ = write_error(&mut stream, ERR_INTERNAL).await;
+                    return;
+                };
+                let text = match store.read_snapshot(&name) {
+                    Ok(text) => text,
+                    Err(SessionConfigFileError::NotFound) => {
+                        let _ = write_error(&mut stream, ERR_CONFIG_FILE_NOT_FOUND).await;
+                        return;
+                    }
+                    Err(SessionConfigFileError::Unavailable) => {
+                        let _ = write_error(&mut stream, ERR_CONFIG_FILE_UNAVAILABLE).await;
+                        return;
+                    }
+                    Err(SessionConfigFileError::Invalid) => {
+                        let _ = write_error(&mut stream, ERR_CONFIG_FILE_INVALID).await;
+                        return;
+                    }
+                };
+                let session = match ControlRequest::from_toml(&text) {
+                    Ok(ControlRequest::Create { session, .. }) => session,
+                    _ => {
+                        let _ = write_error(&mut stream, ERR_CONFIG_FILE_INVALID).await;
+                        return;
+                    }
+                };
+                create_session_response(&state, client_uid, session, permit, &mut lease_id).await
             }
         }
         ControlRequest::Stop { session_id, .. } => {
@@ -545,6 +764,44 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
         let mut extra = [0; 1];
         let _ = stream.read(&mut extra).await;
         state.sessions.remove(&id, "lease_closed").await;
+    }
+}
+
+async fn create_session_response(
+    state: &ControlState,
+    client_uid: u32,
+    session: SessionConfig,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    lease_id: &mut Option<String>,
+) -> Value {
+    let secrets = match state.secret_store.resolve(client_uid, &session) {
+        Ok(secrets) => secrets,
+        Err(
+            SecretStoreError::UnauthorizedClient
+            | SecretStoreError::NotEntitled
+            | SecretStoreError::Unavailable,
+        ) => return error_value(ERR_SECRET_UNAVAILABLE),
+    };
+    let result = state.sessions.create(client_uid, session, secrets).await;
+    drop(permit);
+    match result {
+        Ok(created) => {
+            if !created.persistent {
+                *lease_id = Some(created.id.clone());
+            }
+            success(json!({
+                "id": created.id,
+                "socket": created.socket,
+                "persistent": created.persistent,
+            }))
+        }
+        Err(SessionError::AtCapacity) => error_value(ERR_SESSION_LIMIT),
+        Err(SessionError::Runtime(error)) => {
+            warn!(error_class = error.class(), "failed to start proxy runtime");
+            error_value(ERR_INTERNAL)
+        }
+        Err(SessionError::ShuttingDown) => error_value(ERR_SHUTTING_DOWN),
+        Err(SessionError::Internal) => error_value(ERR_INTERNAL),
     }
 }
 
@@ -915,7 +1172,7 @@ mod tests {
 
     use crate::{
         ca::ManagedCa,
-        config::{CaConfig, ControlRequest, DaemonSettings},
+        config::{CaConfig, ControlRequest, DaemonSettings, SessionCreateMode},
         secrets::SecretStore,
         telemetry::Metrics,
     };
@@ -958,6 +1215,8 @@ mod tests {
             max_provisioning_requests: 1,
             connection_timeout_ms: 1_000,
             io_timeout_ms: 1_000,
+            session_config_dir: None,
+            create_mode: SessionCreateMode::Inline,
         };
         SessionManager::new(&settings, ca, runtime_events, Arc::new(Metrics::default()))
     }
@@ -965,6 +1224,7 @@ mod tests {
     fn state(directory: &std::path::Path, uid: u32, allowed: &[&str]) -> ControlState {
         ControlState {
             trusted_operator_uid: uid,
+            create_mode: SessionCreateMode::Inline,
             read_timeout: Duration::from_secs(1),
             secret_store: SecretStore::new(
                 directory.to_path_buf(),
@@ -973,6 +1233,7 @@ mod tests {
             ),
             sessions: session_manager(directory, 1),
             provisioning_slots: Arc::new(Semaphore::new(1)),
+            session_configs: None,
         }
     }
 
@@ -1037,6 +1298,7 @@ mod tests {
             .uid();
         let state = Arc::new(ControlState {
             trusted_operator_uid: peer_uid.wrapping_add(1),
+            create_mode: SessionCreateMode::Inline,
             read_timeout: Duration::from_secs(1),
             secret_store: SecretStore::new(
                 directory.path().to_path_buf(),
@@ -1045,6 +1307,7 @@ mod tests {
             ),
             sessions: session_manager(directory.path(), 1),
             provisioning_slots: Arc::new(Semaphore::new(1)),
+            session_configs: None,
         });
         let task = tokio::spawn(async move {
             handle_connection(server, state).await;

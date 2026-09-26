@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use baffle_proxy::config::{ControlRequest, DaemonConfig, InjectionFormat, RuleMode};
+use baffle_proxy::config::{
+    ControlRequest, DaemonConfig, InjectionFormat, RuleMode, SessionCreateMode,
+};
 
 #[test]
 fn daemon_configuration_example_parses_and_defaults_match_the_reference() {
@@ -13,6 +15,7 @@ fn daemon_configuration_example_parses_and_defaults_match_the_reference() {
     assert_eq!(example.daemon.max_provisioning_requests, 8);
     assert_eq!(example.daemon.connection_timeout_ms, 5_000);
     assert_eq!(example.daemon.io_timeout_ms, 30_000);
+    assert_eq!(example.daemon.create_mode, SessionCreateMode::Inline);
 
     let minimal = DaemonConfig::from_toml(
         r#"
@@ -37,11 +40,27 @@ directory = "/var/lib/baffle/secrets"
     assert_eq!(minimal.daemon.max_provisioning_requests, 8);
     assert_eq!(minimal.daemon.connection_timeout_ms, 5_000);
     assert_eq!(minimal.daemon.io_timeout_ms, 30_000);
+    assert_eq!(minimal.daemon.create_mode, SessionCreateMode::Inline);
     assert!(minimal.secrets.allowed.is_empty());
     assert_eq!(
         minimal.ca.certificate,
         PathBuf::from("/var/lib/baffle/ca.pem")
     );
+}
+
+#[test]
+fn file_only_daemon_and_nested_session_examples_parse() {
+    let daemon = DaemonConfig::from_toml(include_str!("../examples/daemon-file-only.toml"))
+        .expect("file-only daemon example should parse");
+    assert_eq!(daemon.daemon.create_mode, SessionCreateMode::FileOnly);
+    assert_eq!(
+        daemon.daemon.session_config_dir,
+        Some(PathBuf::from("/etc/baffle/sessions"))
+    );
+    assert!(matches!(
+        ControlRequest::from_toml(include_str!("../examples/sessions/cladding/github.toml")),
+        Ok(ControlRequest::Create { .. })
+    ));
 }
 
 #[test]

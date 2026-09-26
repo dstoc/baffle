@@ -9,6 +9,7 @@ use std::{
     error::Error,
     fmt, fs,
     net::IpAddr,
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
 
@@ -24,6 +25,8 @@ const DEFAULT_CONTROL_READ_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_MAX_PROVISIONING_REQUESTS: usize = 8;
 const DEFAULT_CONNECTION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_IO_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const MAX_SESSION_CONFIG_NAME_BYTES: usize = 1_024;
+const MAX_SESSION_CONFIG_COMPONENT_BYTES: usize = 255;
 
 /// A safe configuration error. Error text never contains input values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +89,19 @@ pub struct DaemonSettings {
     pub max_provisioning_requests: usize,
     pub connection_timeout_ms: u64,
     pub io_timeout_ms: u64,
+    pub session_config_dir: Option<PathBuf>,
+    pub create_mode: SessionCreateMode,
+}
+
+/// Selects how the daemon accepts requests to create sessions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCreateMode {
+    /// Accept session policy TOML in the control request.
+    #[default]
+    Inline,
+    /// Accept only names of daemon-managed TOML files.
+    FileOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +121,24 @@ impl DaemonConfig {
     pub fn from_toml(input: &str) -> Result<Self, ConfigError> {
         let raw: RawDaemonConfig = deserialize(input)?;
 
+        let session_config_dir = match (raw.daemon.create_mode, raw.daemon.session_config_dir) {
+            (SessionCreateMode::Inline, None) => None,
+            (SessionCreateMode::Inline, Some(_)) => {
+                return Err(ConfigError::new(
+                    "daemon.session_config_dir requires daemon.create_mode = \"file_only\"",
+                ));
+            }
+            (SessionCreateMode::FileOnly, None) => {
+                return Err(ConfigError::new(
+                    "daemon.session_config_dir is required when daemon.create_mode is \"file_only\"",
+                ));
+            }
+            (SessionCreateMode::FileOnly, Some(path)) => {
+                validate_session_config_dir(&path)?;
+                Some(path)
+            }
+        };
+
         let daemon = DaemonSettings {
             control_socket: required_path(raw.daemon.control_socket, "daemon.control_socket")?,
             socket_dir: required_path(raw.daemon.socket_dir, "daemon.socket_dir")?,
@@ -116,6 +150,8 @@ impl DaemonConfig {
             max_provisioning_requests: raw.daemon.max_provisioning_requests,
             connection_timeout_ms: raw.daemon.connection_timeout_ms,
             io_timeout_ms: raw.daemon.io_timeout_ms,
+            session_config_dir,
+            create_mode: raw.daemon.create_mode,
         };
         if daemon.max_sessions == 0 {
             return Err(ConfigError::new(
@@ -281,6 +317,10 @@ pub enum ControlRequest {
         version: u16,
         session: SessionConfig,
     },
+    CreateFromFile {
+        version: u16,
+        name: String,
+    },
     Stop {
         version: u16,
         session_id: String,
@@ -321,12 +361,68 @@ impl ControlRequest {
                     session_id,
                 })
             }
+            RawControlRequest::CreateFromFile { version, name } => {
+                validate_protocol_version(version)?;
+                let name = validate_session_config_name(&name)?;
+                Ok(Self::CreateFromFile { version, name })
+            }
             RawControlRequest::List { version } => {
                 validate_protocol_version(version)?;
                 Ok(Self::List { version })
             }
         }
     }
+}
+
+fn validate_session_config_name(name: &str) -> Result<String, ConfigError> {
+    if name.is_empty()
+        || name.len() > MAX_SESSION_CONFIG_NAME_BYTES
+        || !name.ends_with(".toml")
+        || name.contains('\\')
+        || name.contains(':')
+        || name.chars().any(char::is_control)
+    {
+        return Err(ConfigError::new("session configuration name is invalid"));
+    }
+
+    let mut component_count = 0;
+    for component in name.split('/') {
+        component_count += 1;
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.len() > MAX_SESSION_CONFIG_COMPONENT_BYTES
+        {
+            return Err(ConfigError::new("session configuration name is invalid"));
+        }
+    }
+    if component_count == 0 {
+        return Err(ConfigError::new("session configuration name is invalid"));
+    }
+    Ok(name.to_owned())
+}
+
+fn validate_session_config_dir(path: &Path) -> Result<(), ConfigError> {
+    let path_bytes = path.as_os_str().as_bytes();
+    if !path.is_absolute()
+        || path.as_os_str().is_empty()
+        || path_bytes.contains(&0)
+        || path_bytes
+            .split(|byte| *byte == b'/')
+            .any(|component| component == b"." || component == b"..")
+        || path.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+        || path.components().count() < 2
+    {
+        return Err(ConfigError::new(
+            "daemon.session_config_dir must be an absolute directory path without dot components",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_protocol_version(version: u16) -> Result<(), ConfigError> {
@@ -731,6 +827,10 @@ struct RawDaemonSettings {
     connection_timeout_ms: u64,
     #[serde(default = "default_io_timeout_ms")]
     io_timeout_ms: u64,
+    #[serde(default)]
+    session_config_dir: Option<PathBuf>,
+    #[serde(default)]
+    create_mode: SessionCreateMode,
 }
 
 #[derive(Deserialize)]
@@ -789,6 +889,10 @@ enum RawControlRequest {
         version: u16,
         session_id: String,
     },
+    CreateFromFile {
+        version: u16,
+        name: String,
+    },
     List {
         version: u16,
     },
@@ -841,7 +945,7 @@ mod tests {
 
     use super::{
         CaConfig, ControlRequest, DaemonConfig, InjectionFormat, PROTOCOL_VERSION, RuleMode,
-        SessionConfig,
+        SessionConfig, SessionCreateMode,
     };
 
     const DAEMON_EXAMPLE: &str = r#"
@@ -947,6 +1051,67 @@ directory = "/var/lib/baffle/secrets"
         assert_eq!(config.daemon.max_provisioning_requests, 8);
         assert_eq!(config.daemon.connection_timeout_ms, 5_000);
         assert_eq!(config.daemon.io_timeout_ms, 30_000);
+        assert_eq!(config.daemon.create_mode, SessionCreateMode::Inline);
+        assert_eq!(config.daemon.session_config_dir, None);
+    }
+
+    #[test]
+    fn requires_a_valid_directory_for_file_only_mode() {
+        let base = r#"
+[daemon]
+control_socket = "/run/baffle/control.sock"
+socket_dir = "/run/baffle/proxies"
+trusted_operator_uid = 1000
+
+[ca]
+certificate = "/var/lib/baffle/ca.pem"
+private_key = "/var/lib/baffle/ca-key.pem"
+
+[secrets]
+directory = "/var/lib/baffle/secrets"
+"#;
+        assert!(
+            DaemonConfig::from_toml(
+                &base.replace("\n[ca]", "\ncreate_mode = \"file_only\"\n\n[ca]")
+            )
+            .is_err(),
+            "file-only mode must require a session configuration directory"
+        );
+        assert!(
+            DaemonConfig::from_toml(&base.replace(
+                "\n[ca]",
+                "\nsession_config_dir = \"/var/lib/baffle/sessions\"\n\n[ca]",
+            ))
+            .is_err(),
+            "inline mode must reject an unused session configuration directory"
+        );
+        let config = DaemonConfig::from_toml(&base.replace(
+            "\n[ca]",
+            "\ncreate_mode = \"file_only\"\nsession_config_dir = \"/var/lib/baffle/sessions\"\n\n[ca]",
+        ))
+        .expect("file-only mode with an absolute directory should parse");
+        assert_eq!(config.daemon.create_mode, SessionCreateMode::FileOnly);
+        assert_eq!(
+            config.daemon.session_config_dir,
+            Some(PathBuf::from("/var/lib/baffle/sessions"))
+        );
+        for invalid_path in [
+            "relative/sessions",
+            "/var/../sessions",
+            "/var/./sessions",
+            "/",
+        ] {
+            let input = base.replace(
+                "\n[ca]",
+                &format!(
+                    "\ncreate_mode = \"file_only\"\nsession_config_dir = \"{invalid_path}\"\n\n[ca]"
+                ),
+            );
+            assert!(
+                DaemonConfig::from_toml(&input).is_err(),
+                "invalid session configuration directory {invalid_path:?} must fail"
+            );
+        }
     }
 
     #[test]
@@ -1026,6 +1191,41 @@ directory = "/var/lib/baffle/secrets"
                 version: PROTOCOL_VERSION,
             }
         );
+    }
+
+    #[test]
+    fn validates_nested_session_config_names_and_rejects_path_forms() {
+        assert_eq!(
+            ControlRequest::from_toml(
+                "version = 1\noperation = \"create_from_file\"\nname = \"cladding/github.toml\"\n"
+            )
+            .expect("nested session config path should parse"),
+            ControlRequest::CreateFromFile {
+                version: PROTOCOL_VERSION,
+                name: "cladding/github.toml".into(),
+            }
+        );
+        for name in [
+            "",
+            "/etc/passwd.toml",
+            "../outside.toml",
+            "cladding/../outside.toml",
+            "cladding//github.toml",
+            "cladding/github.toml/",
+            "cladding\\github.toml",
+            "C:/outside.toml",
+            "cladding/config.txt",
+        ] {
+            let input = format!("version = 1\noperation = \"create_from_file\"\nname = {name:?}\n");
+            assert!(
+                ControlRequest::from_toml(&input).is_err(),
+                "invalid session config name {name:?} must fail"
+            );
+        }
+        let too_long = "a".repeat(super::MAX_SESSION_CONFIG_NAME_BYTES + 1);
+        let input =
+            format!("version = 1\noperation = \"create_from_file\"\nname = \"{too_long}.toml\"\n");
+        assert!(ControlRequest::from_toml(&input).is_err());
     }
 
     #[test]

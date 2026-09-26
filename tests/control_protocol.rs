@@ -5,7 +5,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::Shutdown,
     os::unix::{
-        fs::{MetadataExt, PermissionsExt},
+        fs::{MetadataExt, PermissionsExt, symlink},
         net::UnixStream,
     },
     path::PathBuf,
@@ -24,6 +24,7 @@ struct DaemonProcess {
     _directory: TempDir,
     socket: PathBuf,
     socket_dir: PathBuf,
+    session_config_dir: Option<PathBuf>,
 }
 
 struct DaemonProcesses(Vec<Child>);
@@ -197,6 +198,230 @@ fn control_listener_handles_requests_and_rejects_bad_connections() {
     assert!(
         !second_path.exists(),
         "closing the remaining lease removes its socket"
+    );
+}
+
+#[test]
+fn file_only_creates_nested_sessions_from_fresh_policy_snapshots_and_keeps_ephemeral_leases() {
+    let daemon = start_file_only_daemon(250);
+    let name = "cladding/github.toml";
+    write_session_policy(&daemon, name, "github.com", false);
+
+    let (lease_one, created_one) = create_from_file(&daemon.socket, name);
+    assert_eq!(created_one["ok"], true);
+    assert_eq!(created_one["result"]["persistent"], false);
+    let first_socket = PathBuf::from(created_one["result"]["socket"].as_str().unwrap());
+    assert!(
+        first_socket.exists(),
+        "the returned generated socket should exist"
+    );
+    assert_proxy_available(&first_socket);
+    assert_eq!(list_sessions(&daemon.socket).len(), 1);
+
+    // A live session keeps its parsed policy snapshot. A later create reads
+    // the current file and rejects an invalid replacement.
+    write_session_policy_contents(
+        &daemon,
+        name,
+        "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"*.example.test\"\nmode = \"tunnel\"\n",
+    );
+    assert_eq!(
+        request(
+            &daemon.socket,
+            "version = 1\noperation = \"create_from_file\"\nname = \"cladding/github.toml\"\n",
+        )["error"]["code"],
+        "config_file_invalid"
+    );
+    assert_eq!(list_sessions(&daemon.socket).len(), 1);
+    assert!(first_socket.exists());
+
+    write_session_policy(&daemon, name, "api.github.com", false);
+    let (lease_two, created_two) = create_from_file(&daemon.socket, name);
+    assert_eq!(created_two["ok"], true);
+    let second_socket = PathBuf::from(created_two["result"]["socket"].as_str().unwrap());
+    assert_ne!(first_socket, second_socket);
+    assert_proxy_available(&second_socket);
+    assert_eq!(list_sessions(&daemon.socket).len(), 2);
+
+    drop(lease_one);
+    wait_for_session_count(&daemon.socket, 1);
+    assert!(
+        !first_socket.exists(),
+        "disconnect must remove its leased socket"
+    );
+    assert!(
+        second_socket.exists(),
+        "disconnect must preserve the other lease"
+    );
+    drop(lease_two);
+    wait_for_session_count(&daemon.socket, 0);
+    assert!(!second_socket.exists());
+}
+
+#[test]
+fn file_only_rejects_unsafe_names_files_and_inline_creation_without_changing_files() {
+    let daemon = start_file_only_daemon(250);
+    let root = daemon
+        .session_config_dir
+        .as_ref()
+        .expect("file-only daemon should have a config directory");
+    write_session_policy(&daemon, "cladding/github.toml", "github.com", false);
+    let outside_dir = daemon._directory.path().join("outside");
+    fs::create_dir(&outside_dir).expect("outside directory should be created");
+    fs::set_permissions(&outside_dir, fs::Permissions::from_mode(0o700))
+        .expect("outside directory should be private");
+    let outside_file = outside_dir.join("github.toml");
+    fs::write(&outside_file, session_policy("outside.example", false))
+        .expect("outside policy should be written");
+    fs::set_permissions(&outside_file, fs::Permissions::from_mode(0o600))
+        .expect("outside policy should be private");
+
+    assert_eq!(
+        request(
+            &daemon.socket,
+            "version = 1\noperation = \"create_from_file\"\nname = \"missing.toml\"\n",
+        )["error"]["code"],
+        "config_file_not_found"
+    );
+    assert_eq!(
+        request(
+            &daemon.socket,
+            "version = 1\noperation = \"create_from_file\"\nname = \"../outside/github.toml\"\n",
+        )["error"]["code"],
+        "invalid_request"
+    );
+
+    write_session_policy_contents(&daemon, "invalid.toml", "not valid TOML = [\n");
+    assert_eq!(
+        request(
+            &daemon.socket,
+            "version = 1\noperation = \"create_from_file\"\nname = \"invalid.toml\"\n",
+        )["error"]["code"],
+        "config_file_invalid"
+    );
+    write_session_policy_contents(&daemon, "oversized.toml", &"x".repeat(256 * 1024 + 1));
+    assert_eq!(
+        request(
+            &daemon.socket,
+            "version = 1\noperation = \"create_from_file\"\nname = \"oversized.toml\"\n",
+        )["error"]["code"],
+        "config_file_invalid"
+    );
+
+    write_session_policy(&daemon, "unreadable.toml", "unreadable.example", false);
+    let unreadable_path = root.join("unreadable.toml");
+    fs::set_permissions(&unreadable_path, fs::Permissions::from_mode(0o000))
+        .expect("unreadable file mode should be set");
+    assert_eq!(
+        request(
+            &daemon.socket,
+            "version = 1\noperation = \"create_from_file\"\nname = \"unreadable.toml\"\n",
+        )["error"]["code"],
+        "config_file_unavailable"
+    );
+
+    let linked_file = root.join("linked.toml");
+    symlink(&outside_file, &linked_file).expect("file symlink should be created");
+    assert_eq!(
+        request(
+            &daemon.socket,
+            "version = 1\noperation = \"create_from_file\"\nname = \"linked.toml\"\n",
+        )["error"]["code"],
+        "config_file_unavailable"
+    );
+    let linked_dir = root.join("redirected");
+    symlink(&outside_dir, &linked_dir).expect("directory symlink should be created");
+    assert_eq!(
+        request(
+            &daemon.socket,
+            "version = 1\noperation = \"create_from_file\"\nname = \"redirected/github.toml\"\n",
+        )["error"]["code"],
+        "config_file_unavailable"
+    );
+
+    let protected_contents = fs::read(root.join("cladding/github.toml"))
+        .expect("trusted configuration file should exist");
+    let inline_create = request(
+        &daemon.socket,
+        "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"replacement.example\"\nmode = \"tunnel\"\n",
+    );
+    assert_eq!(inline_create["error"]["code"], "operation_not_allowed");
+    let malformed_alternate = request(
+        &daemon.socket,
+        "version = 1\noperation = \"create_from_file\"\nname = \"cladding/github.toml\"\n\n[session]\npersistent = true\n",
+    );
+    assert_eq!(malformed_alternate["error"]["code"], "invalid_request");
+    assert_eq!(
+        fs::read(root.join("cladding/github.toml")).unwrap(),
+        protected_contents
+    );
+    assert_eq!(list_sessions(&daemon.socket).len(), 0);
+}
+
+#[test]
+fn file_only_keeps_the_config_directory_descriptor_across_rename_and_allows_authorized_stop() {
+    let daemon = start_file_only_daemon(250);
+    let root = daemon
+        .session_config_dir
+        .as_ref()
+        .expect("file-only daemon should have a config directory");
+    write_session_policy(&daemon, "cladding/github.toml", "github.com", false);
+    write_session_policy(&daemon, "persistent.toml", "github.com", true);
+
+    let moved_root = daemon._directory.path().join("moved-session-configs");
+    fs::rename(root, &moved_root).expect("config directory should be renamed");
+    let outside_dir = daemon._directory.path().join("replacement-configs");
+    fs::create_dir(&outside_dir).expect("replacement directory should be created");
+    fs::set_permissions(&outside_dir, fs::Permissions::from_mode(0o700))
+        .expect("replacement directory should be private");
+    fs::create_dir(outside_dir.join("cladding")).expect("nested replacement dir should exist");
+    fs::write(
+        outside_dir.join("cladding/github.toml"),
+        "not a valid session policy",
+    )
+    .expect("replacement file should be written");
+    symlink(&outside_dir, root).expect("replacement symlink should be created");
+
+    let (lease, created) = create_from_file(&daemon.socket, "cladding/github.toml");
+    assert_eq!(
+        created["ok"], true,
+        "daemon should read from the held directory descriptor"
+    );
+    let session_socket = PathBuf::from(created["result"]["socket"].as_str().unwrap());
+    drop(lease);
+    wait_for_session_count(&daemon.socket, 0);
+    assert!(!session_socket.exists());
+
+    let (creator, persistent) = create_from_file(&daemon.socket, "persistent.toml");
+    assert_eq!(persistent["ok"], true);
+    let persistent_id = persistent["result"]["id"].as_str().unwrap().to_owned();
+    let persistent_socket = PathBuf::from(persistent["result"]["socket"].as_str().unwrap());
+    drop(creator);
+    assert_eq!(list_sessions(&daemon.socket).len(), 1);
+    let stopped = request(
+        &daemon.socket,
+        &format!("version = 1\noperation = \"stop\"\nsession_id = \"{persistent_id}\"\n"),
+    );
+    assert_eq!(stopped["result"]["stopped"], true);
+    assert!(!persistent_socket.exists());
+}
+
+#[test]
+fn file_only_rolls_back_when_runtime_provisioning_fails() {
+    let daemon = start_file_only_daemon_with_socket_dir(250, &"s".repeat(80));
+    write_session_policy(&daemon, "rollback.toml", "rollback.example.test", true);
+    let failed = request(
+        &daemon.socket,
+        "version = 1\noperation = \"create_from_file\"\nname = \"rollback.toml\"\n",
+    );
+    assert_eq!(failed["error"]["code"], "internal_error");
+    assert!(list_sessions(&daemon.socket).is_empty());
+    assert_eq!(
+        fs::read_dir(&daemon.socket_dir)
+            .expect("session socket directory should exist")
+            .count(),
+        0,
+        "failed provisioning must not leave a session socket"
     );
 }
 
@@ -394,16 +619,50 @@ fn start_daemon(read_timeout_ms: u64) -> DaemonProcess {
 }
 
 fn start_daemon_with_socket_dir(read_timeout_ms: u64, socket_dir_name: &str) -> DaemonProcess {
+    start_daemon_with_options(read_timeout_ms, socket_dir_name, false)
+}
+
+fn start_file_only_daemon(read_timeout_ms: u64) -> DaemonProcess {
+    start_daemon_with_options(read_timeout_ms, "proxies", true)
+}
+
+fn start_file_only_daemon_with_socket_dir(
+    read_timeout_ms: u64,
+    socket_dir_name: &str,
+) -> DaemonProcess {
+    start_daemon_with_options(read_timeout_ms, socket_dir_name, true)
+}
+
+fn start_daemon_with_options(
+    read_timeout_ms: u64,
+    socket_dir_name: &str,
+    file_only: bool,
+) -> DaemonProcess {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let socket = directory.path().join("run/control.sock");
     let socket_dir = directory.path().join(socket_dir_name);
     let config_path = directory.path().join("daemon.toml");
+    let session_config_dir = file_only.then(|| directory.path().join("session-configs"));
+    if let Some(session_config_dir) = &session_config_dir {
+        fs::create_dir(session_config_dir).expect("session config directory should be created");
+        fs::set_permissions(session_config_dir, fs::Permissions::from_mode(0o700))
+            .expect("session config directory permissions should be private");
+    }
     let (certificate_path, private_key_path) = write_test_ca(directory.path());
     let trusted_uid = fs::metadata(directory.path())
         .expect("temporary directory should have metadata")
         .uid();
+    let file_settings = session_config_dir
+        .as_ref()
+        .map(|path| {
+            format!(
+                "create_mode = \"file_only\"\nsession_config_dir = \"{}\"\n",
+                path.display()
+            )
+        })
+        .unwrap_or_default();
     let config = format!(
-        "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\ncontrol_read_timeout_ms = {read_timeout_ms}\n\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"unused-secrets\"\n",
+        "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\ncontrol_read_timeout_ms = {read_timeout_ms}\n{file_settings}\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"unused-secrets\"\n",
         socket.display(),
         socket_dir.display(),
         certificate_path.display(),
@@ -423,6 +682,7 @@ fn start_daemon_with_socket_dir(read_timeout_ms: u64, socket_dir_name: &str) -> 
         _directory: directory,
         socket,
         socket_dir,
+        session_config_dir,
     };
 
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -458,6 +718,50 @@ fn create_session(control_socket: &PathBuf, persistent: bool, host: &str) -> (Un
     let response = read_response(&mut control);
     assert_eq!(response["ok"], true);
     (control, response)
+}
+
+fn create_from_file(control_socket: &PathBuf, name: &str) -> (UnixStream, Value) {
+    let mut control = UnixStream::connect(control_socket).expect("client should connect");
+    control
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("client timeout should be set");
+    let body = format!("version = 1\noperation = \"create_from_file\"\nname = {name:?}\n");
+    write_frame(&mut control, body.as_bytes());
+    let response = read_response(&mut control);
+    (control, response)
+}
+
+fn write_session_policy(daemon: &DaemonProcess, name: &str, host: &str, persistent: bool) {
+    write_session_policy_contents(daemon, name, &session_policy(host, persistent));
+}
+
+fn session_policy(host: &str, persistent: bool) -> String {
+    format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n"
+    )
+}
+
+fn write_session_policy_contents(daemon: &DaemonProcess, name: &str, contents: &str) {
+    let root = daemon
+        .session_config_dir
+        .as_ref()
+        .expect("file-only daemon should have a session config directory");
+    let path = root.join(name);
+    let parent = path
+        .parent()
+        .expect("session config path should have a parent");
+    fs::create_dir_all(parent).expect("session config parent directories should be created");
+    let mut directory = parent;
+    while directory != root {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+            .expect("nested session config directory should be private");
+        directory = directory
+            .parent()
+            .expect("nested session config directory should have a parent");
+    }
+    fs::write(&path, contents).expect("session config should be written");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .expect("session config should be private");
 }
 
 fn list_sessions(control_socket: &PathBuf) -> Vec<Value> {

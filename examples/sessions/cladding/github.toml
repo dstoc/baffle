@@ -1,0 +1,10 @@
+version = 1
+operation = "create"
+
+[session]
+persistent = false
+
+[[rules]]
+host = "github.com"
+mode = "tunnel"
+ports = [443]

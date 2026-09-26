@@ -35,6 +35,17 @@ send a TLS request. Use an HTTP proxy client that establishes HTTPS with
 CONNECT. An `http://` proxy URL can describe the local proxy endpoint; it does
 not permit an `http://` origin.
 
+When the daemon uses `create_mode = "file_only"`, create a session by naming
+an administrator-managed TOML file:
+
+```rust
+let session = client.create_from_file("cladding/github.toml").await?;
+```
+
+The daemon resolves this relative name beneath `daemon.session_config_dir`.
+The returned `Session` keeps the ephemeral lease open until it is dropped or
+closed.
+
 ## Proxy client compatibility
 
 `baffle-client` manages the Unix control protocol. It does not send application
@@ -97,10 +108,11 @@ Ok(())
 }
 ```
 
-`ClientError` separates authorization, invalid policy, capacity, protocol
-mismatch, provisioning, transport, and malformed-protocol failures. The
-daemon returns safe error messages and does not include policy credentials in
-them.
+`ClientError` separates authorization, invalid policy, capacity, missing or
+unavailable session files, disallowed operations, protocol mismatch,
+provisioning, transport, and malformed-protocol failures. The daemon returns
+safe error messages and does not include file contents or private daemon
+paths in them.
 
 ## Speak the protocol directly
 
