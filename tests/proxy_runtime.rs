@@ -566,11 +566,11 @@ async fn fragmented_client_hello_on_interception_rule_never_opens_an_opaque_tunn
         .await
         .expect("incomplete TLS handshake should close its write side");
 
-    if let Ok(Ok((mut egress, _))) = timeout(Duration::from_millis(500), upstream.accept()).await {
+    if let Ok(Ok((mut egress, _))) = timeout(Duration::from_secs(1), upstream.accept()).await {
         let mut bytes = Vec::new();
         for _ in 0..8 {
             let mut chunk = [0; 1024];
-            match timeout(Duration::from_millis(50), egress.read(&mut chunk)).await {
+            match timeout(Duration::from_millis(100), egress.read(&mut chunk)).await {
                 Ok(Ok(0)) | Err(_) => break,
                 Ok(Ok(count)) => bytes.extend_from_slice(&chunk[..count]),
                 Ok(Err(error)) => panic!("intercepted egress should be readable: {error}"),
@@ -588,7 +588,22 @@ async fn fragmented_client_hello_on_interception_rule_never_opens_an_opaque_tunn
         );
         assert_eq!(bytes[0], 0x16, "upstream must receive a TLS record");
     }
-    drop(client);
+    let mut response = Vec::new();
+    timeout(Duration::from_secs(3), async {
+        let mut chunk = [0; 1024];
+        loop {
+            match client.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(count) => response.extend_from_slice(&chunk[..count]),
+            }
+        }
+    })
+    .await
+    .expect("a stalled fragmented handshake should close within the bound");
+    assert!(
+        response.is_empty() || response[0] == 0x15 || response[0] == 0x16,
+        "an intercepted handshake may return TLS records before it closes: {response:?}"
+    );
 
     runtime.shutdown(Duration::from_secs(2)).await;
     assert_exit(&mut events, &id).await;
