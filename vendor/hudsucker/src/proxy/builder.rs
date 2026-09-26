@@ -131,39 +131,49 @@ impl<CA> ProxyBuilder<WantsClient<CA>> {
         provider: CryptoProvider,
     ) -> ProxyBuilder<WantsHandlers<CA, impl Connect + Clone, NoopHandler, NoopHandler, Pending<()>>>
     {
-        self.with_rustls_connector_with_roots(provider, None)
+        self.with_rustls_connector_with_roots(provider, None, Vec::new())
     }
 
     /// Use a hyper-rustls connector with an optional explicit trust store.
     ///
-    /// `None` preserves the default WebPKI roots. A supplied store replaces
-    /// those roots. Baffle uses this only in its integration-test build to
-    /// trust the local upstream fixture CA.
+    /// `None` starts with the default WebPKI roots. A supplied store replaces
+    /// those roots. Additional roots are added to either store.
     #[cfg(feature = "rustls-client")]
     pub fn with_rustls_connector_with_roots(
         self,
         provider: CryptoProvider,
         roots: Option<RootCertStore>,
+        additional_roots: Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>>,
     ) -> ProxyBuilder<WantsHandlers<CA, impl Connect + Clone, NoopHandler, NoopHandler, Pending<()>>>
     {
-        use hyper_rustls::ConfigBuilderExt;
-
-        let rustls_config = match ClientConfig::builder_with_provider(Arc::new(provider))
+        let rustls_config = ClientConfig::builder_with_provider(Arc::new(provider))
             .with_safe_default_protocol_versions()
-            .map(|builder| {
-                let builder = match roots {
-                    Some(roots) => builder.with_root_certificates(roots),
-                    None => builder.with_webpki_roots(),
-                };
-                builder.with_no_client_auth()
-            })
-        {
+            .and_then(|builder| {
+                let mut roots = roots.unwrap_or_else(|| {
+                    let mut roots = RootCertStore::empty();
+                    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                    roots
+                });
+                for root in additional_roots {
+                    roots.add(root)?;
+                }
+                Ok(builder.with_root_certificates(roots).with_no_client_auth())
+            });
+        self.with_rustls_config(rustls_config)
+    }
+
+    fn with_rustls_config(
+        self,
+        rustls_config: Result<ClientConfig, tokio_rustls::rustls::Error>,
+    ) -> ProxyBuilder<WantsHandlers<CA, impl Connect + Clone, NoopHandler, NoopHandler, Pending<()>>>
+    {
+        let rustls_config = match rustls_config {
             Ok(config) => config,
-            Err(e) => {
+            Err(error) => {
                 return ProxyBuilder(WantsHandlers {
                     al: self.0.al,
                     ca: self.0.ca,
-                    http_connector: Err(Error::from(e)),
+                    http_connector: Err(Error::from(error)),
                     client: None,
                     http_handler: NoopHandler::new(),
                     websocket_handler: NoopHandler::new(),

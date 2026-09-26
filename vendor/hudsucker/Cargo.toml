@@ -263,6 +263,9 @@ features = [
     "tls12",
 ]
 
+[dependencies.webpki-roots]
+version = "1"
+
 [dependencies.tokio-tungstenite]
 version = "0.30.0"
 

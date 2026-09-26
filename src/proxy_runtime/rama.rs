@@ -484,7 +484,7 @@ fn test_upstream_trust_anchor() -> Option<rama::crypto::pki_types::CertificateDe
 }
 
 #[cfg(test)]
-fn set_test_upstream_trust_anchor(anchor: Vec<u8>) {
+pub(crate) fn set_test_upstream_trust_anchor(anchor: Vec<u8>) {
     *TEST_UPSTREAM_TRUST_ANCHOR
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
