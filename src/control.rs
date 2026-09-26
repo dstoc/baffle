@@ -995,7 +995,13 @@ impl SessionManager {
             .socket_name
             .clone()
             .unwrap_or_else(|| format!("{id}.sock"));
-        let socket_path = self.socket_dir.join(socket_name);
+        let socket_path = match absolute_socket_path(&self.socket_dir.join(socket_name)) {
+            Ok(path) => path,
+            Err(_) => {
+                self.registry.lock().await.provisioning.remove(&id);
+                return Err(SessionError::Internal);
+            }
+        };
         let listener_gate = Arc::new(AtomicU64::new(1));
         let runtime = match ProxyRuntime::start_session_with_metrics(
             RuntimeId::new(id.clone()),
@@ -1388,6 +1394,12 @@ impl SessionManager {
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("{id}.sock")),
         );
+        let target_path = match absolute_socket_path(&target_path) {
+            Ok(path) => path,
+            Err(_) => {
+                return SessionReloadResult::failed(id, current_socket, "listener_unavailable");
+            }
+        };
         let current_path = PathBuf::from(&current_socket);
         let same_path = target_path == current_path;
         let configuration_unchanged = same_effective_rules(&candidate.rules, &{
@@ -1510,6 +1522,14 @@ impl SessionManager {
         session.retired_runtimes.push(old_runtime);
         session.info.draining_generations = session.retired_runtimes.len();
         SessionReloadResult::reloaded(id, session.info.socket.clone())
+    }
+}
+
+fn absolute_socket_path(path: &Path) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
     }
 }
 

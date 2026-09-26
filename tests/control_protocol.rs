@@ -442,6 +442,58 @@ fn file_backed_reload_keeps_old_tunnels_and_cuts_over_new_connections_and_socket
 }
 
 #[test]
+fn file_backed_reload_normalizes_a_relative_socket_directory() {
+    let daemon = start_file_only_daemon_with_relative_socket_dir(250, "relative-proxies");
+    let name = "relative/reload.toml";
+    write_session_policy(&daemon, name, "old.example", true);
+    let (creator, created) = create_from_file(&daemon.socket, name);
+    assert_eq!(created["ok"], true);
+    drop(creator);
+    let session_id = created["result"]["id"]
+        .as_str()
+        .expect("created session should return its ID")
+        .to_owned();
+    let socket = PathBuf::from(
+        created["result"]["socket"]
+            .as_str()
+            .expect("created session should return its socket"),
+    );
+    assert!(socket.is_absolute());
+    let original_inode = fs::symlink_metadata(&socket)
+        .expect("data socket should exist")
+        .ino();
+
+    let unchanged = reload_session(&daemon.socket, &session_id);
+    assert_eq!(unchanged["result"]["status"], "unchanged", "{unchanged}");
+    assert_eq!(
+        unchanged["result"]["socket"],
+        socket.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        fs::symlink_metadata(&socket)
+            .expect("no-op reload should keep the listener")
+            .ino(),
+        original_inode
+    );
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 1);
+
+    write_session_policy(&daemon, name, "new.example", true);
+    let changed = reload_session(&daemon.socket, &session_id);
+    assert_eq!(changed["result"]["status"], "reloaded");
+    assert_eq!(
+        changed["result"]["socket"],
+        socket.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        fs::symlink_metadata(&socket)
+            .expect("same-path reload should reuse the listener")
+            .ino(),
+        original_inode
+    );
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 2);
+}
+
+#[test]
 fn concurrent_reload_stop_and_creator_disconnect_do_not_resurrect_a_session() {
     let daemon = start_file_only_daemon(250);
     let name = "concurrent/reload.toml";
@@ -1124,14 +1176,40 @@ fn start_file_only_daemon_with_socket_dir(
     start_daemon_with_options(read_timeout_ms, socket_dir_name, true)
 }
 
+fn start_file_only_daemon_with_relative_socket_dir(
+    read_timeout_ms: u64,
+    socket_dir_name: &str,
+) -> DaemonProcess {
+    start_daemon_with_options_and_relative_socket_dir(read_timeout_ms, socket_dir_name, true, true)
+}
+
 fn start_daemon_with_options(
     read_timeout_ms: u64,
     socket_dir_name: &str,
     file_only: bool,
 ) -> DaemonProcess {
+    start_daemon_with_options_and_relative_socket_dir(
+        read_timeout_ms,
+        socket_dir_name,
+        file_only,
+        false,
+    )
+}
+
+fn start_daemon_with_options_and_relative_socket_dir(
+    read_timeout_ms: u64,
+    socket_dir_name: &str,
+    file_only: bool,
+    relative_socket_dir: bool,
+) -> DaemonProcess {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let socket = directory.path().join("run/control.sock");
     let socket_dir = directory.path().join(socket_dir_name);
+    let socket_dir_setting = if relative_socket_dir {
+        PathBuf::from(socket_dir_name)
+    } else {
+        socket_dir.clone()
+    };
     let config_path = directory.path().join("daemon.toml");
     let secret_dir = directory.path().join("secrets");
     fs::create_dir(&secret_dir).expect("secret directory should be created");
@@ -1159,20 +1237,23 @@ fn start_daemon_with_options(
     let config = format!(
         "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\ncontrol_read_timeout_ms = {read_timeout_ms}\n{file_settings}\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"{}\"\nallowed = [\"api-token\"]\n",
         socket.display(),
-        socket_dir.display(),
+        socket_dir_setting.display(),
         certificate_path.display(),
         private_key_path.display(),
         secret_dir.display(),
     );
     fs::write(&config_path, config).expect("daemon config should be written");
-    let child = Command::new(env!("CARGO_BIN_EXE_baffle"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_baffle"));
+    command
         .arg("daemon")
         .arg("--config")
         .arg(&config_path)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
+        .stderr(Stdio::null());
+    if relative_socket_dir {
+        command.current_dir(directory.path());
+    }
+    let child = command.spawn().expect("daemon should start");
     let mut daemon = DaemonProcess {
         child,
         _directory: directory,
