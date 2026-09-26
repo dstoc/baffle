@@ -291,12 +291,8 @@ async fn run_proxy(
                     return Err(ProxyRuntimeError::Task(error.to_string()));
                 }
             }
-            accepted = listener.accept() => {
-                let (stream, _) = accepted.map_err(ProxyRuntimeError::Bind)?;
-                #[cfg(feature = "benchmark-tcp-nodelay")]
-                if benchmark_tcp_nodelay_enabled("proxy-ingress") {
-                    stream.set_nodelay(true).map_err(ProxyRuntimeError::Bind)?;
-                }
+            accepted = accept_client(&listener) => {
+                let (stream, _) = accepted?;
                 let permit = match Arc::clone(&permits).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => continue,
@@ -318,6 +314,30 @@ async fn run_proxy(
     }
     drop(listener);
     while connections.join_next().await.is_some() {}
+    Ok(())
+}
+
+/// Accept a client connection and configure its TCP behavior before a task
+/// can read CONNECT, peek at TLS, or handle HTTP.
+async fn accept_client(
+    listener: &TcpListener,
+) -> Result<(TcpStream, SocketAddr), ProxyRuntimeError> {
+    let (stream, peer) = listener.accept().await.map_err(ProxyRuntimeError::Bind)?;
+    configure_accepted_client_socket(&stream)?;
+    Ok((stream, peer))
+}
+
+fn configure_accepted_client_socket(stream: &TcpStream) -> Result<(), ProxyRuntimeError> {
+    #[cfg(feature = "benchmark-tcp-nodelay")]
+    let enabled = benchmark_tcp_nodelay_enabled("proxy-ingress");
+    #[cfg(not(feature = "benchmark-tcp-nodelay"))]
+    let enabled = true;
+
+    if enabled {
+        stream
+            .set_nodelay(true)
+            .map_err(ProxyRuntimeError::SocketOption)?;
+    }
     Ok(())
 }
 
@@ -994,6 +1014,8 @@ mod tests {
     };
     use tokio_rustls::{TlsAcceptor, TlsConnector, rustls};
 
+    #[cfg(not(feature = "benchmark-tcp-nodelay"))]
+    use super::accept_client;
     use super::{ProxyRuntime, RuntimeId, set_test_upstream_trust_anchor};
     use crate::{
         ca::ManagedCa,
@@ -1003,6 +1025,23 @@ mod tests {
     };
 
     type TestError = Box<dyn Error + Send + Sync>;
+
+    #[cfg(not(feature = "benchmark-tcp-nodelay"))]
+    #[tokio::test]
+    async fn production_accept_path_enables_tcp_nodelay_before_returning_the_socket()
+    -> Result<(), TestError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let client = TcpStream::connect(listener.local_addr()?).await?;
+
+        let (accepted, _) = accept_client(&listener).await?;
+
+        assert!(
+            accepted.nodelay()?,
+            "the production accept path must enable TCP_NODELAY before returning the socket"
+        );
+        drop((accepted, client));
+        Ok(())
+    }
 
     fn write_managed_ca(directory: &Path) -> Arc<ManagedCa> {
         let key = KeyPair::generate().expect("Baffle CA key should generate");
