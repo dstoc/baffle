@@ -1,0 +1,21 @@
+{
+  "ca_sha256": "sha256 Fingerprint=88:0E:ED:ED:4A:CC:4E:9E:3A:5B:C6:31:3B:AC:F2:84:64:DF:41:D5:5E:01:71:F9:7E:21:78:8E:AB:BE:35:D6",
+  "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+  "counts": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "cpu_affinity": [
+    0
+  ],
+  "kind": "environment",
+  "origin_leaf_sha256": "sha256 Fingerprint=0E:C9:4E:6E:FB:77:C3:D1:79:16:DD:F1:C8:01:A9:7C:47:E0:7D:4C:6E:CD:C9:4F:A3:23:D6:2D:9C:17:7C:20",
+  "origin_root_sha256": "sha256 Fingerprint=37:F2:22:D7:81:9C:58:33:75:B8:E6:86:50:B9:CF:09:BE:13:50:D3:38:25:31:98:81:D8:36:64:AE:9B:02:5B",
+  "profile": "release",
+  "repeats": 5,
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "settle_ms": 200,
+  "uname": "Linux tines-agent 7.0.0-31-generic #31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026 x86_64 GNU/Linux"
+}

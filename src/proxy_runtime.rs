@@ -17,6 +17,12 @@ pub use backend::ProxyRuntime;
 #[cfg(all(feature = "backend-hudsucker", test))]
 pub(crate) use backend::PolicyHandler;
 
+#[cfg(test)]
+pub(crate) use backend::set_test_upstream_trust_anchor;
+
+#[cfg(test)]
+mod benchmark;
+
 use std::{fmt, io};
 
 /// A stable identifier for one running proxy session.

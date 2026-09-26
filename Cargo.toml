@@ -79,7 +79,6 @@ required-features = ["backend-hudsucker"]
 [[example]]
 name = "measure_sessions"
 path = "examples/measure_sessions.rs"
-required-features = ["backend-hudsucker"]
 
 [patch.crates-io]
 hudsucker = { path = "vendor/hudsucker" }

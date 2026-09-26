@@ -154,6 +154,8 @@ manual namespace test command.
   `socat` bridge example and integration steps for other consumers.
 - [Integration testing](docs/integration-testing.md): automated coverage and
   the privileged namespace test.
+- [Backend benchmark report](docs/benchmarking.md): opt-in runtime, resource,
+  build, and binary measurements for Hudsucker and Rama.
 - [Release review](docs/release-review.md): package, dependency, logging,
   error-handling, and credential-protection review.
 - [Authoritative proposal](docs/baffle-proposal.md): product goals, security

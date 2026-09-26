@@ -131,12 +131,31 @@ impl<CA> ProxyBuilder<WantsClient<CA>> {
         provider: CryptoProvider,
     ) -> ProxyBuilder<WantsHandlers<CA, impl Connect + Clone, NoopHandler, NoopHandler, Pending<()>>>
     {
-        use hyper_rustls::ConfigBuilderExt;
+        self.with_rustls_connector_and_roots(provider, Vec::new())
+    }
 
+    /// Use a hyper-rustls connector with additional trusted server roots.
+    ///
+    /// The additional roots are added to the standard WebPKI root set.
+    #[cfg(feature = "rustls-client")]
+    pub fn with_rustls_connector_and_roots(
+        self,
+        provider: CryptoProvider,
+        additional_roots: Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>>,
+    ) -> ProxyBuilder<WantsHandlers<CA, impl Connect + Clone, NoopHandler, NoopHandler, Pending<()>>>
+    {
         let rustls_config = match ClientConfig::builder_with_provider(Arc::new(provider))
             .with_safe_default_protocol_versions()
+            .and_then(|config| {
+                let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+                roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                for root in additional_roots {
+                    roots.add(root)?;
+                }
+                Ok(config.with_root_certificates(roots).with_no_client_auth())
+            })
         {
-            Ok(config) => config.with_webpki_roots().with_no_client_auth(),
+            Ok(config) => config,
             Err(e) => {
                 return ProxyBuilder(WantsHandlers {
                     al: self.0.al,

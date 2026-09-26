@@ -31,6 +31,10 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+static TEST_UPSTREAM_ROOT: std::sync::OnceLock<std::sync::Mutex<Option<Vec<u8>>>> =
+    std::sync::OnceLock::new();
+
 use crate::{
     ca::ManagedCa,
     config::{HeaderInjection, InjectionFormat, RuleMode, SessionConfig},
@@ -117,7 +121,10 @@ impl ProxyRuntime {
         let proxy = Proxy::builder()
             .with_listener(listener)
             .with_ca(ca.for_proxy())
-            .with_rustls_connector(aws_lc_rs::default_provider())
+            .with_rustls_connector_and_roots(
+                aws_lc_rs::default_provider(),
+                additional_upstream_roots(),
+            )
             .with_http_handler(policy_handler.clone())
             .with_websocket_handler(policy_handler)
             .with_graceful_shutdown(async move {
@@ -242,6 +249,33 @@ impl ProxyRuntime {
             );
         }
     }
+}
+
+fn additional_upstream_roots() -> Vec<hudsucker::rustls::pki_types::CertificateDer<'static>> {
+    #[cfg(test)]
+    {
+        return TEST_UPSTREAM_ROOT
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .expect("benchmark upstream root lock should not be poisoned")
+            .as_ref()
+            .map(|root| {
+                vec![hudsucker::rustls::pki_types::CertificateDer::from(
+                    root.clone(),
+                )]
+            })
+            .unwrap_or_default();
+    }
+    #[cfg(not(test))]
+    Vec::new()
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_upstream_trust_anchor(anchor: Vec<u8>) {
+    *TEST_UPSTREAM_ROOT
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("benchmark upstream root lock should not be poisoned") = Some(anchor);
 }
 
 fn map_runtime_result(
