@@ -150,6 +150,7 @@ fn load_local_session_config(path: &std::path::Path) -> Result<SessionConfig> {
 
     Ok(SessionConfig {
         persistent: session.persistent,
+        socket_name: session.socket_name,
         rules: session
             .rules
             .into_iter()
@@ -321,6 +322,21 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn local_inline_config_preserves_named_socket() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let config_path = directory.path().join("session.toml");
+        std::fs::write(
+            &config_path,
+            "version = 1\noperation = \"create\"\n\n[session]\nsocket_name = \"cladding/github.sock\"\n\n[[rules]]\nhost = \"github.com\"\nmode = \"tunnel\"\n",
+        )
+        .expect("inline session config should be written");
+
+        let config = super::load_local_session_config(&config_path)
+            .expect("inline session config should load");
+        assert_eq!(config.socket_name.as_deref(), Some("cladding/github.sock"));
     }
 
     #[test]

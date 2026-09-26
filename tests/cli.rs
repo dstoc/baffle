@@ -277,6 +277,59 @@ fn inline_create_lists_sessions_and_independent_stop_preserves_other_lease() {
 }
 
 #[test]
+fn inline_create_forwards_named_socket_and_prints_daemon_assigned_path() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let socket = directory.path().join("control.sock");
+    let listener = UnixListener::bind(&socket).expect("fake control socket should bind");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("CLI should connect");
+        let mut header = [0; 4];
+        stream
+            .read_exact(&mut header)
+            .expect("request frame header should arrive");
+        let mut request = vec![0; u32::from_be_bytes(header) as usize];
+        stream
+            .read_exact(&mut request)
+            .expect("request frame should arrive");
+        let request = String::from_utf8(request).expect("request should be UTF-8 TOML");
+        assert!(request.contains("socket_name = \"cladding/github.sock\""));
+
+        let response = br#"{"version":1,"ok":true,"result":{"id":"named_session","socket":"/run/baffle/proxies/cladding/github.sock","persistent":true}}"#;
+        stream
+            .write_all(&(response.len() as u32).to_be_bytes())
+            .expect("response frame header should be sent");
+        stream
+            .write_all(response)
+            .expect("response frame should be sent");
+    });
+
+    let config = directory.path().join("inline.toml");
+    fs::write(
+        &config,
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\nsocket_name = \"cladding/github.sock\"\n\n[[rules]]\nhost = \"github.com\"\nmode = \"tunnel\"\n",
+    )
+    .expect("inline session config should be written");
+    let output = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("--control-socket")
+        .arg(&socket)
+        .arg("create")
+        .arg("--config")
+        .arg(config)
+        .output()
+        .expect("create command should run");
+    server.join().expect("fake control server should finish");
+
+    assert!(
+        output.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("create output should be UTF-8");
+    assert!(stdout.contains("Created persistent session named_session"));
+    assert!(stdout.contains("Data socket: /run/baffle/proxies/cladding/github.sock"));
+}
+
+#[test]
 fn file_only_create_uses_nested_server_file_and_rejects_inline_config() {
     let daemon = TestDaemon::start(true);
     let nested_dir = daemon.session_config_dir.join("cladding");
