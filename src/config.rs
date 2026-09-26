@@ -322,6 +322,13 @@ pub enum ControlRequest {
         version: u16,
         session_id: String,
     },
+    Reload {
+        version: u16,
+        session_id: String,
+    },
+    ReloadAll {
+        version: u16,
+    },
     List {
         version: u16,
     },
@@ -361,6 +368,21 @@ impl ControlRequest {
                     version,
                     session_id,
                 })
+            }
+            RawControlRequest::Reload {
+                version,
+                session_id,
+            } => {
+                validate_protocol_version(version)?;
+                validate_session_id(&session_id)?;
+                Ok(Self::Reload {
+                    version,
+                    session_id,
+                })
+            }
+            RawControlRequest::ReloadAll { version } => {
+                validate_protocol_version(version)?;
+                Ok(Self::ReloadAll { version })
             }
             RawControlRequest::CreateFromFile { version, name } => {
                 validate_protocol_version(version)?;
@@ -911,6 +933,13 @@ enum RawControlRequest {
         version: u16,
         session_id: String,
     },
+    Reload {
+        version: u16,
+        session_id: String,
+    },
+    ReloadAll {
+        version: u16,
+    },
     CreateFromFile {
         version: u16,
         name: String,
@@ -1246,6 +1275,29 @@ directory = "/var/lib/baffle/secrets"
             ControlRequest::List {
                 version: PROTOCOL_VERSION,
             }
+        );
+        assert_eq!(
+            ControlRequest::from_toml(
+                "version = 1\noperation = \"reload\"\nsession_id = \"s_123\"\n"
+            )
+            .expect("reload should parse"),
+            ControlRequest::Reload {
+                version: PROTOCOL_VERSION,
+                session_id: "s_123".into(),
+            }
+        );
+        assert_eq!(
+            ControlRequest::from_toml("version = 1\noperation = \"reload_all\"\n")
+                .expect("reload_all should parse"),
+            ControlRequest::ReloadAll {
+                version: PROTOCOL_VERSION,
+            }
+        );
+        assert!(
+            ControlRequest::from_toml(
+                "version = 1\noperation = \"reload\"\nsession_id = \"../bad\"\n"
+            )
+            .is_err()
         );
     }
 

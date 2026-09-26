@@ -128,6 +128,45 @@ For ephemeral sessions, the trusted client must keep the control lease open
 while the workload runs and close it on normal completion, cancellation, or
 failure. Persistent sessions require an explicit `stop` operation.
 
+## Explicit session reload
+
+File-backed sessions retain the relative configuration file name used at
+creation. After an operator changes that administrator-managed file, reload
+the session by ID or reload all active file-backed sessions:
+
+```sh
+# Replace the managed file atomically while preserving its private mode.
+sudo -u baffle install -m 0600 ./github.toml \
+  /var/lib/baffle/sessions/cladding/github.toml.next
+sudo -u baffle mv -f \
+  /var/lib/baffle/sessions/cladding/github.toml.next \
+  /var/lib/baffle/sessions/cladding/github.toml
+
+# Activate the new validated policy for connections accepted after cutover.
+sudo -u baffle baffle reload <session-id>
+```
+
+The daemon reads the original relative file name with its directory-confined,
+no-symlink checks. A missing, unreadable, invalid, or unsafe replacement
+leaves the active session unchanged. A comment-only or formatting-only edit
+returns `unchanged`. A changed socket name is bound before Baffle updates the
+reported path and retires the old listener.
+
+Reload does not cancel accepted connections. Existing HTTPS requests and
+streams, and opaque tunnels, can retain their prior permissions and
+credentials until they naturally close. Reload is not emergency access or
+credential revocation. Close those client connections through their normal
+lifecycle when immediate revocation is required. Baffle does not watch files;
+operators must invoke reload explicitly.
+
+The daemon bounds retained resources per session. It allows up to eight live
+policy generations on one listener and up to eight superseded listeners.
+Open connections can pin an older generation or listener. When a limit blocks
+a non-disruptive reload, let old connections close and retry. Reload does not
+force a drain deadline or cancel those connections. `baffle reload --all`
+reports every file-backed session separately and exits unsuccessfully if any
+session fails.
+
 ## CA provisioning
 
 Create a dedicated CA for Baffle. Do not reuse a corporate, browser, or

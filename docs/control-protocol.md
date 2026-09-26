@@ -6,7 +6,8 @@ UTF-8 JSON. Both payloads use the same four-byte unsigned big-endian length
 prefix.
 
 Protocol version 1 is the only supported version. A client selects its
-version by setting `version = 1` in each request. Baffle does not perform a
+version by setting `version = 1` in each request. The `reload` and `reload_all`
+operations extend version 1. Baffle does not perform a
 separate capability handshake or negotiate a version range. It returns
 `unsupported_version` when the request has a valid integer version other than
 1. The integer version field is a 16-bit unsigned value. A missing, malformed,
@@ -39,8 +40,8 @@ session data socket to mode `0600`.
 
 The UID is the protocol's client identity. Baffle does not authenticate a
 process name or executable. The trusted UID is authorized to create sessions
-using the daemon's configured secret allowlist, list its own sessions, and
-stop its own sessions.
+using the daemon's configured secret allowlist, list its own sessions, stop
+its own sessions, and reload its own file-backed sessions.
 
 Secret access uses a daemon-owned allowlist:
 
@@ -105,11 +106,58 @@ permissions, and symlink rules.
 The Rust client exposes `Client::create_from_file`; its returned `Session`
 holds the ephemeral lease in the same way as `Client::create`. Inline `create`
 is rejected in `file_only` mode. `create_from_file` is rejected in `inline`
-mode. Both modes permit authorized `list` and `stop` requests.
+mode. Both modes permit authorized `list` and `stop` requests. `reload` is
+available only for sessions created from a daemon-managed file.
+
+Reload one session by its opaque ID:
+
+```toml
+version = 1
+operation = "reload"
+session_id = "session_example_01"
+```
+
+Reload every active file-backed session owned by the caller:
+
+```toml
+version = 1
+operation = "reload_all"
+```
+
+The daemon remembers the relative file name used at creation. A reload does
+not accept a replacement file name. The daemon reads and validates that file
+with the same directory-confined, no-symlink checks used by create, then
+resolves its authorized credentials again. It compares the validated rules,
+effective socket path, and resolved credential values. TOML comments and
+formatting do not cause a reload. The session's persistence lifetime remains
+the lifetime selected at creation.
+
+A changed policy becomes active for connections accepted after the atomic
+generation switch. Connections already accepted keep their original policy
+and credentials and continue until their clients disconnect. A same-path
+reload reuses the current Unix listener. A socket-path change binds the new
+listener before cutover, updates the reported path, then stops accepting on
+and unlinks the old Baffle-owned path. The session ID and creating control
+connection lease remain unchanged. Inline-configured sessions return a
+per-session `failed` result with reason `inline_session`.
+
+Reload failures return a per-session result. They do not change the active
+policy, socket path, session ID, or lease. `reload_all` returns one result for
+each active file-backed session, including independent failures. Results are
+processed in session-ID order. Concurrent reloads for one session serialize;
+each reads the file after it acquires that session's reload lock. A stop or
+lease release waits for an active reload and then tears down all listener
+generations. The daemon rejects a reload when more than eight policy
+generations or eight superseded listeners would remain pinned by open
+connections. It does not force old connections to drain.
+
+Reload is an explicit operator action. Baffle does not watch files. It is not
+an emergency access or credential-revocation operation: an established
+connection can retain its prior permissions and credentials until it closes.
 
 ## Baffle command-line client
 
-The `baffle` binary exposes `create`, `list`, and `stop` as top-level
+The `baffle` binary exposes `create`, `list`, `stop`, and `reload` as top-level
 commands. It uses `/run/baffle/control.sock` unless `--control-socket PATH` is
 set. Run it as the daemon's `trusted_operator_uid`; the control socket is mode
 `0600` inside a mode-`0700` directory, and the daemon checks peer UID.
@@ -125,6 +173,8 @@ For `file_only` mode, pass the daemon-managed relative name:
 
 ```sh
 baffle create cladding/github.toml
+baffle reload <session-id>
+baffle reload --all
 ```
 
 The second form sends the nested name in a `create_from_file` request. The
@@ -179,12 +229,30 @@ Create response:
 List response:
 
 ```json
-{"version":1,"ok":true,"result":{"sessions":[{"id":"session_example_01","socket":"/run/baffle/proxies/session_example_01.sock","persistent":false,"state":"running"}]}}
+{"version":1,"ok":true,"result":{"sessions":[{"id":"session_example_01","socket":"/run/baffle/proxies/session_example_01.sock","persistent":false,"state":"running","generation":1,"draining_generations":0}]}}
 ```
 
-Each list entry contains `id`, `socket`, `persistent`, and `state`. It does
-not expose policy contents or credentials. `stop` returns
+Each list entry contains `id`, `socket`, `persistent`, `state`, `generation`,
+and `draining_generations`. These counters do not expose policy contents or
+credentials. `stop` returns
 `{"stopped":true}` in `result` after it removes the named session.
+
+`reload` returns one result with `id`, `status`, and the current `socket`.
+`status` is `reloaded`, `unchanged`, or `failed`. A failed result has a safe
+`reason`:
+
+```json
+{"version":1,"ok":true,"result":{"id":"session_example_01","status":"unchanged","socket":"/run/baffle/proxies/session_example_01.sock"}}
+```
+
+`reload_all` returns these entries in `result.results`:
+
+```json
+{"version":1,"ok":true,"result":{"results":[{"id":"session_example_01","status":"reloaded","socket":"/run/baffle/proxies/session_example_01.sock"}]}}
+```
+
+The `--all` CLI command prints every result and exits unsuccessfully when any
+result has status `failed`.
 
 An error response has `ok = false` and an `error` object with a stable code
 and safe message:
@@ -231,6 +299,10 @@ The Rust `baffle-client` crate implements framing and keeps ephemeral leases
 inside its `Session` handle. See the [client guide](client.md) for code
 examples. The [Cladding guide](cladding-integration.md) shows a consumer
 holding the lease while it runs a workload.
+
+`Client::reload` and `Client::reload_all` use short-lived control connections.
+They do not acquire or replace a creator lease. A successful reload does not
+close the connection held by an ephemeral create client.
 
 ## Direct client sequence
 

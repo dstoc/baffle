@@ -391,6 +391,99 @@ fn file_only_create_uses_nested_server_file_and_rejects_inline_config() {
 }
 
 #[test]
+fn reload_cli_reports_per_session_results_and_fails_when_any_all_result_fails() {
+    let daemon = TestDaemon::start(true);
+    let first_config = daemon.session_config_dir.join("first.toml");
+    let second_config = daemon.session_config_dir.join("second.toml");
+    let policy = |host: &str| {
+        format!(
+            "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n"
+        )
+    };
+    fs::write(&first_config, policy("first.example")).expect("first policy should be written");
+    fs::write(&second_config, policy("second.example")).expect("second policy should be written");
+
+    let first = daemon
+        .cli()
+        .arg("create")
+        .arg("first.toml")
+        .output()
+        .expect("first session should be created");
+    assert!(first.status.success());
+    let first_id = String::from_utf8(first.stdout)
+        .expect("create output should be UTF-8")
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(3))
+        .expect("create output should include the session ID")
+        .to_owned();
+    let second = daemon
+        .cli()
+        .arg("create")
+        .arg("second.toml")
+        .output()
+        .expect("second session should be created");
+    assert!(second.status.success());
+
+    let one = daemon
+        .cli()
+        .arg("reload")
+        .arg(&first_id)
+        .output()
+        .expect("reload by ID should run");
+    assert!(
+        one.status.success(),
+        "reload failed: {}",
+        String::from_utf8_lossy(&one.stderr)
+    );
+    assert!(String::from_utf8_lossy(&one.stdout).contains("unchanged"));
+    assert!(String::from_utf8_lossy(&one.stdout).contains(&first_id));
+
+    fs::remove_file(&second_config).expect("second source file should be removed");
+    let all = daemon
+        .cli()
+        .arg("reload")
+        .arg("--all")
+        .output()
+        .expect("reload --all should run");
+    assert!(
+        !all.status.success(),
+        "one failed result should set failure status"
+    );
+    let output = String::from_utf8_lossy(&all.stdout);
+    assert!(
+        output.contains("unchanged"),
+        "successful result should be printed: {output}"
+    );
+    assert!(
+        output.contains("failed"),
+        "failed result should be printed: {output}"
+    );
+    assert!(
+        output.contains("configuration file was not found"),
+        "failure reason should be safe and specific: {output}"
+    );
+
+    for id in [
+        first_id,
+        String::from_utf8_lossy(&second.stdout)
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(3))
+            .expect("second create should include the session ID")
+            .to_owned(),
+    ] {
+        let stopped = daemon
+            .cli()
+            .arg("stop")
+            .arg(id)
+            .output()
+            .expect("session should stop");
+        assert!(stopped.status.success());
+    }
+}
+
+#[test]
 fn cli_reports_unavailable_control_socket_and_sigterm_releases_lease() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let unavailable = Command::new(env!("CARGO_BIN_EXE_baffle"))

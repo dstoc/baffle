@@ -112,4 +112,12 @@ fn protocol_operation_examples_parse() {
         ControlRequest::from_toml(include_str!("../examples/protocol/stop.toml")),
         Ok(ControlRequest::Stop { version: 1, .. })
     ));
+    assert!(matches!(
+        ControlRequest::from_toml(include_str!("../examples/protocol/reload.toml")),
+        Ok(ControlRequest::Reload { version: 1, .. })
+    ));
+    assert!(matches!(
+        ControlRequest::from_toml(include_str!("../examples/protocol/reload-all.toml")),
+        Ok(ControlRequest::ReloadAll { version: 1 })
+    ));
 }

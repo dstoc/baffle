@@ -46,6 +46,33 @@ The daemon resolves this relative name beneath `daemon.session_config_dir`.
 The returned `Session` keeps the ephemeral lease open until it is dropped or
 closed.
 
+Reload a file-backed session by ID or reload all active file-backed sessions:
+
+```rust
+let result = client.reload(session.id()).await?;
+println!("{:?}: {}", result.status, result.socket_path.display());
+
+let results = client.reload_all().await?;
+for result in results {
+    println!("{}: {:?}", result.id, result.status);
+}
+```
+
+These calls use short-lived control connections. They do not replace the
+control connection held by an ephemeral `Session`, so the creator must keep
+that handle open until the workload ends. Each result reports `reloaded`,
+`unchanged`, or `failed`, with the current socket path and a safe failure
+reason when needed. `reload_all` returns one result per active file-backed
+session; callers should treat each result independently.
+
+A reload rereads the original administrator-managed file. Equivalent
+validated configuration, including resolved credential values and the
+effective socket path, returns `unchanged` without restarting the listener.
+Changed configuration applies to connections accepted after cutover. Existing
+connections retain their prior policy and credentials until they close. A
+socket-name change returns the new path after its listener is ready. Reload
+does not change session persistence or the creator lease.
+
 ## Proxy client compatibility
 
 `baffle-client` manages the Unix control protocol. It does not send application

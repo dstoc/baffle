@@ -88,6 +88,8 @@ impl std::error::Error for ProxyRuntimeError {}
 #[derive(Debug)]
 pub struct ProxyRuntimeEvent {
     pub runtime_id: RuntimeId,
+    pub listener_generation: u64,
+    pub retired: bool,
     pub result: Result<(), ProxyRuntimeError>,
 }
 

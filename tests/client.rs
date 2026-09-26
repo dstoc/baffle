@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use baffle_client::{Client, HostRule, SessionConfig, SessionState};
+use baffle_client::{Client, HostRule, ReloadStatus, SessionConfig, SessionState};
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use tempfile::TempDir;
 use tokio::{
@@ -128,6 +128,82 @@ async fn client_returns_typed_policy_and_capacity_errors() {
         .stop(persistent.id())
         .await
         .expect("test session should stop");
+}
+
+#[tokio::test]
+async fn typed_reload_uses_a_short_control_connection_and_preserves_the_creator_lease() {
+    let daemon = start_file_only_daemon(2);
+    let config_dir = daemon
+        .session_config_dir
+        .as_ref()
+        .expect("file-only daemon should have a session config directory");
+    let config_path = config_dir.join("managed.toml");
+    fs::write(
+        &config_path,
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = false\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n",
+    )
+    .expect("administrator policy should be written");
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
+        .expect("administrator policy should be private");
+
+    let client = Client::new(&daemon.control_socket);
+    let session = client
+        .create_from_file("managed.toml")
+        .await
+        .expect("file-backed session should be created");
+    let session_id = session.id().to_owned();
+    let socket_path = session.socket_path().to_path_buf();
+
+    let unchanged = client
+        .reload(&session_id)
+        .await
+        .expect("reload should return a per-session result");
+    assert_eq!(unchanged.status, ReloadStatus::Unchanged);
+    assert_eq!(unchanged.socket_path, socket_path);
+    assert_eq!(
+        client.list().await.expect("session should list")[0].generation,
+        1
+    );
+
+    fs::write(
+        &config_path,
+        "# policy update\nversion = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"api.example.com\"\nmode = \"tunnel\"\n",
+    )
+    .expect("updated policy should be written");
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
+        .expect("updated policy should remain private");
+    let reloaded = client
+        .reload(&session_id)
+        .await
+        .expect("changed policy should reload");
+    assert_eq!(reloaded.status, ReloadStatus::Reloaded);
+    assert_eq!(reloaded.socket_path, socket_path);
+    let listed = client.list().await.expect("session should remain listed");
+    assert_eq!(listed.len(), 1, "reload must not replace the creator lease");
+    assert_eq!(listed[0].id, session_id);
+    assert_eq!(listed[0].generation, 2);
+    assert!(
+        !listed[0].persistent,
+        "reload must keep creation-time lifetime"
+    );
+
+    let all = client
+        .reload_all()
+        .await
+        .expect("reload_all should return independent results");
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].status, ReloadStatus::Unchanged);
+    assert_eq!(
+        client
+            .list()
+            .await
+            .expect("creator lease should remain")
+            .len(),
+        1
+    );
+    drop(session);
+    wait_for_count(&client, 0).await;
+    assert!(!socket_path.exists());
 }
 
 #[tokio::test]
