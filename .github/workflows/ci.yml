@@ -36,6 +36,9 @@ jobs:
       - name: Test network namespace checker
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
+      - name: Validate locked Cargo metadata
+        run: cargo metadata --locked --format-version 1
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 

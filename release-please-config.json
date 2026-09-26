@@ -5,13 +5,24 @@
   "packages": {
     ".": {
       "package-name": "baffle-proxy",
+      "component": "baffle-proxy",
       "changelog-path": "CHANGELOG.md"
+    },
+    "crates/baffle-client": {
+      "package-name": "baffle-client",
+      "component": "baffle-client",
+      "skip-changelog": true
     }
   },
   "plugins": [
     {
       "type": "cargo-workspace",
-      "merge": true
+      "merge": false
+    },
+    {
+      "type": "linked-versions",
+      "groupName": "baffle",
+      "components": ["baffle-proxy", "baffle-client"]
     }
   ]
 }

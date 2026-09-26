@@ -2,7 +2,13 @@
 name = "baffle-client"
 version = "0.1.0"
 edition = "2024"
-description = "Typed client for the Baffle Unix control protocol"
+rust-version = "1.96"
+description = "Typed asynchronous client for the Baffle Unix control protocol"
+license = "MIT"
+repository = "https://github.com/dstoc/baffle"
+readme = "README.md"
+documentation = "https://docs.rs/baffle-client"
+include = ["src/**", "examples/**", "README.md", "LICENSE"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
@@ -11,4 +17,4 @@ tokio = { version = "1.53.1", features = ["io-util", "net"] }
 toml = "1.1.6"
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }

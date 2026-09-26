@@ -27,9 +27,10 @@ open or update a release pull request and to write `CHANGELOG.md`.
   Release Please updates the root `baffle-proxy` version, workspace member
   versions, and `Cargo.lock` together. The client crate stays in the same
   workspace release.
-- Merge the release pull request only after its required checks pass. The
-  merge creates the `vX.Y.Z` tag and GitHub Release. Release Please handles
-  versions and release notes; it does not build or upload the Linux archive.
+- Merge the release pull request only after the generated-candidate metadata
+  check below succeeds. The merge creates the `vX.Y.Z` tag and GitHub Release.
+  Release Please handles versions and release notes; it does not build or
+  upload the Linux archive.
 
 If a release is needed but merged commit messages do not imply the intended
 version, include a `Release-As: X.Y.Z` footer in the body of a commit that lands
@@ -38,25 +39,103 @@ Release Please documents this footer as an explicit version override. Manually
 dispatching the `Release Please` workflow can retry processing, but it does not
 change how commits are classified.
 
+## Crates.io packages
+
+The workspace contains two packages for synchronized crates.io releases:
+
+| Crate | Package role | Install or depend on it |
+| --- | --- | --- |
+| `baffle-proxy` | Daemon and `baffle` executable | `cargo install baffle-proxy --locked --bin baffle` |
+| `baffle-client` | Typed client for the Unix control protocol | `baffle-client = "0.2"` in `[dependencies]` for the open release candidate |
+
+Rust applications that use `baffle-client` also need Tokio with the runtime
+features required by the application. The client package does not contain the
+proxy daemon or send application traffic through the session data socket.
+
+Both packages declare `license = "MIT"` and point to this repository. Each
+package has its own README and a `docs.rs` documentation URL. The root
+[`LICENSE`](../LICENSE) applies to Baffle's original code. The client package
+contains the same MIT text so its archive can be used on its own. These
+declarations do not change the licenses of crates that Baffle depends on. The
+hand-built Linux binary release separately includes third-party license and
+notice files for its bundled dependencies.
+
+`baffle-proxy` keeps a local path to `baffle-client` and also declares the
+matching registry version. The path supports workspace development. The
+version lets Cargo resolve the client crate after `baffle-proxy` is published.
+The Release Please manifest tracks both crates at their current versions. The
+`linked-versions` plugin keeps them at the same version. The
+`cargo-workspace` plugin runs with `merge: false`, then `linked-versions`
+combines the crate updates into one release pull request. The client package
+skips its own changelog so the repository keeps one `CHANGELOG.md`. With
+`include-component-in-tag: false`, the shared release keeps the existing
+`vX.Y.Z` tag convention. See the [Cargo workspace plugin](https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md#cargo-workspace), [linked versions plugin](https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md#linked-versions), and [Cargo manifest updater](https://github.com/googleapis/release-please/blob/main/src/updaters/rust/cargo-toml.ts) documentation.
+
+Review each generated release pull request. Both `Cargo.toml` package
+versions, the `baffle-client` dependency version in the root manifest,
+`.release-please-manifest.json`, and both local package entries in `Cargo.lock`
+must match. The `Format, lint, and test` required check runs on regular pull
+requests and verifies the Release Please package and plugin configuration.
+The generated release pull request is checked separately as described below.
+
+Crate names are allocated on a first-come basis. As of 2026-09-26,
+`cargo search baffle-client` and `cargo search baffle-proxy` returned no
+registered packages. Recheck both names immediately before the first publish.
+Choose the crates.io account that will own the packages before enabling
+automated publishing. That account must publish `baffle-client` first, then
+`baffle-proxy`, and must grant the repository's intended release user or team
+owner rights for both crates. After the first publish, verify each owner list
+with `cargo owner --list <crate>` and add a GitHub user or team with
+`cargo owner --add <github-user-or-team> <crate>` if required. Do not enable
+automatic publication until the names and owners are confirmed and the
+repository's `CARGO_REGISTRY_TOKEN` belongs to an account with publish rights
+for both crates. Keep that token in GitHub Actions secrets. See the Cargo
+[publishing guide](https://doc.rust-lang.org/cargo/reference/publishing.html)
+for name allocation and owner management.
+
+Before a release, run these package checks from the repository root:
+
+```sh
+cargo metadata --locked
+python3 -m unittest scripts.test_release_please_manifests
+cargo package --list --package baffle-client
+cargo package --list --package baffle-proxy
+cargo publish --dry-run --locked --package baffle-client
+```
+
+The client dry run packages, extracts, and builds the client crate without
+publishing it. `baffle-proxy` can be inspected with `cargo package --list` even
+before its dependency is in the registry. A full proxy dry run may need the
+matching `baffle-client` version to be available on crates.io; the publication
+workflow must publish the client first. Never use a real `cargo publish` as a
+packaging check. Crates.io publication stays separate from the manually
+dispatched Linux binary workflow and does not replace the `Format, lint, and
+test` required check.
+
 The action uses the repository's `GITHUB_TOKEN` with `contents: write`,
 `issues: write`, and `pull-requests: write`. No PAT or GitHub App secret is
 required.
 
-## CI for generated release pull requests
+## Validate generated release pull requests
 
 GitHub does not start ordinary workflow runs for most events caused by
-`GITHUB_TOKEN`. Release Please uses that token to create and update its pull
-request. GitHub may hold the resulting pull request checks for approval, and a
-tag created with that token does not trigger the tag-push packaging workflow.
-`workflow_dispatch` is an exception to this suppression.
+`GITHUB_TOKEN`. Release Please uses that token to create or update its pull
+request, so the pull request does not start the Rust CI workflow.
 
-If the generated release pull request has no CI run, dispatch the existing Rust
-CI workflow against its head branch. In GitHub Actions, open **Rust CI**, choose
-**Run workflow**, select the release pull request's head branch, then run it.
-The dispatch executes the same Rust, namespace integration, and required-check
-jobs as the pull request event. The stable required job remains
-`Format, lint, and test`. The CLI equivalent is
-`gh workflow run ci.yml --ref <release-pr-head-branch>`.
+When Release Please creates or updates a pull request, the `Release Please`
+workflow checks out the generated head branch and runs
+`cargo metadata --locked --format-version 1` against it. It then runs the
+Release Please regression tests on that branch. Cargo metadata checks that the
+candidate resolves without changing `Cargo.lock`. The regression tests check
+that both crate versions, the `baffle-client` dependency version, the manifest
+entries, and the lockfile entries stay in sync. Before merging, confirm that
+the `Release Please` workflow run completed both checks successfully for the
+latest candidate commit. These checks do not replace the Rust CI checks,
+including the `Format, lint, and test` job on regular pull requests.
+
+A tag created with `GITHUB_TOKEN` does not trigger the tag-push packaging
+workflow. Use the manual Linux release workflow described below after the
+Release Please pull request is merged.
 
 ## Manually package a release
 
@@ -82,22 +161,17 @@ uses the same release, tag, version, and Release Please PR checks. Do not rely o
 it for Release Please tags because GitHub suppresses ordinary tag-push workflow
 runs caused by `GITHUB_TOKEN`.
 
-## First release and safe local packaging check
+## Safe local binary packaging check
 
-The repository currently has no version tags. Both Cargo packages are at
-`0.1.0`, so `.release-please-manifest.json` records `0.1.0` as the current
-workspace version. On its first run, Release Please can inspect the existing
-commit history because there is no earlier release tag. Review the first
-generated release pull request's proposed version and changelog before merging
-it; merging that pull request creates the first release tag.
-
-To verify the packaging steps without publishing a release, run the packaging
-script locally against the current Cargo version. This creates only local files
-under `dist/`:
+To verify the existing Linux binary packaging without creating a GitHub
+release, read the current daemon version from Cargo metadata and run the
+packaging script. This creates only local files under `dist/`:
 
 ```sh
-./scripts/package-release.sh v0.1.0
-tar -tzf dist/baffle-proxy-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+version=$(cargo metadata --locked --no-deps --format-version 1 \
+  | jq -r '.packages[] | select(.name == "baffle-proxy") | .version')
+./scripts/package-release.sh "v${version}"
+tar -tzf "dist/baffle-proxy-v${version}-x86_64-unknown-linux-gnu.tar.gz"
 (cd dist && sha256sum -c SHA256SUMS)
 ```
 
