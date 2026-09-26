@@ -1,0 +1,4 @@
+backend,cpu_affinity,scope,syscall,calls,bytes,total_ms,calls_over_1ms,max_ms
+rama,0,http1_characterization,tcp_recvfrom,120671,433793252,1483.644,3,2.275
+rama,0,http1_characterization,tcp_sendto,27487,233591639,587.520,4,3.222
+rama,0,http1_characterization,tcp_writev,14713,281999412,330.147,2,2.832

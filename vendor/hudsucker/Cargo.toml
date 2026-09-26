@@ -41,6 +41,7 @@ rustdoc-args = [
 ]
 
 [features]
+benchmark-tcp-nodelay = []
 decoder = [
     "dep:async-compression",
     "dep:tokio-util",

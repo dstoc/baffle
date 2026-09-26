@@ -23,6 +23,12 @@ use tokio_graceful::Shutdown;
 use tokio_tungstenite::Connector;
 use tracing::error;
 
+#[cfg(feature = "benchmark-tcp-nodelay")]
+pub(super) fn benchmark_tcp_nodelay_enabled(socket_leg: &str) -> bool {
+    std::env::var("BAFFLE_BENCH_TCP_NODELAY")
+        .is_ok_and(|mode| mode == socket_leg || mode == "all")
+}
+
 /// A proxy server. This must be constructed with a [`ProxyBuilder`].
 ///
 /// # Examples
@@ -141,6 +147,12 @@ where
                             continue;
                         }
                     };
+                    #[cfg(feature = "benchmark-tcp-nodelay")]
+                    if benchmark_tcp_nodelay_enabled("proxy-ingress")
+                        && let Err(error) = tcp.set_nodelay(true)
+                    {
+                        error!(%error, "Failed to set TCP_NODELAY on incoming benchmark connection");
+                    }
 
                     let client = client.clone();
                     let server = server.clone();
