@@ -5,7 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from benchmark_builds import native_versions, paired_backend_order
+from benchmark_builds import (
+    native_versions,
+    paired_backend_order,
+    unique_dependency_entries,
+)
 
 
 class PairedBackendOrderTests(unittest.TestCase):
@@ -19,6 +23,20 @@ class PairedBackendOrderTests(unittest.TestCase):
     def test_one_backend_keeps_its_order(self):
         self.assertEqual(paired_backend_order(["rama"], 1), ["rama"])
 
+
+class DependencyEntryTests(unittest.TestCase):
+    def test_repeat_node_marker_does_not_count_as_a_second_package(self):
+        entries = unique_dependency_entries([
+            "serde v1.0.0",
+            "serde v1.0.0 (*)",
+            "tokio v1.2.3",
+            "",
+        ])
+
+        self.assertEqual(entries, ["serde v1.0.0", "tokio v1.2.3"])
+
+
+class NativeVersionTests(unittest.TestCase):
     def test_records_libclang_library_separately_from_driver(self):
         with tempfile.TemporaryDirectory() as directory:
             library = Path(directory) / "libclang.so"

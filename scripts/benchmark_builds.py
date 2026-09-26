@@ -24,6 +24,15 @@ def paired_backend_order(backends: list[str], repeat: int) -> list[str]:
     return backends if repeat % 2 == 0 else list(reversed(backends))
 
 
+def unique_dependency_entries(lines: list[str]) -> list[str]:
+    """Deduplicate Cargo tree entries after removing its repeat-node marker."""
+    return sorted({
+        entry
+        for line in lines
+        if (entry := line.strip().removesuffix(" (*)"))
+    })
+
+
 def command(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True, check=False)
@@ -122,7 +131,7 @@ def main() -> None:
                 "cargo", "tree", "--locked", "--no-default-features", "--features", feature,
                 "-e", "normal", "--prefix", "none",
             ]).stdout.splitlines()
-            dependencies = sorted(set(line.strip() for line in graph if line.strip()))
+            dependencies = unique_dependency_entries(graph)
             output.write(json.dumps({
                 "kind": "dependency_graph",
                 "backend": backend,

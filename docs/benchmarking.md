@@ -107,7 +107,9 @@ benchmark also checked that each session socket disappeared after shutdown.
 `benchmark_builds.py` runs three clean/no-op incremental build pairs for each
 backend and profile. It alternates the backend order between repeats. The
 table shows the median and full range for each build time. The script also
-records release binary sizes and distinct normal dependency graph entries.
+records release binary sizes and distinct package entries in each normal
+dependency graph. It removes Cargo's trailing `(*)` repeat-node marker before
+it deduplicates package entries.
 The raw JSONL file retains the environment and every sample. See [the benchmark
 results directory](../bench/results/).
 
@@ -118,11 +120,11 @@ results directory](../bench/results/).
 | Clean release build | 248.771 s (242.894–252.562) | 453.861 s (453.819–468.198) |
 | No-op incremental release build | 0.135 s (0.134–0.140) | 0.178 s (0.177–0.184) |
 | Release binary size | 14,486,344 bytes | 18,165,664 bytes |
-| Normal dependency graph entries | 252 | 358 |
+| Normal dependency graph package entries | 201 | 273 |
 
 Each build-time cell reports the median of three samples and the minimum and
 maximum in parentheses. The release binary size gap is 3,679,320 bytes. The
-Rama build adds 106 distinct normal dependency graph entries. These build
+Rama graph adds 72 package entries. These build
 times use one CPU and one Cargo job; they describe this pinned runner setup and
 should not be read as multi-core developer workstation times.
 
