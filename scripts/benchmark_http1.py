@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "bench" / "fixtures"
+RUNTIME = "rama"
 CONCURRENCY = (1, 4, 16)
 TRIALS = 5
 WARMUP_REQUESTS = 16
@@ -62,7 +63,6 @@ class BenchOriginHandler(BaseHTTPRequestHandler):
 
 
 def run_case(
-    backend: str,
     origin_name: str,
     nodelay_mode: str,
     profile: str,
@@ -75,7 +75,7 @@ def run_case(
         "" if concurrency_levels == CONCURRENCY else "-c" + "-".join(map(str, concurrency_levels))
     )
     output = ROOT / "bench" / "results" / (
-        f"{result_prefix}-{backend}-{origin_name}-nodelay-{nodelay_mode}"
+        f"{result_prefix}-{RUNTIME}-{origin_name}-nodelay-{nodelay_mode}"
         f"-req{request_body_bytes}-resp{response_body_bytes}{concurrency_suffix}.csv"
     )
     output.unlink(missing_ok=True)
@@ -104,18 +104,10 @@ def run_case(
         address = f"127.0.0.1:{origin.server_address[1]}"
         environment["BAFFLE_BENCH_ORIGIN_ADDR"] = address
 
-    features = f"backend-{backend}"
+    command = ["cargo", "test", "--locked"]
     if nodelay_mode != "production":
-        features += ",benchmark-tcp-nodelay"
-    command = [
-        "cargo",
-        "test",
-        "--locked",
-        "--no-default-features",
-        "--features",
-        features,
-        "--lib",
-    ]
+        command.extend(["--features", "benchmark-tcp-nodelay"])
+    command.extend(["--lib"])
     if profile == "release":
         command.append("--release")
     command.extend(
@@ -129,7 +121,7 @@ def run_case(
     )
 
     print(
-        f"\n=== {backend}: origin={origin_name}, TCP_NODELAY={nodelay_mode}, "
+        f"\n=== {RUNTIME}: origin={origin_name}, TCP_NODELAY={nodelay_mode}, "
         f"request={request_body_bytes} bytes, response={response_body_bytes} bytes, "
         f"profile={profile} ===",
         flush=True,
@@ -181,7 +173,6 @@ def loopback_packet_counts() -> tuple[int, int] | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backends", default="hudsucker,rama")
     parser.add_argument("--origins", default="rust,python")
     parser.add_argument("--tcp-nodelay", default="off,all")
     parser.add_argument("--concurrency-levels", default="1,4,16")
@@ -195,7 +186,6 @@ def main() -> None:
     parser.add_argument("--profile", choices=("release", "debug"), default="release")
     args = parser.parse_args()
 
-    backends = [value.strip() for value in args.backends.split(",") if value.strip()]
     origins = [value.strip() for value in args.origins.split(",") if value.strip()]
     nodelay_modes = [value.strip() for value in args.tcp_nodelay.split(",") if value.strip()]
     try:
@@ -212,8 +202,6 @@ def main() -> None:
         or len(set(concurrency_levels)) != len(concurrency_levels)
     ):
         parser.error("--concurrency-levels must use unique values from 1, 4, and 16")
-    if not backends or any(value not in ("hudsucker", "rama") for value in backends):
-        parser.error("--backends must contain hudsucker and/or rama")
     if not origins or any(value not in ("rust", "python") for value in origins):
         parser.error("--origins must contain rust and/or python")
     allowed_modes = {
@@ -248,20 +236,18 @@ def main() -> None:
     os.sched_setaffinity(0, {args.cpu})
     os.environ["BAFFLE_BENCH_CPU"] = str(args.cpu)
 
-    for backend in backends:
-        for origin_name in origins:
-            for mode in nodelay_modes:
-                for request_body_bytes, response_body_bytes in payloads:
-                    run_case(
-                        backend,
-                        origin_name,
-                        mode,
-                        args.profile,
-                        concurrency_levels,
-                        request_body_bytes,
-                        response_body_bytes,
-                        args.result_prefix,
-                    )
+    for origin_name in origins:
+        for mode in nodelay_modes:
+            for request_body_bytes, response_body_bytes in payloads:
+                run_case(
+                    origin_name,
+                    mode,
+                    args.profile,
+                    concurrency_levels,
+                    request_body_bytes,
+                    response_body_bytes,
+                    args.result_prefix,
+                )
 
 
 if __name__ == "__main__":

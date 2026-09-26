@@ -18,20 +18,19 @@ Reviewed on 2026-09-25 for the initial Linux release work.
 - The package targets Linux x86-64 with the GNU C library. Other Linux
   architectures and static linking are not included in this release job.
 
-## Dependency and Hudsucker review
+## Dependency and runtime review
 
-- `hudsucker` is pinned to exactly `0.25.0` and patched to
-  `vendor/hudsucker`. `vendor/hudsucker/PATCHES.md` records the fail-closed
-  CONNECT and TLS hooks, authority binding, their security rationale, and the
-  remaining upstream gaps.
-- baffle/25 removed Baffle's resolver and TCP connector hooks for address
-  filtering. Hudsucker's default outbound connectors now resolve and dial
-  authorized hostnames. Keep the local diff narrow and repeat interception,
-  CONNECT, HTTP/2, and WebSocket coverage before changing the pinned version.
+- Rama 0.4.0 is the only proxy runtime. It uses the `http-full` and `boring`
+  features and requires Rust 1.96 or newer, CMake, a C++ toolchain, and
+  `libclang-dev` to build from source. CI and release jobs install these native
+  prerequisites. Prebuilt release binaries do not require them at runtime.
 - Baffle authorizes the exact hostname and port before dialing, but does not
   filter DNS answers or pin destination addresses. Deployment DNS and network
   egress controls own address restrictions. Retain fail-closed interception,
   CONNECT/TLS/HTTP identity checks, and normal upstream TLS verification.
+- The daemon-facing runtime boundary is documented in `docs/architecture.md`.
+  It keeps policy, CA ownership, secrets, the control protocol, and session
+  lifecycle independent of Rama networking types.
 - The dependency versions used by CI and releases come from the committed lock
   file. This repository does not currently run an automated RustSec advisory
   scan; maintainers should add one before adopting a security patch cadence.
@@ -48,14 +47,15 @@ Reviewed on 2026-09-25 for the initial Linux release work.
 - The secret type redacts its `Debug` output. Secret files and CA signing keys
   are validated before use. Existing tests cover file permissions, entitlement
   checks, redaction, host/path boundaries, and injection rules.
-- Hudsucker emits authority and transport error metadata. Keep logs
-  access-controlled and review custom `RUST_LOG` filters.
+- Runtime lifecycle and transport errors are logged without request paths,
+  headers, bodies, or resolved credentials. Keep logs access-controlled and
+  review custom `RUST_LOG` filters.
 
 ## Deployment security gate
 
 - The Baffle policy is not a firewall. Sandboxed clients must have no direct
   path to external networks.
-- Internal Hudsucker listeners bind to loopback in Baffle's network namespace.
+- Internal Rama listeners bind to loopback in Baffle's network namespace.
   Sandboxed clients must not share that namespace or otherwise reach those
   listeners.
 - The privileged Linux namespace fixture runs in a separate CI workflow on
@@ -70,4 +70,4 @@ Reviewed on 2026-09-25 for the initial Linux release work.
 The repository has no top-level `LICENSE` file and the Cargo package metadata
 does not declare a license. The release workflow stops until the project owner
 selects and records the distribution terms in both places. No license has been
-inferred from the vendored Hudsucker crate.
+inferred from a dependency.

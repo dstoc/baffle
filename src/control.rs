@@ -240,7 +240,7 @@ impl ControlServer {
         }
     }
 
-    /// Stop all owned proxy instances, allowing each Hudsucker task to drain.
+    /// Stop all owned proxy instances, allowing each runtime to drain.
     pub async fn shutdown(&mut self) {
         // Close the listening socket before stopping sessions. Existing
         // handlers are cancelled below so no request can outlive shutdown.
@@ -895,7 +895,7 @@ fn new_session_id() -> io::Result<String> {
     Ok(id)
 }
 
-#[cfg(all(test, feature = "backend-hudsucker"))]
+#[cfg(test)]
 mod tests {
     use std::{
         fs,
@@ -911,7 +911,7 @@ mod tests {
         sync::{Semaphore, mpsc},
     };
 
-    use hudsucker::rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 
     use crate::{
         ca::ManagedCa,

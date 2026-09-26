@@ -1,20 +1,14 @@
-//! Backend-neutral proxy session entry points.
+//! Backend-independent proxy session boundary.
 //!
-//! The daemon and control protocol use this module without importing either
-//! backend's networking types. Cargo selects exactly one implementation.
+//! The daemon provisions an opaque runtime, reads its bound listener details,
+//! receives fatal runtime events, and cancels it with bounded shutdown. The
+//! private Rama module owns the listener, Unix bridge, tasks, and cleanup.
 
-#[cfg(all(feature = "backend-hudsucker", not(feature = "backend-rama")))]
-#[path = "proxy_runtime/hudsucker.rs"]
-mod backend;
+mod rama;
 
-#[cfg(all(feature = "backend-rama", not(feature = "backend-hudsucker")))]
-#[path = "proxy_runtime/rama.rs"]
-mod backend;
+pub use rama::ProxyRuntime;
 
-#[cfg(any(feature = "backend-hudsucker", feature = "backend-rama"))]
-pub use backend::ProxyRuntime;
-
-#[cfg(any(test, all(feature = "benchmark-tcp-nodelay", feature = "backend-rama")))]
+#[cfg(any(test, feature = "benchmark-tcp-nodelay"))]
 pub(crate) fn benchmark_tcp_nodelay_mode() -> String {
     #[cfg(feature = "benchmark-tcp-nodelay")]
     {
@@ -26,7 +20,7 @@ pub(crate) fn benchmark_tcp_nodelay_mode() -> String {
     }
 }
 
-#[cfg(any(test, all(feature = "benchmark-tcp-nodelay", feature = "backend-rama")))]
+#[cfg(any(test, feature = "benchmark-tcp-nodelay"))]
 pub(crate) fn benchmark_tcp_nodelay_enabled(socket_leg: &str) -> bool {
     #[cfg(feature = "benchmark-tcp-nodelay")]
     if std::env::var_os("BAFFLE_BENCH_TCP_NODELAY").is_none() {
@@ -36,11 +30,8 @@ pub(crate) fn benchmark_tcp_nodelay_enabled(socket_leg: &str) -> bool {
     mode == socket_leg || mode == "all"
 }
 
-#[cfg(all(feature = "backend-hudsucker", test))]
-pub(crate) use backend::PolicyHandler;
-
 #[cfg(test)]
-pub(crate) use backend::set_test_upstream_trust_anchor;
+pub(crate) use rama::set_test_upstream_trust_anchor;
 
 #[cfg(test)]
 mod benchmark;
@@ -97,7 +88,7 @@ impl fmt::Display for ProxyRuntimeError {
             Self::BindSocket(_) => formatter.write_str("could not bind proxy Unix socket"),
             Self::SocketOption(error) => write!(
                 formatter,
-                "could not enable TCP_NODELAY on an accepted Rama client socket: {error}"
+                "could not enable TCP_NODELAY on an accepted proxy client socket: {error}"
             ),
             Self::Bridge(_) => formatter.write_str("proxy Unix socket bridge failed"),
             Self::Build(_) => formatter.write_str("could not build proxy"),
@@ -116,7 +107,7 @@ pub struct ProxyRuntimeEvent {
     pub result: Result<(), ProxyRuntimeError>,
 }
 
-#[cfg(any(feature = "backend-hudsucker", baffle_integration_test))]
+#[cfg(baffle_integration_test)]
 pub(super) fn integration_test_upstream_root() -> Result<Option<Vec<u8>>, String> {
     #[cfg(baffle_integration_test)]
     {

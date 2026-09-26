@@ -1,5 +1,10 @@
 # Baffle: Ephemeral policy-driven HTTPS proxy daemon
 
+> Historical v1 proposal. Its Hudsucker implementation plan and status predate
+> baffle/34 and do not describe the current runtime. See the current
+> [architecture](architecture.md), [deployment security](security-deployment.md),
+> and [runtime migration note](runtime-migration.md).
+
 - **Status:** Approved; HTTPS-only request policy implemented, destination-IP follow-up pending
 - **Project:** New standalone Rust repository, independent of Cladding
 - **Executable:** `baffle`
@@ -217,26 +222,24 @@ For **persistent** sessions, the create connection can close without stopping th
 
 A fatal Hudsucker or bridge task failure invalidates the whole session; never leave a seemingly valid socket accepting connections when policy enforcement is unavailable. Reject or roll back partially created sessions. On daemon shutdown, stop all proxies, bound drain time, unlink daemon-owned socket paths and exit. On restart, safely detect and clean up stale socket files owned by Baffle without following attacker-controlled symlinks or deleting unrelated paths.
 
-## 8. Hudsucker integration and security boundary
+## 8. Historical Hudsucker integration plan (superseded by baffle/34)
 
 Use Hudsucker's `with_listener(TcpListener)` with a pre-bound `127.0.0.1:0` listener for each session, its HTTP request handler for policy enforcement and header injection, its CONNECT/TLS hooks for selective interception, and `with_graceful_shutdown` for lifecycle integration. Give each session a separate handler and outbound client pool. Share immutable certificate authority material and cache where safe. Enable HTTP/2 if required by supported clients and test it explicitly.
 
 Baffle's Unix-to-TCP bridge should use Tokio's `copy_bidirectional`, track active bridges for session cancellation and enforce connection limits **before** connecting to the corresponding internal Hudsucker listener. There is no external TCP bind and no separate `socat` instance inside Baffle; Cladding may still use its existing `socat` mapping from a sandbox-local TCP endpoint to the Baffle Unix socket.
 
-The current implementation pins Hudsucker 0.25.0 to `vendor/hudsucker`. The local patch binds TLS and inner HTTP identity to the CONNECT authority, and closes unsupported payloads instead of falling back to an opaque tunnel when interception is required. baffle/25 removed `src/egress.rs`, Baffle's DNS-answer classification and address pinning, and the custom Hudsucker connector and resolver hooks. Hudsucker's default connectors now resolve and dial the hostname after exact host and port authorization.
+At the time of this proposal's last update, the implementation pinned Hudsucker 0.25.0 to `vendor/hudsucker`. The local patch bound TLS and inner HTTP identity to the CONNECT authority, and closed unsupported payloads instead of falling back to an opaque tunnel when interception was required. baffle/25 removed `src/egress.rs`, Baffle's DNS-answer classification and address pinning, and the custom Hudsucker connector and resolver hooks. Hudsucker's default connectors then resolved and dialed the hostname after exact host and port authorization. baffle/34 later removed Hudsucker from the shipped implementation.
 
 The approved policy removes application-level DNS/IP filtering. baffle/25 removed the `private_addresses` field and client API, compiled address rules, destination classification and pinning, related connector/resolver hooks, and tests whose purpose was to enforce those address restrictions. Existing policies that include `private_addresses` now fail strict validation. Operators must remove that field and move intended internal-service restrictions to DNS and network egress policy before upgrading. Host and port authorization before outbound dialing remains.
 
 Do not remove fail-closed interception for rules that require path checks or credential injection. Do not remove CONNECT-authority, TLS-SNI and inner-HTTP-authority checks. They keep path and injection rules tied to the authorized origin. Keep normal upstream certificate and hostname verification when Baffle terminates TLS. Explicit tunnel rules remain opaque; the client must verify upstream TLS identity. The tunnel's CONNECT host and port are authorized, but Baffle cannot verify the encrypted protocol or inspect its HTTP content.
 
-As reviewed on 2026-09-25, upstream Hudsucker 0.25.0 exposes boolean CONNECT and TLS decisions and supports custom HTTP and WebSocket connectors. Its API does not provide the explicit `Intercept`/`Tunnel`/`Reject` TLS result, CONNECT-bound TLS context, or inner HTTP authority binding used by the local patch. Its CONNECT handling can turn an unsupported payload into an opaque tunnel. baffle/25 removed the address-filtering connector and resolver but retained these security changes. Keep the vendored crate until an upstream API and release provide equivalent safeguards and Baffle's tests verify them.
+As reviewed on 2026-09-25, upstream Hudsucker 0.25.0 exposed boolean CONNECT and TLS decisions and supported custom HTTP and WebSocket connectors. Its API did not provide the explicit `Intercept`/`Tunnel`/`Reject` TLS result, CONNECT-bound TLS context, or inner HTTP authority binding used by the local patch. Its CONNECT handling could turn an unsupported payload into an opaque tunnel. baffle/25 removed the address-filtering connector and resolver but retained these security changes. baffle/34 removed the vendored crate after the Rama runtime and its security coverage were ready.
 
-The Hudsucker security patch remains in place. Baffle no longer performs IP
+The historical Hudsucker security patch is no longer shipped. Baffle no longer performs IP
 classification or filtering. An allowed name can resolve to a sensitive
 address even when the certificate is valid for that hostname. See the
-[Hudsucker 0.25.0 handler API](https://docs.rs/hudsucker/0.25.0/hudsucker/trait.HttpHandler.html)
-and [builder API](https://docs.rs/hudsucker/0.25.0/hudsucker/builder/struct.ProxyBuilder.html),
-plus `vendor/hudsucker/PATCHES.md` for the current patch inventory.
+The historical patch inventory was removed with the vendored source tree.
 
 ## 9. Security model
 
@@ -294,6 +297,6 @@ A v1 release is acceptable when all four milestones pass automated integration t
 
 ## 14. Decisions and remaining implementation questions
 
-**Decided:** standalone Rust project; Hudsucker backend; Tokio; TOML daemon and session policies; Unix control and per-session data sockets; one multi-proxy daemon process; ephemeral lease by default; opt-in persistent sessions; HTTPS-only destination requests through CONNECT; exact hostname and port authorization; optional path constraints on intercepted TLS; secret-backed header injection; initial Unix-to-loopback bridge; Cladding as an independent consumer. Destination-IP restrictions belong to deployment egress controls. Interception-required rules fail closed; an explicit opaque tunnel leaves TLS verification to the client.
+**Original v1 decisions:** standalone Rust project; Hudsucker backend at that time; Tokio; TOML daemon and session policies; Unix control and per-session data sockets; one multi-proxy daemon process; ephemeral lease by default; opt-in persistent sessions; HTTPS-only destination requests through CONNECT; exact hostname and port authorization; optional path constraints on intercepted TLS; secret-backed header injection; initial Unix-to-loopback bridge; Cladding as an independent consumer. baffle/34 later made Rama the sole runtime. Destination-IP restrictions belong to deployment egress controls. Interception-required rules fail closed; an explicit opaque tunnel leaves TLS verification to the client.
 
 **Implementation questions:** retain the smallest Hudsucker patch set that preserves fail-closed interception and identity binding until upstream adds equivalent safeguards; confirm the exact per-session secret entitlement mechanism; settle first-release Linux runtime installation conventions; select a published Cargo package name because `baffle` is already occupied; decide whether v1 needs wildcard host patterns and `list` beyond the minimal `create`/`stop` protocol. None of these should relax interception safeguards or control-socket separation.

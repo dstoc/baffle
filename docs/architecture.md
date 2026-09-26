@@ -8,7 +8,7 @@ required.
 
 Baffle runs one Tokio daemon process. The daemon owns the control listener,
 session registry, CA signing key, secret store, shared CA handle, and runtime.
-Each proxy session has an independent policy, feature-selected backend,
+Each proxy session has an independent policy, Rama runtime,
 credential state, data socket, and counters.
 
 ## Components
@@ -18,9 +18,9 @@ credential state, data socket, and counters.
 | CLI and daemon entry point | `src/main.rs`, `src/cli.rs`, `src/daemon.rs` | Parse `daemon` and `ca export` commands, load configuration, start the control server, and handle Ctrl-C. |
 | Configuration | `src/config.rs` | Parse strict daemon and session TOML, normalize exact host rules, and reject invalid policy before provisioning. |
 | Control server and session manager | `src/control.rs` | Authenticate Unix peers, frame requests and responses, create/list/stop sessions, track leases, enforce limits, and remove sockets. |
-| Proxy runtime and bridge | `src/proxy_runtime.rs`, `src/proxy_runtime/hudsucker.rs`, `src/proxy_runtime/rama.rs` | Select one feature-gated backend runtime. Each adapter binds its private loopback TCP listener and Unix data socket, applies connection limits and timeouts, and supervises failures. |
-| Shared policy and backend adapters | `src/policy.rs`, `src/proxy_runtime/hudsucker.rs`, `src/proxy_runtime/rama.rs` | Apply exact destination, port, mode, canonical path, TLS identity, and header-injection rules through backend-specific request hooks. |
-| CA manager | `src/ca.rs` | Validate CA files, provide signing material to the selected backend, and export only the public certificate. |
+| Proxy runtime and bridge | `src/proxy_runtime.rs`, `src/proxy_runtime/rama.rs` | Expose the opaque session lifecycle to the daemon. Rama binds the loopback TCP listener and Unix data socket, applies connection limits and timeouts, and supervises failures. |
+| Shared policy and runtime adapter | `src/policy.rs`, `src/proxy_runtime/rama.rs` | Apply exact destination, port, mode, canonical path, TLS identity, and header-injection rules through backend-neutral request facts. |
+| CA manager | `src/ca.rs` | Validate CA files, retain daemon-owned signing material, provide cloned handles to the runtime, and export only the public certificate. |
 | Secret store | `src/secrets.rs` | Authorize symbolic secret names, validate private files, and keep values inside the owning session. |
 | Rust client | `crates/baffle-client` | Provide typed asynchronous `create`, `list`, and `stop` operations for consumers. |
 
@@ -33,9 +33,9 @@ The control flow is:
 3. Baffle reads one bounded TOML request and validates its protocol version,
    schema, and policy.
 4. For `create`, Baffle checks secret entitlements and files before it starts a
-   proxy. It reserves capacity, creates a session ID, pre-binds a loopback TCP
-   listener, binds a Unix data socket, and starts the feature-selected proxy
-   runtime plus its stream bridge.
+   proxy. It reserves capacity, creates a session ID, and starts the proxy
+   runtime. The runtime binds its loopback TCP listener and Unix data socket,
+   then starts the stream bridge.
 5. Baffle returns the session ID, data socket path, and persistence setting in
    one JSON response.
 
@@ -46,19 +46,18 @@ The request and response formats are specified in the
 
 The client's application connects to the session's Unix data socket and sends
 standard HTTP proxy traffic. The bridge streams bytes to the session's
-pre-bound `127.0.0.1` TCP listener. The selected adapter handles CONNECT,
-interception, and upstream traffic. Hudsucker delegates protocol handling to
-the vendored Hudsucker library. Rama parses CONNECT, inspects ClientHello, and
-serves intercepted HTTP through Rama middleware. The bridge does not buffer
-complete requests or responses.
+pre-bound `127.0.0.1` TCP listener. The Rama runtime handles CONNECT,
+interception, and upstream traffic. It inspects ClientHello and serves
+intercepted HTTP through Rama middleware. The bridge does not buffer complete
+requests or responses.
 
 Before forwarding, the policy handler checks the exact host and destination
 port. Only CONNECT can establish an outbound destination. It checks paths for
 each request carried inside a successfully intercepted TLS connection. It
 checks the CONNECT authority against TLS SNI and each decrypted request
 authority. Only after an intercepted request passes all checks can the handler
-add its configured headers. Both backends use the shared session policy. Each
-adapter maps its request and TLS context to that policy before forwarding.
+add its configured headers. The runtime maps its request and TLS context to
+backend-neutral facts before applying the shared session policy.
 
 For HTTPS, `tunnel` rules permit an opaque CONNECT tunnel only when no path
 restriction or credential injection requires inspection. `intercept` rules
@@ -69,8 +68,8 @@ an opaque fallback tunnel. A client must not force an opaque tunnel for a rule
 that needs inspection. Baffle treats proxy clients as untrusted and assumes
 allowlisted sites behave legitimately.
 
-The policy authorizes the exact hostname and port before the selected backend
-dials the destination. Baffle does not classify DNS answers, filter addresses,
+The policy authorizes the exact hostname and port before the runtime dials the
+destination. Baffle does not classify DNS answers, filter addresses,
 or pin a resolved address. An allowed hostname can resolve to a private,
 loopback, link-local, metadata, or other sensitive address. A valid certificate
 verifies the hostname's TLS identity; it does not make the address safe.
@@ -123,44 +122,28 @@ The session registry enforces `max_sessions`. The control server limits
 parallel creation with `max_provisioning_requests`. The bridge enforces
 `max_connections_per_session`, `connection_timeout_ms`, and `io_timeout_ms`.
 
-## Backend selection and adapters
+## Proxy runtime boundary
 
-Cargo requires exactly one backend feature. `backend-hudsucker` is the default;
-`backend-rama` is experimental. `src/proxy_runtime.rs` selects the adapter and
-exposes the same runtime interface to the daemon. `src/policy.rs` owns the
-shared host, port, SNI, authority, and path rules. `src/ca.rs` keeps the daemon
-CA as the source of truth and provides backend-specific signing material.
+`src/proxy_runtime.rs` is the daemon-facing runtime boundary. Its opaque
+`ProxyRuntime` handle covers session startup, readiness through successful
+return after binding, bound listener details, runtime exit events, cancellation,
+and bounded shutdown. The daemon and control protocol use Baffle-owned session,
+policy, CA, secret, and metrics types; they do not use Rama networking or
+request types.
 
-The Rama adapter accepts CONNECT only. It authorizes the CONNECT authority
-before dialing, keeps explicit tunnel rules opaque, and fails closed when an
-interception-required TLS handshake or authority check fails. It preserves the
-approved CONNECT hostname for upstream TLS verification and disables TLS key
-logging. It uses Rama's BoringSSL TLS backend. Both adapter files currently
-contain their own Unix bridge, connection limits, socket guard, and lifecycle
-supervisor.
+The private `src/proxy_runtime/rama.rs` module owns Rama-specific TLS and HTTP
+processing as well as the existing Unix-to-TCP bridge, accepted-socket
+configuration, and inode-safe socket cleanup. It accepts CONNECT only,
+authorizes the CONNECT authority before dialing, preserves explicit tunnel-only
+behavior, and fails closed when required TLS interception or authority checks
+fail. It verifies upstream TLS against the approved CONNECT hostname, disables
+TLS key logging, and enables `TCP_NODELAY` on accepted client sockets.
 
-## Hudsucker integration and local patch
-
-Baffle pins Hudsucker to version `0.25.0` in `Cargo.toml` and patches crates.io
-to the reviewed source in `vendor/hudsucker`. Baffle uses Hudsucker for HTTP
-proxying, CONNECT handling, TLS interception, certificate generation, and
-protocol upgrades.
-
-The local patch adds policy hooks for CONNECT and TLS decisions, validates
-CONNECT/TLS host identity, makes unsupported requested interception fail
-closed, and binds each intercepted HTTP authority to its CONNECT authority.
-The address-filtering TCP connector and resolver hooks were removed in
-baffle/25. Hudsucker's default outbound connectors resolve and dial the
-authorized hostname. The current Rustls client continues to validate upstream
-certificates and hostnames.
-
-The security rationale, exact upstream gaps, and patch inventory are recorded in
-[`vendor/hudsucker/PATCHES.md`](../vendor/hudsucker/PATCHES.md). Keep the
-vendor diff limited to those checks. Review the diff and rerun CONNECT, SNI,
-HTTP/2, and WebSocket tests before changing Hudsucker. Keep the
-fail-closed-interception and authority-binding changes until an upstream
-release provides those guarantees and Baffle tests verify them. See the patch
-inventory for the per-change replacement criteria.
+A future runtime can replace the private module by implementing the same opaque
+startup/handle/event/shutdown contract in this boundary. It must continue to use
+the shared policy facts and daemon-owned CA/secret values. No backend selector or
+Rama type belongs in daemon configuration or the control protocol. See the
+[runtime migration note](runtime-migration.md) for the migration summary.
 
 ## Failures and logging
 

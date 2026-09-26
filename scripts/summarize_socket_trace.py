@@ -17,7 +17,6 @@ SYSCALL = re.compile(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", required=True, choices=("hudsucker", "rama"))
     parser.add_argument("--trace", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cpu", default="unrecorded")
@@ -48,7 +47,7 @@ def main() -> None:
         )
         for syscall, row in sorted(stats.items()):
             output.write(
-                f"{args.backend},{args.cpu},http1_characterization,tcp_{syscall},"
+                f"rama,{args.cpu},http1_characterization,tcp_{syscall},"
                 f"{int(row[0])},{int(row[1])},{float(row[2]) * 1000:.3f},"
                 f"{int(row[3])},{float(row[4]) * 1000:.3f}\n"
             )

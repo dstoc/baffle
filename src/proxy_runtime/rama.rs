@@ -1,4 +1,4 @@
-//! Experimental Rama proxy runtime.
+//! Rama implementation of the proxy-runtime boundary.
 //!
 //! The backend keeps Baffle's private Unix socket and loopback TCP bridge. It
 //! accepts only CONNECT requests, authorizes the CONNECT authority before
@@ -51,7 +51,7 @@ use crate::{
 
 const MAX_CONNECT_HEADER_BYTES: usize = 16 * 1024;
 
-/// A Rama proxy session with a private Unix socket and loopback listener.
+/// An opaque proxy session with a private Unix socket and loopback listener.
 pub struct ProxyRuntime {
     runtime_id: RuntimeId,
     local_addr: SocketAddr,
@@ -66,7 +66,11 @@ pub struct ProxyRuntime {
 }
 
 impl ProxyRuntime {
-    /// Bind and start one proxy from a validated session configuration.
+    /// Bind and start one runtime from a validated session configuration.
+    ///
+    /// Success means both the private Unix socket and loopback TCP listener are
+    /// bound. The returned handle exposes the listener details and owns all
+    /// runtime tasks until bounded shutdown or cancellation on drop.
     pub async fn start(
         runtime_id: RuntimeId,
         session: SessionConfig,
@@ -201,7 +205,7 @@ impl ProxyRuntime {
         &self.runtime_id
     }
 
-    /// Return the pre-bound loopback listener address used by Rama.
+    /// Return the address of the bound loopback listener.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
@@ -210,7 +214,7 @@ impl ProxyRuntime {
         &self.socket_path
     }
 
-    /// Stop accepting traffic, drain connections, then abort after the grace period.
+    /// Cancel ingress, drain active work, then abort after the grace period.
     pub async fn shutdown(mut self, grace: Duration) {
         tracing::info!(
             event = "session_lifecycle",
@@ -449,7 +453,7 @@ async fn handle_client(
             .map_err(|error| ProxyRuntimeError::Run(error.to_string()))?;
     }
 
-    let (certificate, private_key) = ca.for_rama_proxy();
+    let (certificate, private_key) = ca.runtime_signing_material();
     // Preserve the inspected ClientHello's ALPN and TLS parameters for the
     // upstream connection. Bind the verification identity to the authorized
     // CONNECT target rather than any client-supplied alternate identity.

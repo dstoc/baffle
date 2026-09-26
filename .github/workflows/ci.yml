@@ -10,32 +10,19 @@ permissions:
 
 jobs:
   checks:
-    name: Format, lint, and test (${{ matrix.backend }})
+    name: Rama checks
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - backend: Hudsucker
-            feature: backend-hudsucker
-            rust_minimum: stable
-            native_packages: ''
-          - backend: Rama
-            feature: backend-rama
-            rust_minimum: '1.96'
-            native_packages: build-essential cmake libclang-dev
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
       - name: Install Rama native build tools
-        if: matrix.backend == 'Rama'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ${{ matrix.native_packages }}
+          sudo apt-get install --yes build-essential cmake libclang-dev
 
       - name: Install Rust components
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96
         with:
           components: clippy, rustfmt
 
@@ -49,48 +36,35 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --no-default-features --features ${{ matrix.feature }} -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run tests
         env:
           RUSTFLAGS: --cfg baffle_integration_test
-        run: cargo test --locked --no-default-features --features ${{ matrix.feature }}
+        run: cargo test --locked
 
       - name: Compile Rust examples
-        run: cargo check --locked --examples --no-default-features --features ${{ matrix.feature }}
+        run: cargo check --locked --examples
 
       - name: Run release tests
         env:
           RUSTFLAGS: --cfg baffle_integration_test
-        run: cargo test --locked --release --no-default-features --features ${{ matrix.feature }}
+        run: cargo test --locked --release
 
   namespace-integration:
-    name: Network namespace integration (${{ matrix.backend }})
+    name: Network namespace integration
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - backend: Hudsucker
-            feature: backend-hudsucker
-            rust_minimum: stable
-            native_packages: ''
-          - backend: Rama
-            feature: backend-rama
-            rust_minimum: '1.96'
-            native_packages: build-essential cmake libclang-dev
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
       - name: Install Rama native build tools
-        if: matrix.backend == 'Rama'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ${{ matrix.native_packages }}
+          sudo apt-get install --yes build-essential cmake libclang-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -101,7 +75,7 @@ jobs:
           sudo apt-get install --yes iproute2 openssl
 
       - name: Build Baffle daemon
-        run: cargo build --locked --bin baffle --no-default-features --features ${{ matrix.feature }}
+        run: cargo build --locked --bin baffle
 
       - name: Run privileged namespace integration
         run: sudo python3 scripts/test-network-namespace-isolation.py --binary target/debug/baffle
@@ -112,12 +86,12 @@ jobs:
     needs: [checks, namespace-integration]
     if: ${{ always() }}
     steps:
-      - name: Require all backend and namespace matrix entries to pass
+      - name: Require Rust and namespace checks to pass
         env:
           CHECKS_RESULT: ${{ needs.checks.result }}
           NAMESPACE_RESULT: ${{ needs.namespace-integration.result }}
         run: |
           if [ "$CHECKS_RESULT" != "success" ] || [ "$NAMESPACE_RESULT" != "success" ]; then
-            echo "Backend result was $CHECKS_RESULT and namespace result was $NAMESPACE_RESULT; both must succeed."
+            echo "Rust result was $CHECKS_RESULT and namespace result was $NAMESPACE_RESULT; both must succeed."
             exit 1
           fi

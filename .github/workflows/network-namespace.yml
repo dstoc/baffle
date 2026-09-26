@@ -8,32 +8,19 @@ permissions:
 
 jobs:
   namespace-integration:
-    name: Privileged network namespace integration (${{ matrix.backend }})
+    name: Privileged network namespace integration
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - backend: Hudsucker
-            feature: backend-hudsucker
-            rust_minimum: stable
-            native_packages: ''
-          - backend: Rama
-            feature: backend-rama
-            rust_minimum: '1.96'
-            native_packages: build-essential cmake libclang-dev
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96
 
       - name: Install Rama native build tools
-        if: matrix.backend == 'Rama'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ${{ matrix.native_packages }}
+          sudo apt-get install --yes build-essential cmake libclang-dev
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -44,7 +31,7 @@ jobs:
           sudo apt-get install --yes iproute2 openssl
 
       - name: Build Baffle daemon
-        run: cargo build --locked --bin baffle --no-default-features --features ${{ matrix.feature }}
+        run: cargo build --locked --bin baffle
 
       - name: Run privileged namespace integration
         run: sudo python3 scripts/test-network-namespace-isolation.py --binary target/debug/baffle

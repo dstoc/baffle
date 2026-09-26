@@ -68,8 +68,12 @@ The binary targets Linux x86-64 and links to the system GNU C library. To build
 from a checkout with Rust installed, run:
 
 ```sh
+sudo apt-get install build-essential cmake libclang-dev
 cargo install --path . --locked --bin baffle
 ```
+
+These native packages are needed only when compiling from source. A prebuilt
+release binary does not require them at runtime.
 
 ## Quick start
 
@@ -99,16 +103,16 @@ isolation described in the [deployment guide](docs/security-deployment.md).
 
 The daemon owns a private Unix control socket and a managed certificate
 authority. A trusted orchestrator creates a session over the control socket
-and gets the path to that session's Unix data socket. The selected backend
-handles proxy traffic. A bounded in-process bridge connects the data socket to
-the private, pre-bound loopback TCP listener used by that backend.
+and gets the path to that session's Unix data socket. The Rama runtime handles
+proxy traffic. A bounded in-process bridge connects the data socket to its
+private, pre-bound loopback TCP listener.
 
 The current implementation gives every session an immutable policy, a
-feature-selected backend runtime, credential state, and resource counters. Both
-backend selections authorize the configured hostname and port before dialing.
-Baffle does not filter or pin DNS answers. The session manager shares the Tokio
-runtime and CA material. See the [architecture guide](docs/architecture.md)
-for component details and data flows.
+Rama runtime, credential state, and resource counters. The runtime authorizes
+the configured hostname and port before dialing. Baffle does not filter or pin
+DNS answers. The session manager shares the Tokio runtime and CA material. See
+the [architecture guide](docs/architecture.md) for component details and data
+flows.
 
 The deployment must enforce the isolation described in [Security model and
 limitations](#security-model-and-limitations).
@@ -119,22 +123,15 @@ Build the workspace and run its checks:
 
 ```sh
 cargo build --locked
-cargo test --locked --no-default-features --features backend-hudsucker
-cargo test --locked --no-default-features --features backend-rama
+cargo test --locked
 cargo fmt --check
-cargo clippy --locked --all-targets --no-default-features --features backend-hudsucker -- -D warnings
-cargo clippy --locked --all-targets --no-default-features --features backend-rama -- -D warnings
-cargo check --locked --examples --no-default-features --features backend-hudsucker
+cargo clippy --locked --all-targets -- -D warnings
+cargo check --locked --examples
 ```
 
-The default feature is `backend-hudsucker`. The experimental Rama feature uses
-Rama 0.4.0 with `http-full` and `boring`; it requires Rust 1.96 or newer,
-`libclang`, CMake, and a C++ toolchain. See the Rama matrix entry in
-`.github/workflows/ci.yml` for its build prerequisites, the
-[Rama backend evaluation](docs/rama-prototype.md) for implementation and
-runtime/build observations, and the
-[backend comparison](docs/backend-comparison.md) for Baffle-authored code,
-security, and maintenance analysis.
+Rama is the only supported runtime. Source builds require Rust 1.96 or newer,
+`build-essential`, CMake, and `libclang-dev`. The release workflow installs
+these native build prerequisites before compiling the binary.
 
 GitHub Actions runs these checks, parses the checked-in TOML examples, and runs
 the privileged Linux network-namespace integration job. See
@@ -150,18 +147,20 @@ manual namespace test command.
 - [Security and deployment](docs/security-deployment.md): threat model, CA
   provisioning, secret storage, socket access, and network isolation.
 - [Architecture](docs/architecture.md): components, request flow, session
-  lifecycle, policy boundaries, failure behavior, and Hudsucker patches.
+  lifecycle, the runtime boundary, policy boundaries, and failure behavior.
 - [Rust client](docs/client.md): typed client API and direct protocol use.
 - [Cladding integration](docs/cladding-integration.md): a standalone
   `socat` bridge example and integration steps for other consumers.
 - [Integration testing](docs/integration-testing.md): automated coverage and
   the privileged namespace test.
-- [Backend benchmark report](docs/benchmarking.md): opt-in runtime, resource,
-  build, and binary measurements for Hudsucker and Rama.
+- [Benchmark report](docs/benchmarking.md): current Rama benchmark commands and
+  historical Hudsucker comparisons.
+- [Runtime migration note](docs/runtime-migration.md): removal of Hudsucker and
+  the seam for a future runtime implementation.
 - [Release review](docs/release-review.md): package, dependency, logging,
   error-handling, and credential-protection review.
-- [Authoritative proposal](docs/baffle-proposal.md): product goals, security
-  requirements, and the v1 specification.
+- [Original v1 proposal (historical)](docs/baffle-proposal.md): product goals,
+  security requirements, and the original implementation plan.
 
 ## Current release scope
 
