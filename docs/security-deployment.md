@@ -158,11 +158,6 @@ key and each secret file with owner-only permissions. A LaunchAgent or other
 service manager must run Baffle as the configured UID and preserve ownership
 of these paths. A system LaunchDaemon needs paths provisioned for its service
 account; do not assume that `/run` exists or that the process can write to it.
-macOS does not provide Linux network namespaces. Apply and validate macOS host
-or application sandbox controls separately when clients must not bypass the
-proxy or reach destinations outside the deployment policy; Baffle does not
-create that sandbox.
-
 macOS does not provide Linux network namespaces. Baffle does not create a macOS
 sandbox or enforce egress controls. Select and verify network and process
 isolation for the macOS deployment, and keep each workload limited to its
