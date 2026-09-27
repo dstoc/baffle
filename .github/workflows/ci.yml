@@ -131,6 +131,8 @@ jobs:
       - name: Run native daemon, policy, lease, and Unix proxy integration
         env:
           RUSTFLAGS: --cfg baffle_integration_test
+          RUST_BACKTRACE: "1"
+          CARGO_TERM_COLOR: never
         shell: bash
         run: |
           set -o pipefail
@@ -147,10 +149,7 @@ jobs:
 
           log_path = Path(os.environ["RUNNER_TEMP"]) / "macos-unix-integration.log"
           output = log_path.read_text(encoding="utf-8", errors="replace")
-          message = "Native integration output (last 100 lines):\n" + "\n".join(
-              output.splitlines()[-100:]
-          )
-          message = message[-12000:]
+          message = "Native integration output (last 3500 characters):\n" + output[-3500:]
           message = (
               message.replace("%", "%25")
               .replace("\r", "%0D")
