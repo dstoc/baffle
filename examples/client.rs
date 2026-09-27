@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use baffle_proxy::client::{Client, HostRule, SessionConfig};
+use std::path::PathBuf;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
@@ -12,7 +13,8 @@ use tokio::{
 #[tokio::main]
 async fn main() -> Result<()> {
     let control_socket = std::env::var_os("BAFFLE_CONTROL_SOCKET")
-        .unwrap_or_else(|| "/run/baffle/control.sock".into());
+        .map(PathBuf::from)
+        .unwrap_or_else(default_control_socket);
     let client = Client::new(control_socket);
     let host = std::env::var("BAFFLE_EXAMPLE_HOST").unwrap_or_else(|_| "example.com".to_owned());
     let port = std::env::var("BAFFLE_EXAMPLE_PORT")
@@ -56,4 +58,22 @@ async fn main() -> Result<()> {
     // the proxy session.
     session.close();
     Ok(())
+}
+
+fn default_control_socket() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                // SAFETY: geteuid has no preconditions and does not access memory.
+                let uid = unsafe { libc::geteuid() };
+                PathBuf::from(format!("/tmp/baffle-{uid}"))
+            })
+            .join("Library/Caches/Baffle/control.sock")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        PathBuf::from("/run/baffle/control.sock")
+    }
 }

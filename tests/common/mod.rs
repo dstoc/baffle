@@ -1,7 +1,5 @@
 //! Shared fixtures for backend-neutral, real-daemon integration tests.
 
-#![cfg(target_os = "linux")]
-
 use std::{
     fs,
     io::{Read, Write},
@@ -22,6 +20,8 @@ use tempfile::TempDir;
 pub struct DaemonProcess {
     child: Child,
     pub directory: TempDir,
+    _socket_directory: TempDir,
+    pub socket_dir: PathBuf,
     pub control_socket: PathBuf,
     pub secrets_dir: PathBuf,
     pub ca_certificate: PathBuf,
@@ -47,7 +47,9 @@ impl DaemonProcess {
     ) -> Self {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let control_socket = directory.path().join("run/control.sock");
-        let socket_dir = directory.path().join("proxies");
+        let socket_directory =
+            tempfile::tempdir_in("/tmp").expect("short socket directory should be created");
+        let socket_dir = socket_directory.path().join("proxies");
         let secrets_dir = directory.path().join("secrets");
         fs::create_dir(&secrets_dir).expect("secret directory should be created");
         fs::set_permissions(&secrets_dir, fs::Permissions::from_mode(0o700))
@@ -87,6 +89,8 @@ impl DaemonProcess {
         let mut daemon = Self {
             child,
             directory,
+            _socket_directory: socket_directory,
+            socket_dir,
             control_socket,
             secrets_dir,
             ca_certificate: certificate_path,
@@ -96,6 +100,18 @@ impl DaemonProcess {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if daemon.control_socket.exists() {
+                let socket_metadata = fs::symlink_metadata(&daemon.control_socket)
+                    .expect("control socket should have metadata");
+                assert_eq!(socket_metadata.uid(), trusted_uid);
+                assert_eq!(socket_metadata.permissions().mode() & 0o777, 0o600);
+                assert_eq!(
+                    fs::metadata(daemon.control_socket.parent().unwrap())
+                        .expect("control directory should have metadata")
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o700
+                );
                 return daemon;
             }
             if let Some(status) = daemon

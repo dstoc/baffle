@@ -1,7 +1,7 @@
 # Security and deployment guide
 
 This guide describes the security boundary that Baffle provides and the
-isolation that deployment must provide around it.
+additional controls that deployments can apply based on their threat models.
 
 ## HTTPS-only request model
 
@@ -76,18 +76,22 @@ an allowed HTTP request body, such as repository selection inside a GraphQL
 body.
 
 Baffle is not a host firewall and does not create a sandbox or network
-namespace. A sandboxed process that can use another network route can bypass
-its proxy policy. Baffle has no internal per-session TCP listeners. Protect
-the control socket and expose only each assigned data socket to its client.
-Use network namespaces or firewall rules when required to control direct
-client egress or Baffle's outbound destinations.
+namespace. A process that can use another network route can bypass its proxy
+policy. Baffle accepts client traffic directly on its Unix data sockets and
+has no internal per-session TCP listeners. Protect the control socket and
+expose only each assigned data socket to its client. When the threat model
+requires egress containment, use OS-level controls to restrict direct client
+egress and Baffle's outbound destinations.
 
-The control protocol authenticates by UID, not by process identity. Processes
-with the trusted UID are trusted. Baffle does not isolate mutually hostile
-processes that share an unrestricted host account. Use a dedicated service
-account and keep sandbox processes from accessing the control socket.
+The control protocol authorizes by UID, not by process identity. Linux provides
+Unix peer credentials through `SO_PEERCRED`. macOS provides the peer UID and GID
+through `getpeereid` and exposes the peer PID separately; Baffle uses the UID
+for authorization on both platforms. Processes with the trusted UID are
+trusted. Baffle does not isolate mutually hostile processes that share an
+unrestricted host account. Use a dedicated service account or user boundary
+and keep sandbox processes from accessing the control socket.
 
-## Recommended deployment layout
+## Linux service deployment
 
 Run the daemon as a dedicated Linux service account. Set
 `trusted_operator_uid` to that account's numeric UID. The account must own the
@@ -127,6 +131,38 @@ its path as a capability. Remove it from the workload when its lease ends.
 For ephemeral sessions, the trusted client must keep the control lease open
 while the workload runs and close it on normal completion, cancellation, or
 failure. Persistent sessions require an explicit `stop` operation.
+
+## macOS per-user deployment
+
+For a per-user daemon, keep runtime sockets under the daemon user's cache
+directory and persistent CA, session configuration, and secret files under
+Application Support. Baffle's CLI uses
+`$HOME/Library/Caches/Baffle/control.sock` as its default control path on
+macOS. The daemon's `control_socket` and `socket_dir` settings must use the
+same cache directory. TOML does not expand `~` or `$HOME`; configure absolute
+paths.
+
+Create private directories as the user that runs Baffle:
+
+```sh
+mkdir -p "$HOME/Library/Caches/Baffle/proxies"
+mkdir -p "$HOME/Library/Application Support/Baffle/secrets"
+chmod 0700 "$HOME/Library/Caches/Baffle"
+chmod 0700 "$HOME/Library/Caches/Baffle/proxies"
+chmod 0700 "$HOME/Library/Application Support/Baffle"
+chmod 0700 "$HOME/Library/Application Support/Baffle/secrets"
+```
+
+Set `trusted_operator_uid` to `id -u` for that user. Protect the CA private
+key and each secret file with owner-only permissions. A LaunchAgent or other
+service manager must run Baffle as the configured UID and preserve ownership
+of these paths. A system LaunchDaemon needs paths provisioned for its service
+account; do not assume that `/run` exists or that the process can write to it.
+macOS does not provide Linux network namespaces. Baffle does not create a macOS
+sandbox or enforce egress controls. Select and verify network and process
+isolation for the macOS deployment, and keep each workload limited to its
+assigned socket. The required macOS CI test validates socket permissions and
+proxy behavior; it does not validate a production sandbox or firewall policy.
 
 ## Explicit session reload
 
@@ -237,9 +273,10 @@ intercepted requests.
 ## Egress and client isolation
 
 Configure the client's network so the assigned Baffle proxy is its only
-permitted egress path. A proxy URL or environment variable alone does not
-enforce this. Use a network namespace or firewall when the deployment's
-outbound network policy requires one.
+permitted egress path when the threat model requires that boundary. A proxy URL
+or environment variable alone does not enforce it. Use a Linux network
+namespace or firewall on Linux, and validate the selected OS-level network
+controls on macOS.
 
 The repository includes a privileged Linux fixture that creates separate
 daemon and client network namespaces. It checks that Baffle creates no

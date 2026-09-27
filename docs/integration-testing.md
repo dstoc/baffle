@@ -6,8 +6,9 @@ real-daemon and direct-runtime coverage; adapter unit tests do not replace the
 daemon and Unix data-socket tests.
 
 `.github/workflows/ci.yml` runs formatting, Clippy, debug tests, release tests,
-examples, and the privileged network-namespace fixture. The required status
-check remains exactly `Format, lint, and test`. The manually dispatched
+examples, the privileged Linux network-namespace fixture, and native Apple
+Silicon macOS daemon integration. The required status check remains exactly
+`Format, lint, and test`. The manually dispatched
 `.github/workflows/network-namespace.yml` runs the same privileged fixture.
 
 | Area | Required coverage |
@@ -18,6 +19,13 @@ check remains exactly `Format, lint, and test`. The manually dispatched
 | Direct proxy runtime | `tests/proxy_runtime.rs` checks HTTPS-only admission, exact CONNECT host and port, CONNECT/SNI/HTTP authority binding, fragmented valid ClientHello handling, upstream TLS verification, required interception, explicit tunnel mode, HTTP/1.1 and HTTP/2 reused-connection policy, and resource limits. |
 | Shared policy and lifecycle | `src/policy.rs`, `src/control.rs`, `src/secrets.rs`, and `src/proxy_runtime/rama/tests/` test canonical paths, session ownership, secret handling, generated and named nested sockets, socket cleanup, cancellation, fatal runtime reporting, and bounded shutdown. |
 | Documentation examples | `tests/documentation.rs` parses checked-in TOML examples. `cargo check --examples` compiles all Rust examples. |
+
+The Apple Silicon job asserts that its runner reports `arm64`, builds Baffle
+with Rust 1.96 for `aarch64-apple-darwin`, runs the CLI and configuration tests,
+and runs the real-daemon Unix socket and HTTPS integration tests. These tests
+check native peer credentials, socket ownership and modes, policy denials,
+leased-session cleanup, and TLS traffic to a local origin. The job also runs
+for the exact Release Please commit before release assets are built.
 
 The runtime admits only CONNECT. Required path or credential interception
 fails closed when ClientHello parsing or TLS setup fails. Tests exercise a
@@ -71,6 +79,7 @@ cargo build --locked --bin baffle
 sudo python3 scripts/test-network-namespace-isolation.py --binary target/debug/baffle
 ```
 
-The namespace job verifies the topology created by the fixture. A deployment
-with a different namespace, mount, route, or socket setup still needs its own
-isolation validation.
+The namespace job verifies the Linux topology created by the fixture. macOS
+does not provide Linux network namespaces. Baffle does not create a sandbox on
+either platform, so deployments must validate their own client egress and
+socket access controls.

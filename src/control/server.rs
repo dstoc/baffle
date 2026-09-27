@@ -29,6 +29,7 @@ use crate::secrets::{SecretStore, SecretStoreError};
 use crate::{
     ca::ManagedCa,
     config::SessionConfig,
+    platform::normalize_system_path,
     proxy_runtime::ProxyRuntimeEvent,
     telemetry::{Metrics, MetricsSnapshot},
 };
@@ -360,6 +361,7 @@ fn ensure_private_directory(path: &Path, expected_uid: u32) -> Result<()> {
             .context("could not resolve working directory")?
             .join(path)
     };
+    let absolute_path = normalize_system_path(&absolute_path);
 
     let mut current = PathBuf::new();
     for component in absolute_path.components() {
@@ -667,6 +669,8 @@ async fn create_session_response(
         Err(SessionError::AtCapacity) => error_value(ERR_SESSION_LIMIT),
         Err(SessionError::Runtime(error)) => {
             warn!(error_class = error.class(), "failed to start proxy runtime");
+            #[cfg(baffle_integration_test)]
+            eprintln!("test-only proxy runtime startup error: {error:?}");
             error_value(ERR_INTERNAL)
         }
         Err(SessionError::ShuttingDown) => error_value(ERR_SHUTTING_DOWN),

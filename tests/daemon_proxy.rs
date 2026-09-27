@@ -1,9 +1,10 @@
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 mod common;
 
 use std::{
     fs,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -37,7 +38,10 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
         &mut ephemeral_lease,
         &tunnel_session(false, first_upstream.address.port()),
     );
-    assert_eq!(ephemeral_created["ok"], true);
+    assert_eq!(
+        ephemeral_created["ok"], true,
+        "ephemeral session creation failed: {ephemeral_created:?}"
+    );
     let ephemeral_socket = socket_from(&ephemeral_created);
 
     let named_session = tunnel_session(true, second_upstream.address.port()).replace(
@@ -45,15 +49,27 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
         "persistent = true\nsocket_name = \"cladding/github.sock\"",
     );
     let (_, persistent_created) = daemon.request(&named_session);
-    assert_eq!(persistent_created["ok"], true);
+    assert_eq!(
+        persistent_created["ok"], true,
+        "persistent session creation failed: {persistent_created:?}"
+    );
     let persistent_socket = socket_from(&persistent_created);
     assert_ne!(ephemeral_socket, persistent_socket);
     assert_eq!(
         persistent_socket,
-        daemon.directory.path().join("proxies/cladding/github.sock")
+        daemon.socket_dir.join("cladding/github.sock")
     );
     assert!(ephemeral_socket.exists());
     assert!(persistent_socket.exists());
+    let ephemeral_metadata = fs::symlink_metadata(&ephemeral_socket)
+        .expect("ephemeral data socket should have metadata");
+    assert_eq!(
+        ephemeral_metadata.uid(),
+        fs::symlink_metadata(&daemon.control_socket)
+            .expect("control socket should have metadata")
+            .uid()
+    );
+    assert_eq!(ephemeral_metadata.permissions().mode() & 0o777, 0o600);
 
     let mut first_tunnel = connect_tunnel(
         &ephemeral_socket,
@@ -198,7 +214,7 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
 #[tokio::test]
 async fn real_daemon_rejects_nested_socket_symlinks_and_path_traversal() {
     let daemon = DaemonProcess::start(4, &[]);
-    let proxies = daemon.directory.path().join("proxies");
+    let proxies = &daemon.socket_dir;
     let target = tempfile::tempdir().expect("symlink target should exist");
     let link = proxies.join("cladding");
     std::os::unix::fs::symlink(target.path(), &link)
@@ -221,7 +237,7 @@ async fn real_daemon_rejects_nested_socket_symlinks_and_path_traversal() {
     );
     let (_, response) = daemon.request(&traversal);
     assert_eq!(response["error"]["code"], "invalid_request");
-    assert!(!daemon.directory.path().join("outside.sock").exists());
+    assert!(!daemon.socket_dir.join("outside.sock").exists());
 }
 
 #[tokio::test]
@@ -252,7 +268,10 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
         &mut lease,
         &injected_session("localhost", upstream.address.port(), "api-token"),
     );
-    assert_eq!(created["ok"], true);
+    assert_eq!(
+        created["ok"], true,
+        "intercepted session creation failed: {created:?}"
+    );
     assert!(
         !String::from_utf8_lossy(&body).contains("daemon-only-token-42"),
         "session creation must not serialize a resolved credential"
@@ -398,17 +417,20 @@ async fn real_daemon_isolates_injected_credentials_across_http2_streams_and_sess
         second_upstream.address.port(),
         "session-two-token",
     ));
-    assert_eq!(first_created["ok"], true);
-    assert_eq!(second_created["ok"], true);
+    assert_eq!(
+        first_created["ok"], true,
+        "first session creation failed: {first_created:?}"
+    );
+    assert_eq!(
+        second_created["ok"], true,
+        "second session creation failed: {second_created:?}"
+    );
     let first_socket = socket_from(&first_created);
     let second_socket = socket_from(&second_created);
     assert_ne!(first_socket, second_socket);
     assert_eq!(
         first_socket,
-        daemon
-            .directory
-            .path()
-            .join("proxies/cladding/http2-one.sock")
+        daemon.socket_dir.join("cladding/http2-one.sock")
     );
     assert!(first_socket.exists());
     assert!(second_socket.exists());

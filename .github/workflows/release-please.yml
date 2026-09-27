@@ -54,6 +54,17 @@ jobs:
     permissions:
       contents: read
 
+  package-binaries:
+    needs: [release-please, validate-release]
+    if: ${{ needs.release-please.outputs.release_created == 'true' && github.ref == 'refs/heads/main' }}
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+      release_sha: ${{ needs.release-please.outputs.sha }}
+    permissions:
+      contents: write
+      pull-requests: read
+
   publish-crates:
     needs: [release-please, validate-release]
     if: ${{ needs.release-please.outputs.release_created == 'true' && github.ref == 'refs/heads/main' }}

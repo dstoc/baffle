@@ -11,7 +11,22 @@ use baffle_client::{
 };
 use clap::{ArgGroup, Args, Parser, Subcommand};
 
-const DEFAULT_CONTROL_SOCKET: &str = "/run/baffle/control.sock";
+#[cfg(not(target_os = "macos"))]
+fn default_control_socket() -> PathBuf {
+    PathBuf::from("/run/baffle/control.sock")
+}
+
+#[cfg(target_os = "macos")]
+fn default_control_socket() -> PathBuf {
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            // SAFETY: geteuid has no preconditions and does not access memory.
+            let uid = unsafe { libc::geteuid() };
+            PathBuf::from(format!("/tmp/baffle-{uid}"))
+        });
+    base.join("Library/Caches/Baffle/control.sock")
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -25,7 +40,7 @@ pub struct Cli {
         long,
         global = true,
         value_name = "PATH",
-        default_value = DEFAULT_CONTROL_SOCKET
+        default_value_os_t = default_control_socket()
     )]
     pub control_socket: PathBuf,
     #[command(subcommand)]
@@ -368,10 +383,7 @@ mod tests {
         match cli.command {
             Command::Daemon(args) => {
                 assert_eq!(args.config, PathBuf::from("/etc/baffle/daemon.toml"));
-                assert_eq!(
-                    cli.control_socket,
-                    PathBuf::from("/run/baffle/control.sock")
-                );
+                assert_eq!(cli.control_socket, super::default_control_socket());
             }
             _ => panic!("expected daemon command"),
         }

@@ -32,11 +32,13 @@ size; a client should still impose an implementation limit.
 
 ## Authentication and authorization
 
-Baffle checks the Linux `SO_PEERCRED` UID before it reads a request. The UID
-must equal `daemon.trusted_operator_uid`. Run the daemon as that UID. The
-control socket's parent and the session socket directory must be owned by that
-UID with mode `0700` or stricter. Baffle sets the control socket and each
-session data socket to mode `0600`.
+Baffle checks the peer UID before it reads a request. Linux supplies credentials
+through `SO_PEERCRED`; macOS supplies the UID and GID through `getpeereid`, with
+the kernel peer PID available separately. Baffle authorizes by UID only on both
+platforms. The UID must equal `daemon.trusted_operator_uid`. Run the daemon as
+that UID. The control socket's parent and the session socket directory must be
+owned by that UID with mode `0700` or stricter. Baffle sets the control socket
+and each session data socket to mode `0600`.
 
 The UID is the protocol's client identity. Baffle does not authenticate a
 process name or executable. The trusted UID is authorized to create sessions
@@ -158,9 +160,11 @@ connection can retain its prior permissions and credentials until it closes.
 ## Baffle command-line client
 
 The `baffle` binary exposes `create`, `list`, `stop`, and `reload` as top-level
-commands. It uses `/run/baffle/control.sock` unless `--control-socket PATH` is
-set. Run it as the daemon's `trusted_operator_uid`; the control socket is mode
-`0600` inside a mode-`0700` directory, and the daemon checks peer UID.
+commands. Linux builds use `/run/baffle/control.sock` by default. macOS builds
+use `$HOME/Library/Caches/Baffle/control.sock`. Set `--control-socket PATH` to
+select another path. Run it as the daemon's `trusted_operator_uid`; the control
+socket is mode `0600` inside a mode-`0700` directory, and the daemon checks peer
+UID.
 
 For inline mode, the client reads a local TOML request and submits it through
 the typed `baffle-client` API:

@@ -11,7 +11,9 @@ TOML document in each `create` request. Both schemas reject unknown fields.
 TOML values are parsed as written; Baffle does not expand environment
 variables. Use absolute file paths for service deployments.
 
-The checked-in examples are [`examples/daemon.toml`](../examples/daemon.toml),
+The checked-in [`examples/daemon.toml`](../examples/daemon.toml) uses Linux
+runtime paths. On macOS, use private paths under the daemon user's home
+directory, as shown below. The other checked-in examples are
 [`examples/daemon-file-only.toml`](../examples/daemon-file-only.toml),
 [`examples/session.toml`](../examples/session.toml),
 [`examples/session-credentials.toml`](../examples/session-credentials.toml),
@@ -48,11 +50,30 @@ directory = "/var/lib/baffle/secrets"
 allowed = ["example-api"]
 ```
 
+For a per-user macOS daemon, use a cache directory for sockets and an
+application-support directory for persistent CA and secret files. Replace the
+example home path and UID with the daemon user's values. TOML does not expand
+`~` or environment variables.
+
+```toml
+[daemon]
+control_socket = "/Users/alice/Library/Caches/Baffle/control.sock"
+socket_dir = "/Users/alice/Library/Caches/Baffle/proxies"
+trusted_operator_uid = 501
+
+[ca]
+certificate = "/Users/alice/Library/Application Support/Baffle/ca.pem"
+private_key = "/Users/alice/Library/Application Support/Baffle/ca-key.pem"
+
+[secrets]
+directory = "/Users/alice/Library/Application Support/Baffle/secrets"
+```
+
 | Field | Type | Default | Meaning and validation |
 | --- | --- | --- | --- |
 | `daemon.control_socket` | path | required | Private Unix control socket. Its parent directory must be owned by `trusted_operator_uid` and have mode `0700` or stricter. |
 | `daemon.socket_dir` | path | required | Directory for per-session Unix sockets. It must be owned by `trusted_operator_uid` and have mode `0700` or stricter. |
-| `daemon.trusted_operator_uid` | unsigned 32-bit integer | required | Linux UID accepted on the control socket and used as the owner for private runtime and secret files. Run Baffle as this UID. |
+| `daemon.trusted_operator_uid` | unsigned 32-bit integer | required | Unix UID accepted on the control socket and used as the owner for private runtime and secret files. Linux and macOS compare the kernel-reported peer UID. Run Baffle as this UID. |
 | `daemon.max_sessions` | positive integer | `64` | Maximum active sessions. Zero is invalid. |
 | `daemon.max_connections_per_session` | positive integer | `128` | Maximum concurrent client connections accepted by one session's Unix listener. Excess connections are closed. Zero is invalid. |
 | `daemon.shutdown_grace_seconds` | integer | `5` | Grace period for each session during shutdown. Zero requests immediate forced shutdown. |
@@ -106,7 +127,8 @@ access requirements.
 ## Command-line control
 
 The `baffle` executable provides top-level `create`, `list`, and `stop`
-commands. They use `/run/baffle/control.sock` by default. Set the global
+commands. Linux builds use `/run/baffle/control.sock` by default. macOS builds
+use `$HOME/Library/Caches/Baffle/control.sock` by default. Set the global
 `--control-socket PATH` option before or after a command to select another
 socket. This client default does not change the daemon's required
 `daemon.control_socket` setting.

@@ -51,7 +51,11 @@ fn daemon_starts_and_stops_on_interrupt() {
     let config_path = config_dir.path().join("daemon.toml");
     let (certificate_path, private_key_path) = write_test_ca(config_dir.path());
     let control_socket = config_dir.path().join("run/control.sock");
-    let socket_dir = config_dir.path().join("proxies");
+    let socket_directory =
+        tempfile::tempdir_in("/tmp").expect("short temporary socket directory should be created");
+    let socket_dir = socket_directory.path().join("proxies");
+    let daemon_log = config_dir.path().join("daemon.log");
+    let daemon_log_file = fs::File::create(&daemon_log).expect("daemon log should be created");
     let trusted_uid = fs::metadata(config_dir.path())
         .expect("temporary directory should have metadata")
         .uid();
@@ -82,11 +86,24 @@ directory = "{secrets}"
         .arg("--config")
         .arg(&config_path)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(daemon_log_file))
         .spawn()
         .expect("daemon process should start");
 
-    thread::sleep(Duration::from_millis(100));
+    let startup_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if control_socket.exists() {
+            break;
+        }
+        if let Some(status) = child.try_wait().expect("daemon status should be readable") {
+            panic!("daemon exited before binding its control socket: {status}");
+        }
+        assert!(
+            Instant::now() < startup_deadline,
+            "daemon should bind its control socket before the startup deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     assert!(
         child
             .try_wait()
@@ -114,7 +131,13 @@ directory = "{secrets}"
         .expect("control response should be read");
     let response: serde_json::Value =
         serde_json::from_slice(&response_body).expect("control response should be JSON");
-    assert_eq!(response["ok"], true);
+    assert_eq!(
+        response["ok"],
+        true,
+        "daemon rejected a valid create request: {response:?}; daemon log: {}",
+        fs::read_to_string(&daemon_log)
+            .unwrap_or_else(|error| format!("could not read log: {error}"))
+    );
     let proxy_socket = PathBuf::from(
         response["result"]["socket"]
             .as_str()

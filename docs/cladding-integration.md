@@ -7,8 +7,9 @@ socket, and owns the session lease for the workload's lifetime.
 
 ## Consumer integration steps
 
-1. Run Baffle as a dedicated Linux service account and make the control socket
-   available only to the trusted orchestrator.
+1. Run Baffle as a dedicated service user on Linux or as a per-user or
+   dedicated service on macOS. Make the control socket available only to the
+   trusted orchestrator.
 2. Create a policy for one workload. Use the `baffle-client` crate from Rust,
    or implement the [control protocol](control-protocol.md) in another
    language.
@@ -19,9 +20,9 @@ socket, and owns the session lease for the workload's lifetime.
    nested socket path is available when a stable name helps orchestration.
    Preserve mode `0600`; do not expose the control socket or the full socket
    directory.
-5. Ensure the sandbox cannot bypass the proxy for external network access.
-   Apply outbound network restrictions required by the deployment threat
-   model. See the [security and deployment guide](security-deployment.md).
+5. Apply network and process restrictions required by the deployment threat
+   model. Baffle does not create a sandbox or prevent direct egress. See the
+   [security and deployment guide](security-deployment.md).
 
 For a persistent session, close the create connection after the response and
 send an explicit `stop` operation during cleanup. Use `list` to inspect
@@ -43,15 +44,17 @@ not verify the protocol or certificate inside it.
 Start Baffle with a valid daemon configuration, then run:
 
 ```sh
-BAFFLE_CONTROL_SOCKET=/run/baffle/control.sock cargo run --locked --example client
+cargo run --locked --example client
 ```
 
-The example defaults to `/run/baffle/control.sock`, host `example.com`, and
-port 443. Set `BAFFLE_CONTROL_SOCKET` to use another control path. It needs a
-reachable upstream that accepts a TCP connection on the selected port. The
-example verifies only that CONNECT is established; it does not perform
-client-side TLS verification. CI compiles this example and parses the TOML
-files in `examples/`; it does not start a daemon or a live upstream server.
+The example defaults to `/run/baffle/control.sock` on Linux and
+`$HOME/Library/Caches/Baffle/control.sock` on macOS. Set
+`BAFFLE_CONTROL_SOCKET` to use another control path. It defaults to host
+`example.com` and port 443. It needs a reachable upstream that accepts a TCP
+connection on the selected port. The example verifies only that CONNECT is
+established; it does not perform client-side TLS verification. CI compiles this
+example and parses the TOML files in `examples/`; the dedicated platform tests
+start a daemon and local HTTPS upstream.
 
 ## Cladding `socat` example
 
@@ -60,10 +63,12 @@ creates an HTTPS tunnel session and starts `socat` as a TCP-to-Unix bridge.
 Run it as the trusted UID that Baffle expects on the control socket:
 
 ```sh
-BAFFLE_CONTROL_SOCKET=/run/baffle/control.sock \
 BAFFLE_BRIDGE_PORT=18080 \
 cargo run --locked --example cladding_socat -- github.com
 ```
+
+On macOS, the example uses the user's cache path by default. Set
+`BAFFLE_CONTROL_SOCKET` if the daemon uses another path.
 
 The final argument is the one exact hostname allowed by the session. Configure
 the existing Cladding proxy setting to use
