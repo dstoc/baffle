@@ -1,6 +1,6 @@
 [package]
 name = "baffle-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.96"
 description = "Typed asynchronous client for the Baffle Unix control protocol"
