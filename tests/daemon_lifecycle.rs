@@ -86,7 +86,20 @@ directory = "{secrets}"
         .spawn()
         .expect("daemon process should start");
 
-    thread::sleep(Duration::from_millis(100));
+    let startup_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if control_socket.exists() {
+            break;
+        }
+        if let Some(status) = child.try_wait().expect("daemon status should be readable") {
+            panic!("daemon exited before binding its control socket: {status}");
+        }
+        assert!(
+            Instant::now() < startup_deadline,
+            "daemon should bind its control socket before the startup deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     assert!(
         child
             .try_wait()
