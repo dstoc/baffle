@@ -670,7 +670,7 @@ async fn create_session_response(
         Err(SessionError::Runtime(error)) => {
             warn!(error_class = error.class(), "failed to start proxy runtime");
             #[cfg(baffle_integration_test)]
-            warn!(?error, "test-only proxy runtime startup details");
+            eprintln!("test-only proxy runtime startup error: {error:?}");
             error_value(ERR_INTERNAL)
         }
         Err(SessionError::ShuttingDown) => error_value(ERR_SHUTTING_DOWN),
