@@ -112,7 +112,7 @@ pub(super) struct UnixSocketGuard {
     path: PathBuf,
     parent: OwnedFd,
     name: CString,
-    device: u64,
+    device: libc::dev_t,
     inode: u64,
     _created_directories: CreatedDirectorySet,
 }
@@ -161,7 +161,7 @@ impl UnixSocketGuard {
             path: normalized,
             parent,
             name,
-            device: identity.st_dev as u64,
+            device: identity.st_dev,
             inode: identity.st_ino as u64,
             _created_directories: created_directories,
         };
@@ -219,14 +219,14 @@ impl Drop for UnixSocketGuard {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct DirectoryKey {
-    device: u64,
+    device: libc::dev_t,
     inode: u64,
 }
 
 struct DirectoryRecord {
     parent: OwnedFd,
     name: CString,
-    device: u64,
+    device: libc::dev_t,
     inode: u64,
     path: PathBuf,
     created_by_baffle: bool,
