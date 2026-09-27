@@ -20,8 +20,8 @@ workflows.
   It includes `LICENSE` in the release archive. The root `LICENSE` applies the
   MIT License to Baffle's original code, and `baffle-proxy` declares the `MIT`
   SPDX identifier. `scripts/generate-third-party-notices.py` uses the locked
-  Linux release dependency graph to collect each package's license and notice
-  files. The archive includes that bundle at
+  dependency graph for each release target to collect each package's license
+  and notice files. The archive includes that target-specific bundle at
   `share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt`; the release workflow
   checks that both target archives contain representative dependency notices.
   It aggregates both target archives and publishes one `SHA256SUMS` file. The
