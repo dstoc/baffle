@@ -38,7 +38,10 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
         &mut ephemeral_lease,
         &tunnel_session(false, first_upstream.address.port()),
     );
-    assert_eq!(ephemeral_created["ok"], true);
+    assert_eq!(
+        ephemeral_created["ok"], true,
+        "ephemeral session creation failed: {ephemeral_created:?}"
+    );
     let ephemeral_socket = socket_from(&ephemeral_created);
 
     let named_session = tunnel_session(true, second_upstream.address.port()).replace(
@@ -46,7 +49,10 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
         "persistent = true\nsocket_name = \"cladding/github.sock\"",
     );
     let (_, persistent_created) = daemon.request(&named_session);
-    assert_eq!(persistent_created["ok"], true);
+    assert_eq!(
+        persistent_created["ok"], true,
+        "persistent session creation failed: {persistent_created:?}"
+    );
     let persistent_socket = socket_from(&persistent_created);
     assert_ne!(ephemeral_socket, persistent_socket);
     assert_eq!(
@@ -262,7 +268,10 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
         &mut lease,
         &injected_session("localhost", upstream.address.port(), "api-token"),
     );
-    assert_eq!(created["ok"], true);
+    assert_eq!(
+        created["ok"], true,
+        "intercepted session creation failed: {created:?}"
+    );
     assert!(
         !String::from_utf8_lossy(&body).contains("daemon-only-token-42"),
         "session creation must not serialize a resolved credential"
@@ -408,8 +417,14 @@ async fn real_daemon_isolates_injected_credentials_across_http2_streams_and_sess
         second_upstream.address.port(),
         "session-two-token",
     ));
-    assert_eq!(first_created["ok"], true);
-    assert_eq!(second_created["ok"], true);
+    assert_eq!(
+        first_created["ok"], true,
+        "first session creation failed: {first_created:?}"
+    );
+    assert_eq!(
+        second_created["ok"], true,
+        "second session creation failed: {second_created:?}"
+    );
     let first_socket = socket_from(&first_created);
     let second_socket = socket_from(&second_created);
     assert_ne!(first_socket, second_socket);

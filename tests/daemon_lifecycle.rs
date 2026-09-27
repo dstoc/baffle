@@ -127,7 +127,10 @@ directory = "{secrets}"
         .expect("control response should be read");
     let response: serde_json::Value =
         serde_json::from_slice(&response_body).expect("control response should be JSON");
-    assert_eq!(response["ok"], true);
+    assert_eq!(
+        response["ok"], true,
+        "daemon rejected a valid create request: {response:?}"
+    );
     let proxy_socket = PathBuf::from(
         response["result"]["socket"]
             .as_str()
