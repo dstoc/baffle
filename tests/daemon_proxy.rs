@@ -57,7 +57,7 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
     assert_ne!(ephemeral_socket, persistent_socket);
     assert_eq!(
         persistent_socket,
-        daemon.directory.path().join("proxies/cladding/github.sock")
+        daemon.socket_dir.join("cladding/github.sock")
     );
     assert!(ephemeral_socket.exists());
     assert!(persistent_socket.exists());
@@ -214,7 +214,7 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
 #[tokio::test]
 async fn real_daemon_rejects_nested_socket_symlinks_and_path_traversal() {
     let daemon = DaemonProcess::start(4, &[]);
-    let proxies = daemon.directory.path().join("proxies");
+    let proxies = &daemon.socket_dir;
     let target = tempfile::tempdir().expect("symlink target should exist");
     let link = proxies.join("cladding");
     std::os::unix::fs::symlink(target.path(), &link)
@@ -237,7 +237,7 @@ async fn real_daemon_rejects_nested_socket_symlinks_and_path_traversal() {
     );
     let (_, response) = daemon.request(&traversal);
     assert_eq!(response["error"]["code"], "invalid_request");
-    assert!(!daemon.directory.path().join("outside.sock").exists());
+    assert!(!daemon.socket_dir.join("outside.sock").exists());
 }
 
 #[tokio::test]
@@ -430,10 +430,7 @@ async fn real_daemon_isolates_injected_credentials_across_http2_streams_and_sess
     assert_ne!(first_socket, second_socket);
     assert_eq!(
         first_socket,
-        daemon
-            .directory
-            .path()
-            .join("proxies/cladding/http2-one.sock")
+        daemon.socket_dir.join("cladding/http2-one.sock")
     );
     assert!(first_socket.exists());
     assert!(second_socket.exists());

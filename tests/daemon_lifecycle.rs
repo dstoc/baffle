@@ -51,7 +51,9 @@ fn daemon_starts_and_stops_on_interrupt() {
     let config_path = config_dir.path().join("daemon.toml");
     let (certificate_path, private_key_path) = write_test_ca(config_dir.path());
     let control_socket = config_dir.path().join("run/control.sock");
-    let socket_dir = config_dir.path().join("proxies");
+    let socket_directory =
+        tempfile::tempdir_in("/tmp").expect("short temporary socket directory should be created");
+    let socket_dir = socket_directory.path().join("proxies");
     let daemon_log = config_dir.path().join("daemon.log");
     let daemon_log_file = fs::File::create(&daemon_log).expect("daemon log should be created");
     let trusted_uid = fs::metadata(config_dir.path())
