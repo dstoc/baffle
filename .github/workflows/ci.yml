@@ -131,9 +131,21 @@ jobs:
       - name: Run native daemon, policy, lease, and Unix proxy integration
         env:
           RUSTFLAGS: --cfg baffle_integration_test
-        run: >-
-          cargo test --locked --target aarch64-apple-darwin --lib
-          --test daemon_lifecycle --test daemon_proxy
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --target aarch64-apple-darwin --lib \
+            --test daemon_lifecycle --test daemon_proxy -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/macos-unix-integration.log"
+
+      - name: Preserve failed native integration output
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-unix-integration-log
+          path: ${{ runner.temp }}/macos-unix-integration.log
+          if-no-files-found: ignore
+          retention-days: 3
 
   required-checks:
     name: Format, lint, and test
