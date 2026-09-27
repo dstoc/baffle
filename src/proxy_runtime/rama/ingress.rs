@@ -23,9 +23,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{ca::ManagedCa, telemetry::Metrics};
+use crate::{ca::ManagedCa, platform::normalize_system_path, telemetry::Metrics};
 
 use super::{ProxyGeneration, ProxyRuntimeError, connect};
+
+const UNIX_SOCKET_PATH_BYTES: usize =
+    std::mem::size_of::<libc::sockaddr_un>() - std::mem::offset_of!(libc::sockaddr_un, sun_path);
 
 pub(super) struct ProxySettings {
     pub(super) generations: watch::Receiver<Arc<ProxyGeneration>>,
@@ -121,7 +124,7 @@ impl UnixSocketGuard {
         } else {
             std::env::current_dir()?.join(path)
         };
-        if absolute.as_os_str().as_bytes().len() >= 108 {
+        if absolute.as_os_str().as_bytes().len() >= UNIX_SOCKET_PATH_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Unix socket path is too long",
@@ -143,11 +146,14 @@ impl UnixSocketGuard {
         }
         // Binding through the held directory FD makes the final component
         // directory-confined even if an ancestor is renamed during setup.
+        #[cfg(target_os = "linux")]
         let bind_path = PathBuf::from(format!(
             "/proc/self/fd/{}/{}",
             parent.as_raw_fd(),
             name.to_string_lossy()
         ));
+        #[cfg(not(target_os = "linux"))]
+        let bind_path = normalized.clone();
         let listener = UnixListener::bind(&bind_path)?;
         let identity = stat_at(parent.as_raw_fd(), &name)?
             .ok_or_else(|| io::Error::other("bound Unix socket disappeared"))?;
@@ -338,11 +344,12 @@ fn open_socket_parent_locked(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let absolute_parent = if parent_path.is_absolute() {
+    let logical_absolute_parent = if parent_path.is_absolute() {
         parent_path.to_path_buf()
     } else {
         std::env::current_dir()?.join(parent_path)
     };
+    let absolute_parent = normalize_system_path(&logical_absolute_parent);
     let root = unsafe {
         libc::open(
             c"/".as_ptr(),
@@ -426,8 +433,8 @@ fn open_socket_parent_locked(
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing socket name"))?;
-    let normalized = normalized.join(name);
-    Ok((current, normalized))
+    let logical_path = logical_absolute_parent.join(name);
+    Ok((current, logical_path))
 }
 
 fn stat_at(parent: libc::c_int, name: &CString) -> io::Result<Option<libc::stat>> {

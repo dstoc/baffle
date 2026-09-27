@@ -18,7 +18,7 @@ use baffle_client::{Client, HostRule, SessionConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-let client = Client::new("/run/baffle/control.sock");
+let client = Client::new("/path/to/baffle/control.sock");
 let policy = SessionConfig::new().with_rule(HostRule::tunnel("crates.io"));
 let session = client.create(policy).await?;
 
@@ -126,7 +126,7 @@ use baffle_client::Client;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-let client = Client::new("/run/baffle/control.sock");
+let client = Client::new("/path/to/baffle/control.sock");
 for session in client.list().await? {
     println!("{}: {:?}", session.id, session.state);
 }

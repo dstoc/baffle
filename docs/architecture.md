@@ -31,7 +31,9 @@ credential state, data socket, and counters.
 The control flow is:
 
 1. The trusted orchestrator connects to the private Unix control socket.
-2. Baffle checks the peer UID with Linux `SO_PEERCRED` before reading a frame.
+2. Baffle checks the kernel-reported peer UID before reading a frame. Linux
+   reports it through `SO_PEERCRED`; macOS reports it through its Unix peer
+   credential API. Both platforms use the same-UID control access rule.
 3. Baffle reads one bounded TOML request and validates its protocol version,
    schema, and policy.
 4. For `create`, Baffle checks secret entitlements and files before it starts a

@@ -1,6 +1,16 @@
-name: Linux release
+name: Binary release assets
 
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Exact Release Please tag to package
+        required: true
+        type: string
+      release_sha:
+        description: Exact Release Please commit for automatic releases
+        required: false
+        type: string
   push:
     tags: ["v*"]
   workflow_dispatch:
@@ -15,13 +25,16 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: linux-release-${{ inputs.tag || github.ref_name }}
+  group: baffle-binary-release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  linux-x86_64:
-    name: Package Linux x86-64 binary
+  verify-release:
+    name: Verify release tag and commit
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
     steps:
       - name: Resolve release tag
         id: release
@@ -31,8 +44,11 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+          if [[ -n "$INPUT_TAG" ]]; then
             tag="$INPUT_TAG"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "workflow_dispatch requires an explicit release tag." >&2
+            exit 1
           else
             tag="$REF_NAME"
           fi
@@ -44,17 +60,20 @@ jobs:
 
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Check out source
+      - name: Check out exact tag
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.release.outputs.tag }}
           fetch-depth: 0
 
-      - name: Verify Release Please tag and release
+      - name: Verify tag, published release, and merged Release Please PR
+        id: verify
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.release_sha }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           local_tag_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
           remote_tag_sha="$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" | awk '$2 ~ /\^\{\}$/ { peeled = $1 } END { if (peeled) print peeled; else if (NR > 0) print $1 }')"
@@ -62,65 +81,180 @@ jobs:
             echo "Tag '$RELEASE_TAG' is missing remotely or changed during checkout." >&2
             exit 1
           fi
+          if [[ -n "$EXPECTED_SHA" && "$local_tag_sha" != "$EXPECTED_SHA" ]]; then
+            echo "Tag '$RELEASE_TAG' resolves to $local_tag_sha; Release Please reported $EXPECTED_SHA." >&2
+            exit 1
+          fi
 
-          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft)"
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$REPOSITORY" --json tagName,isDraft)"
           release_tag="$(jq -r '.tagName' <<< "$release_json")"
           release_is_draft="$(jq -r '.isDraft' <<< "$release_json")"
-          if [[ "$release_tag" != "$RELEASE_TAG" || "$release_is_draft" != "false" ]]; then
+          if [[ "$release_tag" != "$RELEASE_TAG" || "$release_is_draft" != false ]]; then
             echo "Expected a published GitHub Release for '$RELEASE_TAG'." >&2
             exit 1
           fi
 
-          release_prs="$(gh api "repos/$GITHUB_REPOSITORY/commits/$local_tag_sha/pulls")"
+          release_prs="$(gh api "repos/$REPOSITORY/commits/$local_tag_sha/pulls")"
           if ! jq -e 'any(.[]; .merged_at != null and any(.labels[]; .name == "autorelease: tagged"))' <<< "$release_prs" >/dev/null; then
             echo "Tag '$RELEASE_TAG' does not point to a merged Release Please PR labeled 'autorelease: tagged'." >&2
             exit 1
           fi
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.96
+          printf 'sha=%s\n' "$local_tag_sha" >> "$GITHUB_OUTPUT"
 
-      - name: Install Rama native build tools
+  build-targets:
+    name: Build ${{ matrix.target }}
+    needs: verify-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-apple-darwin
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-release.outputs.tag }}
+          path: source
+
+      - name: Check out current packaging tools
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-tools
+
+      - name: Assert native runner architecture
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential cmake libclang-dev
+          case "$TARGET:$(uname -s):$(uname -m)" in
+            x86_64-unknown-linux-gnu:Linux:x86_64|aarch64-apple-darwin:Darwin:arm64) ;;
+            *) echo "Runner architecture does not match $TARGET: $(uname -s) $(uname -m)" >&2; exit 1 ;;
+          esac
+
+      - name: Install Linux native build tools
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        run: sudo apt-get update && sudo apt-get install --yes build-essential cmake libclang-dev
+
+      - name: Install Apple Silicon native build tools
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          brew install cmake llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust 1.96 and target
+        uses: dtolnay/rust-toolchain@1.96
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Build and package release assets
+      - name: Build, verify, and package
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-        run: ./scripts/package-release.sh "$RELEASE_TAG"
+          RELEASE_TAG: ${{ needs.verify-release.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+          BAFFLE_SOURCE_DIR: ${{ github.workspace }}/source
+        run: ./release-tools/scripts/package-release.sh "$RELEASE_TAG" "$TARGET" "$GITHUB_WORKSPACE/dist"
 
-      - name: Upload assets to the existing GitHub Release
+      - name: Upload target archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/baffle-proxy-${{ needs.verify-release.outputs.tag }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-assets:
+    name: Aggregate and publish release assets
+    needs: [verify-release, build-targets]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download both target archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify archives and write the combined checksums
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.verify-release.outputs.tag }}
+        run: |
+          linux="baffle-proxy-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+          macos="baffle-proxy-${RELEASE_TAG}-aarch64-apple-darwin.tar.gz"
+          actual="$(find dist -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' | sort)"
+          expected="$(printf '%s\n%s\n' "$linux" "$macos" | sort)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Expected exactly these two archives:\n$expected\nFound:\n$actual" >&2
+            exit 1
+          fi
+
+          for archive in "$linux" "$macos"; do
+            tar -tzf "dist/$archive" | grep -Fx './baffle' >/dev/null
+            tar -tzf "dist/$archive" | grep -Fx './LICENSE' >/dev/null
+            tar -tzf "dist/$archive" | grep -Fx './share/doc/baffle/README.md' >/dev/null
+            tar -tzf "dist/$archive" | grep -Fx './share/doc/baffle/docs/releasing.md' >/dev/null
+            tar -tzf "dist/$archive" | grep -Fx './share/doc/baffle/examples/daemon.toml' >/dev/null
+            tar -tzf "dist/$archive" | grep -Fx './share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt' >/dev/null
+          done
+
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          mkdir -p "$temp/linux" "$temp/macos"
+          tar -xzf "dist/$linux" -C "$temp/linux" ./baffle
+          tar -xzf "dist/$macos" -C "$temp/macos" ./baffle
+          linux_file="$(file "$temp/linux/baffle")"
+          macos_file="$(file "$temp/macos/baffle")"
+          [[ "$linux_file" == *"ELF 64-bit"* && "$linux_file" == *"x86-64"* ]] || { echo "Wrong Linux executable: $linux_file" >&2; exit 1; }
+          [[ "$macos_file" == *"Mach-O 64-bit"* && "$macos_file" == *"arm64"* ]] || { echo "Wrong macOS executable: $macos_file" >&2; exit 1; }
+
+          (cd dist && sha256sum "$linux" "$macos" > SHA256SUMS && sha256sum --check SHA256SUMS)
+
+      - name: Publish missing or verify identical assets
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-        shell: bash
+          RELEASE_TAG: ${{ needs.verify-release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          asset="baffle-proxy-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz"
-          existing_assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
-          archive_exists=false
-          checksums_exist=false
-          if grep -Fxq "$asset" <<< "$existing_assets"; then archive_exists=true; fi
-          if grep -Fxq "SHA256SUMS" <<< "$existing_assets"; then checksums_exist=true; fi
-
-          if [[ "$archive_exists" == true && "$checksums_exist" == true ]]; then
-            existing_dir="$(mktemp -d)"
-            trap 'rm -rf "$existing_dir"' EXIT
-            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-              --pattern "$asset" --pattern SHA256SUMS --dir "$existing_dir"
-            if ! cmp -s "dist/$asset" "$existing_dir/$asset" || \
-               ! cmp -s dist/SHA256SUMS "$existing_dir/SHA256SUMS"; then
-              echo "Release '$RELEASE_TAG' already has different assets; refusing to overwrite them." >&2
+          linux="baffle-proxy-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+          macos="baffle-proxy-${RELEASE_TAG}-aarch64-apple-darwin.tar.gz"
+          expected=("$linux" "$macos" "SHA256SUMS")
+          existing_assets="$(gh release view "$RELEASE_TAG" --repo "$REPOSITORY" --json assets --jq '.assets[].name')"
+          for name in $existing_assets; do
+            if [[ "$name" == "baffle-proxy-${RELEASE_TAG}-"*.tar.gz && "$name" != "$linux" && "$name" != "$macos" ]]; then
+              echo "Release '$RELEASE_TAG' contains an unexpected binary archive '$name'; refusing to publish an incomplete target set." >&2
               exit 1
             fi
-            echo "Release '$RELEASE_TAG' already has identical assets; nothing to upload."
-          elif [[ "$archive_exists" == true || "$checksums_exist" == true ]]; then
-            echo "Release '$RELEASE_TAG' has only part of the expected asset set; refusing to overwrite it." >&2
-            exit 1
+          done
+
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          missing=()
+          for name in "${expected[@]}"; do
+            if grep -Fxq "$name" <<< "$existing_assets"; then
+              gh release download "$RELEASE_TAG" --repo "$REPOSITORY" --pattern "$name" --dir "$temp"
+              if ! cmp -s "dist/$name" "$temp/$name"; then
+                echo "Release '$RELEASE_TAG' already has different '$name'; refusing to overwrite it." >&2
+                exit 1
+              fi
+            else
+              missing+=("dist/$name")
+            fi
+          done
+
+          if (( ${#missing[@]} == 0 )); then
+            echo "Release '$RELEASE_TAG' already has the identical two archives and combined checksum; nothing to upload."
           else
-            gh release upload "$RELEASE_TAG" "dist/$asset" dist/SHA256SUMS \
-              --repo "$GITHUB_REPOSITORY"
+            echo "Uploading only missing, verified release assets: ${missing[*]}"
+            gh release upload "$RELEASE_TAG" "${missing[@]}" --repo "$REPOSITORY"
           fi

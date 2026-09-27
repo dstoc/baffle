@@ -1,9 +1,10 @@
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 mod common;
 
 use std::{
     fs,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -54,6 +55,15 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
     );
     assert!(ephemeral_socket.exists());
     assert!(persistent_socket.exists());
+    let ephemeral_metadata = fs::symlink_metadata(&ephemeral_socket)
+        .expect("ephemeral data socket should have metadata");
+    assert_eq!(
+        ephemeral_metadata.uid(),
+        fs::symlink_metadata(&daemon.control_socket)
+            .expect("control socket should have metadata")
+            .uid()
+    );
+    assert_eq!(ephemeral_metadata.permissions().mode() & 0o777, 0o600);
 
     let mut first_tunnel = connect_tunnel(
         &ephemeral_socket,

@@ -29,6 +29,7 @@ use crate::secrets::{SecretStore, SecretStoreError};
 use crate::{
     ca::ManagedCa,
     config::SessionConfig,
+    platform::normalize_system_path,
     proxy_runtime::ProxyRuntimeEvent,
     telemetry::{Metrics, MetricsSnapshot},
 };
@@ -360,6 +361,7 @@ fn ensure_private_directory(path: &Path, expected_uid: u32) -> Result<()> {
             .context("could not resolve working directory")?
             .join(path)
     };
+    let absolute_path = normalize_system_path(&absolute_path);
 
     let mut current = PathBuf::new();
     for component in absolute_path.components() {

@@ -1,8 +1,10 @@
 # Baffle
 
-Baffle is a Linux daemon that creates independent, policy-controlled HTTPS
-proxies on demand. One daemon can manage multiple sessions. Each session has
-its own policy, Unix data socket, and lifecycle.
+Baffle is a policy-controlled HTTPS proxy daemon for Linux x86-64 and macOS
+Apple Silicon. One daemon can manage multiple sessions. Each session has its
+own policy, Unix data socket, and lifecycle. A required native Apple Silicon CI
+check builds Baffle and exercises the control and proxy sockets against a
+local HTTPS origin before changes can merge.
 
 Baffle allows traffic only to exact host and port rules. A rule can tunnel
 HTTPS without decrypting it or intercept HTTPS so Baffle can check paths and
@@ -51,27 +53,55 @@ arrange those separately.
 The executable is named `baffle`, the Cargo package is named `baffle-proxy`,
 and the client library is the separate workspace package `baffle-client`.
 
-Release Please maintains version and changelog pull requests. The Linux x86-64
-GNU binary is packaged separately after an owner dispatches the release workflow
-for the matching `v<version>` tag. Download and unpack the
-`baffle-proxy-v<version>-x86_64-unknown-linux-gnu.tar.gz` asset from the
-[GitHub releases](https://github.com/dstoc/baffle/releases), then install the
-binary in a directory on `PATH`. The archive includes Baffle's root `LICENSE`
-and the locked release dependencies' license and notice texts at
+Release Please maintains version and changelog pull requests. Each published
+release includes Linux x86-64 and Apple Silicon macOS archives. Download the
+[Linux x86-64 archive](https://github.com/dstoc/baffle/releases/latest), the
+[Apple Silicon macOS archive](https://github.com/dstoc/baffle/releases/latest), and
+the [combined checksum file](https://github.com/dstoc/baffle/releases/latest/download/SHA256SUMS)
+from the GitHub release page:
+
+- Linux: `baffle-proxy-v<version>-x86_64-unknown-linux-gnu.tar.gz`
+- macOS Apple Silicon: `baffle-proxy-v<version>-aarch64-apple-darwin.tar.gz`
+- Both archives: [`SHA256SUMS`](https://github.com/dstoc/baffle/releases/latest/download/SHA256SUMS)
+
+Each archive includes Baffle's root `LICENSE`, README, documentation, examples,
+and target-specific third-party license and notice texts at
 `share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt`.
 
 ```sh
-tar -xzf baffle-proxy-v<version>-x86_64-unknown-linux-gnu.tar.gz
+VERSION=vX.Y.Z
+tar -xzf "baffle-proxy-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 sudo install -m 0755 baffle /usr/local/bin/baffle
 baffle --help
 ```
 
-The binary targets Linux x86-64 and links to the system GNU C library. To build
-from a checkout with Rust installed, run:
+On macOS Apple Silicon, use the `aarch64-apple-darwin` archive and install it in
+your user-owned `PATH` directory:
+
+```sh
+VERSION=vX.Y.Z
+tar -xzf "baffle-proxy-${VERSION}-aarch64-apple-darwin.tar.gz"
+mkdir -p "$HOME/.local/bin"
+install -m 0755 baffle "$HOME/.local/bin/baffle"
+export PATH="$HOME/.local/bin:$PATH"
+baffle --help
+```
+
+The Linux binary links to the system GNU C library. To build from source on
+Linux, install these native dependencies first:
 
 ```sh
 sudo apt-get install build-essential cmake libclang-dev
 cargo install --path . --locked --bin baffle
+```
+
+On macOS, install CMake and LLVM with Homebrew, set `LIBCLANG_PATH` to
+`$(brew --prefix llvm)/lib`, then build with Rust 1.96 or newer:
+
+```sh
+brew install cmake llvm
+export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
+cargo build --locked --target aarch64-apple-darwin --bin baffle
 ```
 
 These native packages are needed only when compiling from source. A prebuilt
@@ -90,8 +120,9 @@ installation paths. Then start Baffle:
 baffle daemon --config /etc/baffle/daemon.toml
 ```
 
-The top-level control commands use `/run/baffle/control.sock` by default. Use
-`--control-socket PATH` to select another daemon control socket:
+On Linux, top-level control commands use `/run/baffle/control.sock` by default.
+On macOS, they use `$HOME/Library/Caches/Baffle/control.sock`. Use
+`--control-socket PATH` to select the path from the daemon configuration:
 
 ```sh
 # Inline mode: Baffle reads this file on the client and sends its TOML policy.
@@ -132,9 +163,10 @@ file. See [configuration](docs/configuration.md) and the
 The Rust `client` example creates an ephemeral session and sends CONNECT for
 `example.com:443`. It confirms the tunnel response and then closes the session;
 it does not send a TLS request. For a complete HTTPS request, use the
-[Cladding integration](docs/cladding-integration.md). The daemon's session
-socket directory defaults to `/run/baffle/proxies` in the example
-configuration. See
+[Cladding integration](docs/cladding-integration.md). The checked-in Linux
+example sets the daemon's session socket directory to `/run/baffle/proxies`.
+On macOS, use a private directory under
+`$HOME/Library/Caches/Baffle`. See
 [`examples/session.toml`](examples/session.toml) for a direct-protocol policy.
 
 Consumers can connect to the assigned Unix data socket directly. The
@@ -158,8 +190,9 @@ DNS answers. The session manager shares the Tokio runtime and CA material. See
 the [architecture guide](docs/architecture.md) for component details and data
 flows.
 
-The deployment must enforce the isolation described in [Security model and
-limitations](#security-model-and-limitations).
+Apply the controls described in [Security model and
+limitations](#security-model-and-limitations) when your deployment's threat
+model requires them.
 
 ## Development
 
@@ -177,8 +210,9 @@ Rama is the only supported runtime. Source builds require Rust 1.96 or newer,
 `build-essential`, CMake, and `libclang-dev`. The release workflow installs
 these native build prerequisites before compiling the binary.
 
-GitHub Actions runs these checks, parses the checked-in TOML examples, and runs
-the privileged Linux network-namespace integration job. See
+GitHub Actions runs these checks, parses the checked-in TOML examples, runs the
+privileged Linux network-namespace integration job, and tests the daemon's Unix
+control and proxy sockets on native Apple Silicon macOS. See
 [integration testing](docs/integration-testing.md) for test coverage and the
 manual namespace test command.
 
@@ -206,15 +240,16 @@ manual namespace test command.
 - [Original v1 proposal (historical)](docs/baffle-proposal.md): product goals,
   security requirements, and the original implementation plan.
 
-## Current release scope
+## Platform scope
 
-Baffle runs on Linux. It is a forward proxy. It does not install its
-CA into system trust stores, configure client proxy settings, or create the
-network sandbox. It has no internal per-session TCP listeners. The deployment
-must still prevent unauthorized direct client egress and control Baffle's
-outbound network access when its threat model requires those restrictions.
-Baffle does not change Cladding; a consumer integrates through the public
-control protocol or `baffle-client` crate.
+Baffle runs on Linux x86-64 and macOS Apple Silicon. It is a forward proxy. It
+does not install its CA into system trust stores, configure client proxy
+settings, or create a sandbox. Linux network namespaces are not available on
+macOS; deployments on either platform must apply their own client egress and
+outbound network controls when the threat model requires them. Baffle accepts
+client traffic directly on Unix data sockets and has no internal per-session
+TCP listeners. A consumer integrates through the public control protocol or
+`baffle-client` crate.
 
 ## License
 

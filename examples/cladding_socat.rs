@@ -1,5 +1,6 @@
 //! Run a Baffle session and expose it through Cladding's local socat bridge.
 
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -16,8 +17,9 @@ impl Drop for SocatBridge {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let control_socket = std::env::var("BAFFLE_CONTROL_SOCKET")
-        .unwrap_or_else(|_| "/run/baffle/control.sock".to_owned());
+    let control_socket = std::env::var_os("BAFFLE_CONTROL_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_control_socket);
     let allowed_host = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "github.com".to_owned());
@@ -55,4 +57,22 @@ async fn main() -> Result<()> {
     drop(_bridge);
     session.close();
     Ok(())
+}
+
+fn default_control_socket() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                // SAFETY: geteuid has no preconditions and does not access memory.
+                let uid = unsafe { libc::geteuid() };
+                PathBuf::from(format!("/tmp/baffle-{uid}"))
+            })
+            .join("Library/Caches/Baffle/control.sock")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        PathBuf::from("/run/baffle/control.sock")
+    }
 }

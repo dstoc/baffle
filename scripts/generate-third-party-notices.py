@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build release notices from the locked Linux release dependency graph."""
+"""Build release notices from a locked target's dependency graph."""
 
 import argparse
 import hashlib
@@ -8,8 +8,7 @@ import subprocess
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-TARGET = "x86_64-unknown-linux-gnu"
+SUPPORTED_TARGETS = {"x86_64-unknown-linux-gnu", "aarch64-apple-darwin"}
 LEGAL_FILE_PREFIXES = (
     "license",
     "licence",
@@ -20,17 +19,17 @@ LEGAL_FILE_PREFIXES = (
 )
 
 
-def run_cargo(*args):
+def run_cargo(root, *args):
     return subprocess.run(
         ["cargo", *args],
-        cwd=ROOT,
+        cwd=root,
         check=True,
         stdout=subprocess.PIPE,
         text=True,
     ).stdout
 
 
-def pinned_upstream_files(package):
+def pinned_upstream_files(package, root):
     """Return license files omitted from a crate archive, with pinned sources."""
     name = package["name"]
     version = package["version"]
@@ -41,7 +40,7 @@ def pinned_upstream_files(package):
         vcs_path = "alloc-stdlib"
         files = [
             (
-                ROOT / "licenses/third-party-upstream/alloc-stdlib-LICENSE.txt",
+                root / "licenses/third-party-upstream/alloc-stdlib-LICENSE.txt",
                 f"{repository}/blob/{revision}/LICENSE",
                 "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
             )
@@ -52,12 +51,12 @@ def pinned_upstream_files(package):
         vcs_path = "impl"
         files = [
             (
-                ROOT / "licenses/third-party-upstream/asn1-rs-LICENSE-APACHE.txt",
+                root / "licenses/third-party-upstream/asn1-rs-LICENSE-APACHE.txt",
                 f"{repository}/blob/{revision}/LICENSE-APACHE",
                 "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
             ),
             (
-                ROOT / "licenses/third-party-upstream/asn1-rs-LICENSE-MIT.txt",
+                root / "licenses/third-party-upstream/asn1-rs-LICENSE-MIT.txt",
                 f"{repository}/blob/{revision}/LICENSE-MIT",
                 "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513",
             ),
@@ -68,12 +67,12 @@ def pinned_upstream_files(package):
         vcs_path = name
         files = [
             (
-                ROOT / "licenses/third-party-upstream/rama-LICENSE-APACHE.txt",
+                root / "licenses/third-party-upstream/rama-LICENSE-APACHE.txt",
                 f"{repository}/blob/{revision}/LICENSE-APACHE",
                 "95bd3988beee069fa2848f648dab43cc6e0b2add2ad6bcb17360caf749802bcc",
             ),
             (
-                ROOT / "licenses/third-party-upstream/rama-LICENSE-MIT.txt",
+                root / "licenses/third-party-upstream/rama-LICENSE-MIT.txt",
                 f"{repository}/blob/{revision}/LICENSE-MIT",
                 "1fa7e078de3f9165a1c6742359307711e91652f035dc37a32376ca0023483e63",
             ),
@@ -127,17 +126,18 @@ def legal_files(package):
     return sorted(paths, key=lambda path: path.as_posix())
 
 
-def release_dependencies():
-    metadata = json.loads(run_cargo("metadata", "--locked", "--format-version", "1"))
+def release_dependencies(target, root):
+    metadata = json.loads(run_cargo(root, "metadata", "--locked", "--format-version", "1"))
     by_name_version = {}
     for package in metadata["packages"]:
         by_name_version.setdefault((package["name"], package["version"]), []).append(package)
 
     tree = run_cargo(
+        root,
         "tree",
         "--locked",
         "--target",
-        TARGET,
+        target,
         "--edges",
         "normal,build",
         "--package",
@@ -167,12 +167,12 @@ def release_dependencies():
     return sorted(selected.values(), key=lambda p: (p["name"].casefold(), p["version"]))
 
 
-def write_bundle(output_path, packages):
+def write_bundle(output_path, packages, target, root):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("wb") as output:
         output.write(
             (
-                "Third-party notices for the Baffle x86_64-unknown-linux-gnu release\n"
+                f"Third-party notices for the Baffle {target} release\n"
                 "\n"
                 "This file covers every non-workspace package in baffle-proxy's locked "
                 "normal and build dependency graph for this target. Cargo resolves the "
@@ -195,7 +195,7 @@ def write_bundle(output_path, packages):
                     for path in shipped_files
                 ]
             else:
-                upstream_files = pinned_upstream_files(package)
+                upstream_files = pinned_upstream_files(package, root)
                 if not upstream_files:
                     raise RuntimeError(
                         f"No license or notice file found for {package_name} {version} "
@@ -229,12 +229,17 @@ def write_bundle(output_path, packages):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", required=True, choices=sorted(SUPPORTED_TARGETS))
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--source-dir", type=Path, default=Path(__file__).resolve().parents[1]
+    )
     args = parser.parse_args()
 
-    packages = release_dependencies()
-    output_path = args.output if args.output.is_absolute() else ROOT / args.output
-    write_bundle(output_path, packages)
+    root = args.source_dir.resolve()
+    packages = release_dependencies(args.target, root)
+    output_path = args.output if args.output.is_absolute() else root / args.output
+    write_bundle(output_path, packages, args.target, root)
     print(f"Wrote notices for {len(packages)} locked release dependencies to {output_path}")
 
 

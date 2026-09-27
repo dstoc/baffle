@@ -1,6 +1,6 @@
 # Release review record
 
-Reviewed on 2026-09-26 against the repository and current GitHub Actions
+Reviewed on 2026-09-28 against the repository and current GitHub Actions
 workflows.
 
 ## Package and CI
@@ -10,26 +10,30 @@ workflows.
 - `Cargo.lock` is committed. CI and the release workflow build with
   `--locked` so a build cannot silently change dependency resolution.
 - Release Please creates the GitHub release and `v<version>` tag after its
-  reviewed release pull request is merged. The manually dispatched Linux
-  release workflow accepts only a matching, published Release Please tag. It
-  builds the binary for `x86_64-unknown-linux-gnu`, packages the binary and
-  documentation, and uploads a SHA-256 checksum to that existing release.
-  Before packaging, it requires a non-empty top-level `LICENSE` file and Cargo
-  license metadata.
+  reviewed release pull request is merged. The same Release Please run calls
+  the reusable binary workflow after exact-SHA validation. That workflow also
+  retains manual dispatch and human tag-push recovery paths, and accepts only a
+  matching, published Release Please tag. It builds `x86_64-unknown-linux-gnu`
+  on Linux x86-64 and `aarch64-apple-darwin` on native Apple Silicon macOS.
+  Before packaging, it requires a non-empty top-level `LICENSE` file, Cargo
+  license metadata, matching version, and matching executable architecture.
   It includes `LICENSE` in the release archive. The root `LICENSE` applies the
   MIT License to Baffle's original code, and `baffle-proxy` declares the `MIT`
   SPDX identifier. `scripts/generate-third-party-notices.py` uses the locked
   Linux release dependency graph to collect each package's license and notice
   files. The archive includes that bundle at
   `share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt`; the release workflow
-  checks that it contains representative dependency notices. The script uses
+  checks that both target archives contain representative dependency notices.
+  It aggregates both target archives and publishes one `SHA256SUMS` file. The
+  script uses
   pinned upstream license files when a Cargo crate archive omits them. It
   checks the crate's VCS revision and each bundled file's SHA-256 hash.
   Third-party dependencies retain their own license terms. The archive also
   includes the CDLA-Permissive-2.0 agreement for the Mozilla root certificate
   data from `webpki-root-certs`.
-- The package targets Linux x86-64 with the GNU C library. Other Linux
-  architectures and static linking are not included in this release job.
+- The package targets are Linux x86-64 with the GNU C library and Apple
+  Silicon macOS. Other Linux architectures, Intel macOS, and static linking
+  are not included in this release job.
 
 ## Dependency and runtime review
 
@@ -67,13 +71,14 @@ workflows.
 
 ## Deployment security gate
 
-- The Baffle policy is not a firewall. Sandboxed clients must have no direct
-  path to external networks.
+- The Baffle policy is not a firewall. When the threat model requires egress
+  containment, clients must not have a direct path to external networks.
 - baffle/40 removed the internal Rama TCP listeners. Use network namespaces
-  or firewalls for outbound destination restrictions and client egress policy,
-  not to hide an internal proxy port.
-- `.github/workflows/ci.yml` runs the privileged Linux namespace fixture on
-  pull requests and main-branch pushes. The separate
+  or firewalls on Linux for egress policy. macOS deployments must select and
+  validate their own OS-level network controls.
+- `.github/workflows/ci.yml` runs the privileged Linux namespace fixture and
+  native Apple Silicon Unix-socket tests on pull requests and main-branch
+  pushes. The separate
   `.github/workflows/network-namespace.yml` workflow runs the same fixture only
   when manually dispatched. Operators must validate their actual deployment
   topology as well.

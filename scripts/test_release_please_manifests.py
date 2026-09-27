@@ -26,6 +26,55 @@ class ReleasePleaseManifestTests(unittest.TestCase):
             "python3 -m unittest scripts.test_release_please_manifests", workflow
         )
 
+    def test_release_creation_calls_reusable_binary_packaging_at_exact_sha(self):
+        release_please = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
+        self.assertIn("package-binaries:", release_please)
+        self.assertIn("needs: [release-please, validate-release]", release_please)
+        self.assertIn(
+            "needs.release-please.outputs.release_created == 'true'",
+            release_please,
+        )
+        self.assertIn("uses: ./.github/workflows/release.yml", release_please)
+        self.assertIn("tag: ${{ needs.release-please.outputs.tag_name }}", release_please)
+        self.assertIn("release_sha: ${{ needs.release-please.outputs.sha }}", release_please)
+        self.assertIn("contents: write", release_please)
+        self.assertIn("pull-requests: read", release_please)
+
+        self.assertNotIn(
+            "needs: [release-please, validate-release, package-binaries]",
+            release_please,
+            "crates.io publication must not wait for binary packaging",
+        )
+
+    def test_reusable_binary_workflow_builds_only_the_two_native_targets(self):
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn("workflow_call:", workflow)
+        self.assertIn("tag:\n        description: Exact Release Please tag to package\n        required: true", workflow)
+        self.assertIn('push:\n    tags: ["v*"]', workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn('if [[ -n "$INPUT_TAG" ]]', workflow)
+        self.assertIn("x86_64-unknown-linux-gnu", workflow)
+        self.assertIn("aarch64-apple-darwin", workflow)
+        self.assertNotIn("x86_64-apple-darwin", workflow)
+        self.assertNotIn("macos-13", workflow)
+        self.assertIn("EXPECTED_SHA: ${{ inputs.release_sha }}", workflow)
+        self.assertIn("ref: ${{ github.workflow_sha }}", workflow)
+        self.assertIn("path: source", workflow)
+        self.assertIn("BAFFLE_SOURCE_DIR: ${{ github.workspace }}/source", workflow)
+        self.assertIn("actions/download-artifact@v4", workflow)
+        self.assertIn("SHA256SUMS", workflow)
+        self.assertIn("gh release upload", workflow)
+        self.assertNotIn("--clobber", workflow)
+
+    def test_native_macos_checks_gate_the_required_ci_status(self):
+        workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("runs-on: macos-15", workflow)
+        self.assertIn('test "$(uname -m)" = arm64', workflow)
+        self.assertIn("RUSTFLAGS: --cfg baffle_integration_test", workflow)
+        self.assertIn("--test daemon_proxy", workflow)
+        self.assertIn("needs: [checks, namespace-integration, macos-unix-integration]", workflow)
+        self.assertIn("MACOS_RESULT: ${{ needs.macos-unix-integration.result }}", workflow)
+
     def test_workspace_versions_and_local_client_dependency_stay_in_lockstep(self):
         root = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
         client = tomllib.loads((REPO_ROOT / "crates/baffle-client/Cargo.toml").read_text())

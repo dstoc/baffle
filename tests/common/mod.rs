@@ -1,7 +1,5 @@
 //! Shared fixtures for backend-neutral, real-daemon integration tests.
 
-#![cfg(target_os = "linux")]
-
 use std::{
     fs,
     io::{Read, Write},
@@ -96,6 +94,18 @@ impl DaemonProcess {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if daemon.control_socket.exists() {
+                let socket_metadata = fs::symlink_metadata(&daemon.control_socket)
+                    .expect("control socket should have metadata");
+                assert_eq!(socket_metadata.uid(), trusted_uid);
+                assert_eq!(socket_metadata.permissions().mode() & 0o777, 0o600);
+                assert_eq!(
+                    fs::metadata(daemon.control_socket.parent().unwrap())
+                        .expect("control directory should have metadata")
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o700
+                );
                 return daemon;
             }
             if let Some(status) = daemon
