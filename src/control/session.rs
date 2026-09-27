@@ -69,9 +69,9 @@ impl SessionManager {
         config_source: Option<String>,
     ) -> std::result::Result<SessionInfo, SessionError> {
         let secrets = Arc::new(secrets);
-        let id = new_session_id().map_err(|error| {
+        let id = new_session_id().map_err(|_error| {
             #[cfg(baffle_integration_test)]
-            eprintln!("test-only session ID generation error: {error}");
+            eprintln!("test-only session ID generation error: {_error}");
             SessionError::Internal
         })?;
         let persistent = session.persistent;
@@ -96,9 +96,9 @@ impl SessionManager {
             .unwrap_or_else(|| format!("{id}.sock"));
         let socket_path = match absolute_socket_path(&self.socket_dir.join(socket_name)) {
             Ok(path) => path,
-            Err(error) => {
+            Err(_error) => {
                 #[cfg(baffle_integration_test)]
-                eprintln!("test-only session socket path resolution error: {error}");
+                eprintln!("test-only session socket path resolution error: {_error}");
                 self.registry.lock().await.provisioning.remove(&id);
                 return Err(SessionError::Internal);
             }
