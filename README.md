@@ -114,7 +114,9 @@ instructions.
 Create the daemon user, runtime directories, CA, and daemon configuration as
 described in the [security and deployment guide](docs/security-deployment.md).
 Edit [`examples/daemon.toml`](examples/daemon.toml) for the daemon UID and your
-installation paths. Then start Baffle:
+installation paths. The command below uses the Linux paths from that example.
+For macOS, use per-user configuration and runtime paths as described in the
+[security and deployment guide](docs/security-deployment.md).
 
 ```sh
 baffle daemon --config /etc/baffle/daemon.toml
@@ -207,8 +209,10 @@ cargo check --locked --examples
 ```
 
 Rama is the only supported runtime. Source builds require Rust 1.96 or newer,
-`build-essential`, CMake, and `libclang-dev`. The release workflow installs
-these native build prerequisites before compiling the binary.
+CMake, Clang, and libclang. Linux builds use `build-essential` and
+`libclang-dev`. macOS builds use Homebrew `cmake` and `llvm`, with
+`LIBCLANG_PATH` set to `$(brew --prefix llvm)/lib`. The release workflow
+installs these platform-specific dependencies before compiling each binary.
 
 GitHub Actions runs these checks, parses the checked-in TOML examples, runs the
 privileged Linux network-namespace integration job, and tests the daemon's Unix
