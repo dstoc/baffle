@@ -134,9 +134,35 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          set +e
           cargo test --locked --target aarch64-apple-darwin --lib \
             --test daemon_lifecycle --test daemon_proxy -- --nocapture \
             2>&1 | tee "$RUNNER_TEMP/macos-unix-integration.log"
+          test_status=$?
+          set -e
+          if (( test_status != 0 )); then
+            python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          log_path = Path(os.environ["RUNNER_TEMP"]) / "macos-unix-integration.log"
+          output = log_path.read_text(encoding="utf-8", errors="replace")
+          message = "Native integration output (last 100 lines):\n" + "\n".join(
+              output.splitlines()[-100:]
+          )
+          message = message[-12000:]
+          message = (
+              message.replace("%", "%25")
+              .replace("\r", "%0D")
+              .replace("\n", "%0A")
+          )
+          print(
+              "::error file=.github/workflows/ci.yml,line=140,title=Native macOS integration failure::"
+              + message
+          )
+          PY
+          fi
+          exit "$test_status"
 
       - name: Preserve failed native integration output
         if: ${{ failure() }}
