@@ -184,40 +184,16 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Check out current release tools
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-tools
+
       - name: Verify archives and write the combined checksums
-        shell: bash
         env:
           RELEASE_TAG: ${{ needs.verify-release.outputs.tag }}
-        run: |
-          linux="baffle-proxy-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz"
-          macos="baffle-proxy-${RELEASE_TAG}-aarch64-apple-darwin.tar.gz"
-          actual="$(find dist -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' | sort)"
-          expected="$(printf '%s\n%s\n' "$linux" "$macos" | sort)"
-          if [[ "$actual" != "$expected" ]]; then
-            echo "Expected exactly these two archives:\n$expected\nFound:\n$actual" >&2
-            exit 1
-          fi
-
-          for archive in "$linux" "$macos"; do
-            tar -tzf "dist/$archive" | grep -Fx './baffle' >/dev/null
-            tar -tzf "dist/$archive" | grep -Fx './LICENSE' >/dev/null
-            tar -tzf "dist/$archive" | grep -Fx './share/doc/baffle/README.md' >/dev/null
-            tar -tzf "dist/$archive" | grep -Fx './share/doc/baffle/docs/releasing.md' >/dev/null
-            tar -tzf "dist/$archive" | grep -Fx './share/doc/baffle/examples/daemon.toml' >/dev/null
-            tar -tzf "dist/$archive" | grep -Fx './share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt' >/dev/null
-          done
-
-          temp="$(mktemp -d)"
-          trap 'rm -rf "$temp"' EXIT
-          mkdir -p "$temp/linux" "$temp/macos"
-          tar -xzf "dist/$linux" -C "$temp/linux" ./baffle
-          tar -xzf "dist/$macos" -C "$temp/macos" ./baffle
-          linux_file="$(file "$temp/linux/baffle")"
-          macos_file="$(file "$temp/macos/baffle")"
-          [[ "$linux_file" == *"ELF 64-bit"* && "$linux_file" == *"x86-64"* ]] || { echo "Wrong Linux executable: $linux_file" >&2; exit 1; }
-          [[ "$macos_file" == *"Mach-O 64-bit"* && "$macos_file" == *"arm64"* ]] || { echo "Wrong macOS executable: $macos_file" >&2; exit 1; }
-
-          (cd dist && sha256sum "$linux" "$macos" > SHA256SUMS && sha256sum --check SHA256SUMS)
+        run: ./release-tools/scripts/verify-release-archives.sh "$RELEASE_TAG" dist
 
       - name: Publish missing or verify identical assets
         shell: bash

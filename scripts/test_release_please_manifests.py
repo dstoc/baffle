@@ -72,8 +72,40 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         self.assertIn('test "$(uname -m)" = arm64', workflow)
         self.assertIn("RUSTFLAGS: --cfg baffle_integration_test", workflow)
         self.assertIn("--test daemon_proxy", workflow)
-        self.assertIn("needs: [checks, namespace-integration, macos-unix-integration]", workflow)
+        self.assertIn(
+            "needs: [checks, namespace-integration, macos-unix-integration, verify-release-packages]",
+            workflow,
+        )
         self.assertIn("MACOS_RESULT: ${{ needs.macos-unix-integration.result }}", workflow)
+        self.assertIn("PACKAGES_RESULT: ${{ needs.verify-release-packages.result }}", workflow)
+
+    def test_ci_builds_and_verifies_both_native_release_archives(self):
+        workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
+        verifier = (REPO_ROOT / "scripts/verify-release-archives.sh").read_text()
+
+        self.assertIn("release-packages:", workflow)
+        self.assertIn("runner: ubuntu-24.04", workflow)
+        self.assertIn("runner: macos-15", workflow)
+        self.assertIn("x86_64-unknown-linux-gnu", workflow)
+        self.assertIn("aarch64-apple-darwin", workflow)
+        self.assertNotIn("x86_64-apple-darwin", workflow)
+        self.assertIn("verify-release-packages:", workflow)
+        self.assertIn("actions/download-artifact@v4", workflow)
+        self.assertIn("scripts/verify-release-archives.sh", workflow)
+
+        for required_path in (
+            "./baffle",
+            "./LICENSE",
+            "./share/doc/baffle/README.md",
+            "./share/doc/baffle/docs/releasing.md",
+            "./share/doc/baffle/examples/daemon.toml",
+            "./share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt",
+            "./share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt",
+        ):
+            self.assertIn(required_path, verifier)
+        self.assertIn("ELF 64-bit", verifier)
+        self.assertIn("Mach-O 64-bit", verifier)
+        self.assertIn("sha256sum --check SHA256SUMS", verifier)
 
     def test_workspace_versions_and_local_client_dependency_stay_in_lockstep(self):
         root = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
