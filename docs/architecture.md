@@ -19,7 +19,7 @@ credential state, data socket, and counters.
 | CLI and daemon entry point | `src/main.rs`, `src/cli.rs`, `src/daemon.rs` | Parse `daemon` and `ca export` commands, load configuration, start the control server, and handle Ctrl-C. |
 | Configuration | `src/config.rs`, `src/config/{daemon,policy,protocol,session}.rs` | Parse strict daemon and session TOML, normalize exact host rules, and reject invalid policy before provisioning. |
 | Control server and session manager | `src/control.rs` | Authenticate Unix peers, frame requests and responses, create/list/stop sessions, track leases, enforce limits, and remove sockets. |
-| Proxy runtime | `src/proxy_runtime.rs`, `src/proxy_runtime/rama/mod.rs`, `src/proxy_runtime/rama/ingress.rs` | Expose the opaque session lifecycle to the daemon. Baffle binds the Unix data socket and Rama handles accepted Unix streams with connection limits, timeouts, and supervised tasks. |
+| Proxy runtime | `src/proxy_runtime.rs`, `src/proxy_runtime/rama.rs`, `src/proxy_runtime/rama/ingress.rs` | Expose the opaque session lifecycle to the daemon. Baffle binds the Unix data socket and Rama handles accepted Unix streams with connection limits, timeouts, and supervised tasks. |
 | CONNECT and TLS | `src/proxy_runtime/rama/connect.rs`, `src/proxy_runtime/rama/tls.rs` | Admit authorized CONNECT requests, preserve explicit tunnel behavior, inspect ClientHello, and verify the upstream TLS identity. |
 | HTTP policy adapter | `src/policy.rs`, `src/proxy_runtime/rama/http.rs` | Map decrypted Rama requests to shared request facts and apply exact destination, port, mode, canonical path, and header-injection rules. |
 | CA manager | `src/ca.rs` | Validate CA files, retain daemon-owned signing material, provide cloned handles to the runtime, and export only the public certificate. |
@@ -134,8 +134,9 @@ and bounded shutdown. The daemon and control protocol use Baffle-owned session,
 policy, CA, secret, and metrics types; they do not use Rama networking or
 request types.
 
-The private `src/proxy_runtime/rama/` modules own the Rama adapter. `mod.rs`
-keeps the opaque runtime lifecycle and immutable policy generations.
+The private `src/proxy_runtime/rama.rs` facade and `src/proxy_runtime/rama/`
+modules own the Rama adapter. `rama.rs` keeps the opaque runtime lifecycle and
+immutable policy generations.
 `ingress.rs` accepts directly on the Unix socket, applies connection limits,
 and owns inode-safe socket cleanup. `connect.rs` parses and authorizes CONNECT
 requests and handles explicit tunnels. `tls.rs` inspects ClientHello and
