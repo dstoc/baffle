@@ -269,7 +269,10 @@ class PublishCratesTests(unittest.TestCase):
         self.assertIn("needs.release-please.outputs.release_created == 'true'", workflow)
         self.assertIn("ref: ${{ needs.release-please.outputs.tag_name }}", workflow)
         self.assertIn("group: baffle-crates-io-publish", workflow)
-        self.assertIn("validate-release:\n    needs: release-please", workflow)
+        self.assertIn(
+            "validate-release:\n    needs: [release-please, synchronize-release-candidates]",
+            workflow,
+        )
         self.assertIn("uses: ./.github/workflows/ci.yml", workflow)
         self.assertIn("ref: ${{ needs.release-please.outputs.sha }}", workflow)
         self.assertIn("workflow_call:", ci)

@@ -18,10 +18,20 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         self.assertIn("id: release", workflow)
         self.assertIn("actions: write", workflow)
         self.assertIn(
-            "if: ${{ steps.release.outputs.prs_created == 'true' }}", workflow
+            "prs_created: ${{ steps.release.outputs.prs_created }}", workflow
+        )
+        self.assertIn("PRS_JSON: ${{ steps.release.outputs.prs }}", workflow)
+        self.assertIn("PR_JSON: ${{ steps.release.outputs.pr }}", workflow)
+        self.assertNotIn("fromJSON(steps.release.outputs.pr)", workflow)
+        self.assertIn(
+            "fromJSON(needs.release-please.outputs.pull_requests)", workflow
         )
         self.assertIn(
-            "ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}", workflow
+            "run: python3 -m unittest scripts.test_release_please_outputs", workflow
+        )
+        self.assertIn(
+            "if: ${{ needs.release-please.result == 'success' && needs.release-please.outputs.prs_created == 'true' }}",
+            workflow,
         )
         self.assertIn("cargo metadata --locked --format-version 1", workflow)
         self.assertIn("python3 scripts/sync_release_please_candidate.py", workflow)
@@ -45,6 +55,7 @@ class ReleasePleaseManifestTests(unittest.TestCase):
             workflow.index("name: Commit synchronized release candidate"),
             workflow.index("name: Dispatch Rust CI for generated release candidate"),
         )
+        self.assertIn("needs.synchronize-release-candidates.result == 'skipped'", workflow)
 
     def test_release_creation_calls_reusable_binary_packaging_at_exact_sha(self):
         release_please = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()

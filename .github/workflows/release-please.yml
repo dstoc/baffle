@@ -20,6 +20,8 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
       sha: ${{ steps.release.outputs.sha }}
+      prs_created: ${{ steps.release.outputs.prs_created }}
+      pull_requests: ${{ steps.release-pr.outputs.pull_requests }}
     steps:
       - name: Create or update the release pull request
         id: release
@@ -28,32 +30,52 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Test Release Please output normalization
+        run: python3 -m unittest scripts.test_release_please_outputs
+
+      - name: Normalize optional Release Please pull request outputs
+        id: release-pr
+        env:
+          PRS_CREATED: ${{ steps.release.outputs.prs_created }}
+          PRS_JSON: ${{ steps.release.outputs.prs }}
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        run: python3 scripts/release_please_outputs.py
+
+  synchronize-release-candidates:
+    needs: release-please
+    if: ${{ needs.release-please.result == 'success' && needs.release-please.outputs.prs_created == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        release_pr: ${{ fromJSON(needs.release-please.outputs.pull_requests) }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+    steps:
       - name: Check out generated release pull request
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
         uses: actions/checkout@v4
         with:
-          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          ref: ${{ matrix.release_pr.headBranchName }}
 
       - name: Install Rust
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
         uses: dtolnay/rust-toolchain@1.96
 
       - name: Synchronize generated Cargo release candidate
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
         run: python3 scripts/sync_release_please_candidate.py
 
       - name: Validate generated Cargo workspace
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
         run: cargo metadata --locked --format-version 1
 
       - name: Check synchronized release versions
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
         run: python3 -m unittest scripts.test_release_please_manifests scripts.test_release_please_candidate scripts.test_publish_crates
 
       - name: Commit synchronized release candidate
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
         env:
-          RELEASE_PR_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          RELEASE_PR_BRANCH: ${{ matrix.release_pr.headBranchName }}
         run: |
           if ! git diff --quiet -- Cargo.toml .release-please-manifest.json Cargo.lock; then
             git config user.name "github-actions[bot]"
@@ -64,11 +86,10 @@ jobs:
           fi
 
       - name: Dispatch Rust CI for generated release candidate
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          RELEASE_PR_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          RELEASE_PR_BRANCH: ${{ matrix.release_pr.headBranchName }}
         run: |
           candidate_sha="$(git rev-parse HEAD)"
           gh workflow run ci.yml \
@@ -77,8 +98,8 @@ jobs:
             --field ref="$candidate_sha"
 
   validate-release:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' && github.ref == 'refs/heads/main' }}
+    needs: [release-please, synchronize-release-candidates]
+    if: ${{ !cancelled() && needs.release-please.result == 'success' && (needs.synchronize-release-candidates.result == 'success' || needs.synchronize-release-candidates.result == 'skipped') && needs.release-please.outputs.release_created == 'true' && github.ref == 'refs/heads/main' }}
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ needs.release-please.outputs.sha }}
