@@ -13,8 +13,10 @@ DEPENDENCY_SECTIONS = {"dependencies", "dev-dependencies", "build-dependencies"}
 class ReleasePleaseManifestTests(unittest.TestCase):
     def test_release_workflow_validates_generated_pull_request(self):
         workflow = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
+        ci_workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
 
         self.assertIn("id: release", workflow)
+        self.assertIn("actions: write", workflow)
         self.assertIn(
             "if: ${{ steps.release.outputs.prs_created == 'true' }}", workflow
         )
@@ -32,6 +34,17 @@ class ReleasePleaseManifestTests(unittest.TestCase):
             workflow.index("cargo metadata --locked --format-version 1"),
         )
         self.assertIn('git push origin "HEAD:${RELEASE_PR_BRANCH}"', workflow)
+        self.assertIn(
+            "name: Dispatch Rust CI for generated release candidate", workflow
+        )
+        self.assertIn("gh workflow run ci.yml", workflow)
+        self.assertIn('--ref "$RELEASE_PR_BRANCH"', workflow)
+        self.assertIn('--field ref="$candidate_sha"', workflow)
+        self.assertIn("workflow_dispatch:\n    inputs:\n      ref:", ci_workflow)
+        self.assertLess(
+            workflow.index("name: Commit synchronized release candidate"),
+            workflow.index("name: Dispatch Rust CI for generated release candidate"),
+        )
 
     def test_release_creation_calls_reusable_binary_packaging_at_exact_sha(self):
         release_please = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()

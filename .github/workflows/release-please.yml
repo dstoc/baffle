@@ -12,6 +12,7 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       issues: write
       pull-requests: write
@@ -61,6 +62,19 @@ jobs:
             git commit -m "fix(release): synchronize generated Cargo candidate"
             git push origin "HEAD:${RELEASE_PR_BRANCH}"
           fi
+
+      - name: Dispatch Rust CI for generated release candidate
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_PR_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: |
+          candidate_sha="$(git rev-parse HEAD)"
+          gh workflow run ci.yml \
+            --repo "$REPOSITORY" \
+            --ref "$RELEASE_PR_BRANCH" \
+            --field ref="$candidate_sha"
 
   validate-release:
     needs: release-please
