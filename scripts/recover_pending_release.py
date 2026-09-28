@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import html
 import json
 import os
 import re
@@ -321,6 +322,11 @@ def recover_pending_release(
     version, tag, notes = validate_release_pr(pr, github)
     sha = pr["merge_commit_sha"]
 
+    if not getattr(registry, "token", ""):
+        raise RecoveryError(
+            "CARGO_REGISTRY_TOKEN is empty or missing; cannot verify crates.io package ownership before recovery."
+        )
+
     client_state = registry.state("baffle-client", version)
     proxy_state = registry.state("baffle-proxy", version)
     try:
@@ -383,22 +389,46 @@ def write_outputs(values: dict[str, str], output_path: str | None) -> None:
         sys.stdout.write(lines)
 
 
+def report_failure(error: Exception, *, token: str = "", summary_path: str | None = None) -> None:
+    detail = str(error)
+    if token:
+        detail = detail.replace(token, "[redacted]")
+
+    annotation = detail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(f"::error title=Release recovery failed::{annotation}", file=sys.stderr)
+    print(f"ERROR: {detail}", file=sys.stderr)
+
+    if summary_path:
+        try:
+            with Path(summary_path).open("a", encoding="utf-8") as summary:
+                summary.write("## Release recovery failed\n\n")
+                summary.write("Inspect the error before retrying the recovery.\n\n")
+                summary.write(f"<pre>{html.escape(detail)}</pre>\n")
+        except OSError as summary_error:
+            print(f"WARNING: could not write the job summary: {summary_error}", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=os.environ.get("REPOSITORY", EXPECTED_REPOSITORY))
     parser.add_argument("--dry-run", action="store_true", help="verify the candidate without changing GitHub")
     args = parser.parse_args(argv)
+    cargo_token = os.environ.get("CARGO_REGISTRY_TOKEN", "")
 
     try:
         github = GitHubApi(args.repo, os.environ.get("GH_TOKEN", ""))
         result = recover_pending_release(
             github,
-            CratesIo(token=os.environ.get("CARGO_REGISTRY_TOKEN", ""), api=CRATES_API),
+            CratesIo(token=cargo_token, api=CRATES_API),
             dry_run=args.dry_run,
         )
         write_outputs(result, os.environ.get("GITHUB_OUTPUT"))
     except (RecoveryError, PublishError) as error:
-        print(f"ERROR: {error}", file=sys.stderr)
+        report_failure(
+            error,
+            token=cargo_token,
+            summary_path=os.environ.get("GITHUB_STEP_SUMMARY"),
+        )
         return 1
     return 0
 
