@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -275,6 +276,14 @@ class PublishCratesTests(unittest.TestCase):
             "sha: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.sha || steps.recover_release.outputs.sha }}",
             workflow,
         )
+        self.assertIn(
+            "package_binaries: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.package_binaries }}",
+            workflow,
+        )
+        self.assertIn(
+            "publish_crates: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.publish_crates }}",
+            workflow,
+        )
         self.assertIn("id: recover_release", workflow)
         self.assertIn("run: python3 scripts/recover_pending_release.py", workflow)
         self.assertIn("if: ${{ steps.release.outputs.release_created != 'true' }}", workflow)
@@ -301,6 +310,34 @@ class PublishCratesTests(unittest.TestCase):
             workflow.index("name: Publish both crates to crates.io"),
             workflow.rindex("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}"),
         )
+
+    def test_post_validation_jobs_tolerate_skipped_candidate_sync_but_require_validation(self):
+        workflow = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
+
+        def condition_for(job):
+            match = re.search(
+                rf"^  {re.escape(job)}:\n(?P<body>.*?)(?=^  [a-z0-9_-]+:|\Z)",
+                workflow,
+                re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, f"missing workflow job {job}")
+            condition = re.search(r"^    if:\s*(.+)$", match.group("body"), re.MULTILINE)
+            self.assertIsNotNone(condition, f"missing condition for workflow job {job}")
+            return condition.group(1)
+
+        for job in ("package-binaries", "publish-crates"):
+            with self.subTest(job=job):
+                condition = condition_for(job)
+                self.assertIn("!cancelled()", condition)
+                self.assertIn("needs.release-please.result == 'success'", condition)
+                self.assertIn("needs.validate-release.result == 'success'", condition)
+                expected_output = "package_binaries" if job == "package-binaries" else "publish_crates"
+                self.assertIn(f"needs.release-please.outputs.{expected_output} == 'true'", condition)
+                self.assertIn("github.ref == 'refs/heads/main'", condition)
+
+        validation = condition_for("validate-release")
+        self.assertIn("!cancelled()", validation)
+        self.assertIn("needs.synchronize-release-candidates.result == 'skipped'", validation)
 
 
 if __name__ == "__main__":

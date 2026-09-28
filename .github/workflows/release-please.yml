@@ -20,6 +20,8 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.tag_name || steps.recover_release.outputs.tag_name }}
       sha: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.sha || steps.recover_release.outputs.sha }}
+      package_binaries: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.package_binaries }}
+      publish_crates: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.publish_crates }}
       prs_created: ${{ steps.release.outputs.prs_created }}
       pull_requests: ${{ steps.release-pr.outputs.pull_requests }}
     steps:
@@ -117,7 +119,7 @@ jobs:
 
   package-binaries:
     needs: [release-please, validate-release]
-    if: ${{ needs.release-please.outputs.release_created == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && needs.release-please.result == 'success' && needs.validate-release.result == 'success' && needs.release-please.outputs.package_binaries == 'true' && github.ref == 'refs/heads/main' }}
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
@@ -128,7 +130,7 @@ jobs:
 
   publish-crates:
     needs: [release-please, validate-release]
-    if: ${{ needs.release-please.outputs.release_created == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && needs.release-please.result == 'success' && needs.validate-release.result == 'success' && needs.release-please.outputs.publish_crates == 'true' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     concurrency:
       group: baffle-crates-io-publish
