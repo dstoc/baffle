@@ -586,8 +586,11 @@ fn cli_reports_unavailable_control_socket_and_sigterm_releases_lease() {
     let mut create = AttachedCreate::start(&daemon, &config);
     let status = create.signal_and_wait("TERM");
     assert!(status.success(), "SIGTERM should close the lease: {status}");
-    assert!(!create.socket_path.exists());
-    assert!(daemon.list().contains("No active sessions."));
+    let listed = wait_for_session_release(&daemon, &create, &[]);
+    assert!(
+        listed.contains("No active sessions."),
+        "SIGTERM should release all sessions:\n{listed}"
+    );
 
     let mut disconnected = AttachedCreate::start(&daemon, &config);
     let sent = Command::new("kill")
@@ -601,15 +604,11 @@ fn cli_reports_unavailable_control_socket_and_sigterm_releases_lease() {
         !status.success(),
         "SIGKILL should terminate the CLI process"
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while disconnected.socket_path.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "disconnect did not release the lease"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(daemon.list().contains("No active sessions."));
+    let listed = wait_for_session_release(&daemon, &disconnected, &[]);
+    assert!(
+        listed.contains("No active sessions."),
+        "SIGKILL should release all sessions:\n{listed}"
+    );
 }
 
 #[test]
