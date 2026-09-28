@@ -12,6 +12,7 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       issues: write
       pull-requests: write
@@ -37,13 +38,43 @@ jobs:
         if: ${{ steps.release.outputs.prs_created == 'true' }}
         uses: dtolnay/rust-toolchain@1.96
 
+      - name: Synchronize generated Cargo release candidate
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        run: python3 scripts/sync_release_please_candidate.py
+
       - name: Validate generated Cargo workspace
         if: ${{ steps.release.outputs.prs_created == 'true' }}
         run: cargo metadata --locked --format-version 1
 
       - name: Check synchronized release versions
         if: ${{ steps.release.outputs.prs_created == 'true' }}
-        run: python3 -m unittest scripts.test_release_please_manifests scripts.test_publish_crates
+        run: python3 -m unittest scripts.test_release_please_manifests scripts.test_release_please_candidate scripts.test_publish_crates
+
+      - name: Commit synchronized release candidate
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        env:
+          RELEASE_PR_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: |
+          if ! git diff --quiet -- Cargo.toml .release-please-manifest.json Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.toml .release-please-manifest.json Cargo.lock
+            git commit -m "fix(release): synchronize generated Cargo candidate"
+            git push origin "HEAD:${RELEASE_PR_BRANCH}"
+          fi
+
+      - name: Dispatch Rust CI for generated release candidate
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_PR_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: |
+          candidate_sha="$(git rev-parse HEAD)"
+          gh workflow run ci.yml \
+            --repo "$REPOSITORY" \
+            --ref "$RELEASE_PR_BRANCH" \
+            --field ref="$candidate_sha"
 
   validate-release:
     needs: release-please
