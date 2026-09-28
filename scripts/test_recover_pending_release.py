@@ -1,6 +1,8 @@
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from scripts import publish_crates, recover_pending_release
@@ -103,9 +105,10 @@ class FakeGitHub:
 
 
 class FakeRegistry:
-    def __init__(self, states=None):
+    def __init__(self, states=None, *, token="test-token"):
         missing = publish_crates.RegistryState(False, False)
         self.states = states or {"baffle-client": missing, "baffle-proxy": missing}
+        self.token = token
         self.checked = []
 
     def state(self, crate, _version):
@@ -174,11 +177,41 @@ class RecoverPendingReleaseTests(unittest.TestCase):
 
     def test_no_pending_release_does_not_query_crates_or_write_github(self):
         github = FakeGitHub(prs=[])
-        registry = FakeRegistry()
+        registry = FakeRegistry(token="")
         outputs = recover_pending_release.recover_pending_release(github, registry)
         self.assertEqual(outputs, {"release_created": "false", "tag_name": "", "sha": ""})
         self.assertEqual(registry.checked, [])
         self.assertEqual(github.created, [])
+
+    def test_missing_registry_token_stops_before_checks_or_github_writes(self):
+        github = FakeGitHub()
+        registry = FakeRegistry(token="")
+
+        with self.assertRaisesRegex(recover_pending_release.RecoveryError, "CARGO_REGISTRY_TOKEN is empty or missing"):
+            recover_pending_release.recover_pending_release(github, registry)
+
+        self.assertEqual(registry.checked, [])
+        self.assertEqual(github.github_writes, [])
+
+    def test_failure_details_are_sanitized_in_annotation_and_job_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary_path = Path(directory) / "summary.md"
+            stderr = io.StringIO()
+            with patch("sys.stderr", stderr):
+                recover_pending_release.report_failure(
+                    RuntimeError("crate API rejected token hidden-token\n<response>"),
+                    token="hidden-token",
+                    summary_path=str(summary_path),
+                )
+
+            output = stderr.getvalue()
+            summary = summary_path.read_text(encoding="utf-8")
+
+        self.assertIn("::error title=Release recovery failed::", output)
+        self.assertIn("%0A", output)
+        self.assertNotIn("hidden-token", output)
+        self.assertNotIn("hidden-token", summary)
+        self.assertIn("&lt;response&gt;", summary)
 
     def test_recovers_exact_merged_release_and_updates_pending_labels(self):
         github = FakeGitHub()
