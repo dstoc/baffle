@@ -22,9 +22,16 @@ class ReleasePleaseManifestTests(unittest.TestCase):
             "ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}", workflow
         )
         self.assertIn("cargo metadata --locked --format-version 1", workflow)
+        self.assertIn("python3 scripts/sync_release_please_candidate.py", workflow)
         self.assertIn(
-            "python3 -m unittest scripts.test_release_please_manifests", workflow
+            "python3 -m unittest scripts.test_release_please_manifests scripts.test_release_please_candidate",
+            workflow,
         )
+        self.assertLess(
+            workflow.index("python3 scripts/sync_release_please_candidate.py"),
+            workflow.index("cargo metadata --locked --format-version 1"),
+        )
+        self.assertIn('git push origin "HEAD:${RELEASE_PR_BRANCH}"', workflow)
 
     def test_release_creation_calls_reusable_binary_packaging_at_exact_sha(self):
         release_please = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
