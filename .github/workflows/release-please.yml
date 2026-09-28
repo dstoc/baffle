@@ -17,9 +17,9 @@ jobs:
       issues: write
       pull-requests: write
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      sha: ${{ steps.release.outputs.sha }}
+      release_created: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.tag_name || steps.recover_release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.sha || steps.recover_release.outputs.sha }}
       prs_created: ${{ steps.release.outputs.prs_created }}
       pull_requests: ${{ steps.release-pr.outputs.pull_requests }}
     steps:
@@ -33,8 +33,8 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
 
-      - name: Test Release Please output normalization
-        run: python3 -m unittest scripts.test_release_please_outputs
+      - name: Test Release Please output handling and recovery
+        run: python3 -m unittest scripts.test_release_please_outputs scripts.test_recover_pending_release scripts.test_publish_crates
 
       - name: Normalize optional Release Please pull request outputs
         id: release-pr
@@ -43,6 +43,15 @@ jobs:
           PRS_JSON: ${{ steps.release.outputs.prs }}
           PR_JSON: ${{ steps.release.outputs.pr }}
         run: python3 scripts/release_please_outputs.py
+
+      - name: Recover a merged release not reported by Release Please
+        id: recover_release
+        if: ${{ steps.release.outputs.release_created != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/recover_pending_release.py
 
   synchronize-release-candidates:
     needs: release-please
