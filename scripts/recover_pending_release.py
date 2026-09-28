@@ -93,6 +93,12 @@ class GitHubApi:
             raise RecoveryError(f"GitHub API {method} {path} failed: {error}") from error
 
     def pending_release_prs(self) -> list[dict]:
+        return self._merged_release_prs(RELEASE_PENDING)
+
+    def tagged_release_prs(self) -> list[dict]:
+        return self._merged_release_prs(RELEASE_TAGGED)
+
+    def _merged_release_prs(self, label_name: str) -> list[dict]:
         matches: list[dict] = []
         page = 1
         while True:
@@ -107,7 +113,7 @@ class GitHubApi:
                 for pr in result
                 if pr.get("merged_at")
                 and pr.get("base", {}).get("ref") == "main"
-                and RELEASE_PENDING in {label.get("name") for label in pr.get("labels", [])}
+                and label_name in {label.get("name") for label in pr.get("labels", [])}
             )
             if len(result) < 100:
                 break
@@ -305,6 +311,24 @@ def validate_existing_state(github: GitHubApi, tag: str, sha: str) -> tuple[str 
     return tag_sha, release
 
 
+def required_release_assets(tag: str) -> set[str]:
+    return {
+        f"baffle-proxy-{tag}-x86_64-unknown-linux-gnu.tar.gz",
+        f"baffle-proxy-{tag}-aarch64-apple-darwin.tar.gz",
+        "SHA256SUMS",
+    }
+
+
+def release_has_required_assets(release: dict | None, tag: str) -> bool:
+    if not release:
+        return False
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        raise RecoveryError(f"GitHub Release {tag} has an invalid asset list.")
+    names = {asset.get("name") for asset in assets if isinstance(asset, dict)}
+    return required_release_assets(tag).issubset(names)
+
+
 def recover_pending_release(
     github: GitHubApi,
     registry: CratesIo,
@@ -312,13 +336,29 @@ def recover_pending_release(
     dry_run: bool = False,
 ) -> dict[str, str]:
     pending = github.pending_release_prs()
-    if not pending:
-        return {"release_created": "false", "tag_name": "", "sha": ""}
-    if len(pending) != 1:
-        numbers = sorted(pr.get("number") for pr in pending)
-        raise RecoveryError(f"Found multiple merged Release Please PRs still pending: {numbers}; refusing to choose.")
+    is_pending = bool(pending)
+    if pending:
+        if len(pending) != 1:
+            numbers = sorted(pr.get("number") for pr in pending)
+            raise RecoveryError(f"Found multiple merged Release Please PRs still pending: {numbers}; refusing to choose.")
+        pr = pending[0]
+    else:
+        tagged = github.tagged_release_prs()
+        if not tagged:
+            return {
+                "release_created": "false",
+                "tag_name": "",
+                "sha": "",
+                "package_binaries": "false",
+                "publish_crates": "false",
+            }
+        latest_merge = max(pr.get("merged_at", "") for pr in tagged)
+        latest = [pr for pr in tagged if pr.get("merged_at", "") == latest_merge]
+        if len(latest) != 1:
+            numbers = sorted(pr.get("number") for pr in latest)
+            raise RecoveryError(f"Found multiple latest tagged Release Please PRs: {numbers}; refusing to choose.")
+        pr = latest[0]
 
-    pr = pending[0]
     version, tag, notes = validate_release_pr(pr, github)
     sha = pr["merge_commit_sha"]
 
@@ -335,10 +375,36 @@ def recover_pending_release(
         raise RecoveryError(f"Crates.io state blocks recovery: {error}") from error
 
     tag_sha, release = validate_existing_state(github, tag, sha)
+    assets_complete = release_has_required_assets(release, tag)
+    if release and not assets_complete and release.get("immutable") is True:
+        raise RecoveryError(f"GitHub Release {tag} is immutable and is missing one or more required release assets.")
+
+    crates_complete = client_state.version_exists and proxy_state.version_exists
+    if not is_pending and assets_complete and crates_complete:
+        print(f"Release {tag} at {sha} from merged PR #{pr['number']} already has both crates and all release assets.")
+        return {
+            "release_created": "false",
+            "tag_name": "",
+            "sha": "",
+            "package_binaries": "false",
+            "publish_crates": "false",
+        }
+
+    if not is_pending and (not client_state.registered or not proxy_state.registered):
+        raise RecoveryError(
+            f"Tagged release {tag} cannot be retried because crates.io does not report both expected crate registrations."
+        )
+
     if dry_run:
         action = "would create" if not release else "would verify"
         print(f"Dry run: {action} {tag} at {sha} from merged PR #{pr['number']}; no GitHub writes made.")
-        return {"release_created": "true", "tag_name": tag, "sha": sha}
+        return {
+            "release_created": "true",
+            "tag_name": tag,
+            "sha": sha,
+            "package_binaries": str(not assets_complete).lower(),
+            "publish_crates": str(not crates_complete).lower(),
+        }
 
     if not release:
         if not tag_sha:
@@ -377,7 +443,29 @@ def recover_pending_release(
         f"Verified Release Please recovery for {tag} at {sha} from merged PR #{pr['number']}; "
         "the existing crates publisher and binary packager can now run safely."
     )
-    return {"release_created": "true", "tag_name": tag, "sha": sha}
+    if not is_pending:
+        missing_crates = [
+            name
+            for name, state in (("baffle-client", client_state), ("baffle-proxy", proxy_state))
+            if not state.version_exists
+        ]
+        existing_assets = {
+            asset.get("name")
+            for asset in (release or {}).get("assets", [])
+            if isinstance(asset, dict)
+        }
+        missing_assets = sorted(required_release_assets(tag) - existing_assets)
+        if missing_crates:
+            print("Crates to publish: " + ", ".join(f"{name} {version}" for name in missing_crates) + ".")
+        if missing_assets:
+            print("Release assets to verify or publish: " + ", ".join(missing_assets) + ".")
+    return {
+        "release_created": "true",
+        "tag_name": tag,
+        "sha": sha,
+        "package_binaries": str(not assets_complete).lower(),
+        "publish_crates": str(not crates_complete).lower(),
+    }
 
 
 def write_outputs(values: dict[str, str], output_path: str | None) -> None:

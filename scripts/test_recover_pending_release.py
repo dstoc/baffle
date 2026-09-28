@@ -34,8 +34,9 @@ def release_pr(number=47):
 
 
 class FakeGitHub:
-    def __init__(self, prs=None, *, tag_sha=None, release=None, manifest=None):
+    def __init__(self, prs=None, *, tagged_prs=None, tag_sha=None, release=None, manifest=None):
         self.prs = [release_pr()] if prs is None else prs
+        self.tagged_prs = [] if tagged_prs is None else tagged_prs
         self.existing_tag_sha = tag_sha
         self.existing_release = release
         self.created = []
@@ -71,6 +72,9 @@ class FakeGitHub:
 
     def pending_release_prs(self):
         return self.prs
+
+    def tagged_release_prs(self):
+        return self.tagged_prs
 
     def file_at(self, path, _ref):
         return self.files[path]
@@ -176,10 +180,19 @@ class RecoverPendingReleaseTests(unittest.TestCase):
             recover_pending_release.release_version_from_pr(pr)
 
     def test_no_pending_release_does_not_query_crates_or_write_github(self):
-        github = FakeGitHub(prs=[])
+        github = FakeGitHub(prs=[], tagged_prs=[])
         registry = FakeRegistry(token="")
         outputs = recover_pending_release.recover_pending_release(github, registry)
-        self.assertEqual(outputs, {"release_created": "false", "tag_name": "", "sha": ""})
+        self.assertEqual(
+            outputs,
+            {
+                "release_created": "false",
+                "tag_name": "",
+                "sha": "",
+                "package_binaries": "false",
+                "publish_crates": "false",
+            },
+        )
         self.assertEqual(registry.checked, [])
         self.assertEqual(github.created, [])
 
@@ -219,7 +232,16 @@ class RecoverPendingReleaseTests(unittest.TestCase):
         with patch("sys.stdout", new_callable=io.StringIO) as output:
             outputs = recover_pending_release.recover_pending_release(github, registry)
 
-        self.assertEqual(outputs, {"release_created": "true", "tag_name": TAG, "sha": SHA})
+        self.assertEqual(
+            outputs,
+            {
+                "release_created": "true",
+                "tag_name": TAG,
+                "sha": SHA,
+                "package_binaries": "true",
+                "publish_crates": "true",
+            },
+        )
         self.assertEqual(github.created_tags, [(TAG, SHA)])
         self.assertEqual(github.created, [(TAG, "Verified notes.")])
         self.assertEqual(github.github_writes, ["create_tag_ref", "create_release"])
@@ -264,7 +286,7 @@ class RecoverPendingReleaseTests(unittest.TestCase):
         self.assertEqual(github.github_writes, ["create_tag_ref"])
 
     def test_existing_exact_release_is_idempotent(self):
-        existing = {"tag_name": TAG, "draft": False, "prerelease": False}
+        existing = {"tag_name": TAG, "draft": False, "prerelease": False, "assets": []}
         github = FakeGitHub(tag_sha=SHA, release=existing)
         registry = FakeRegistry()
         outputs = recover_pending_release.recover_pending_release(github, registry)
@@ -272,10 +294,127 @@ class RecoverPendingReleaseTests(unittest.TestCase):
         self.assertEqual(github.created, [])
         self.assertEqual(github.updated_labels, [47])
 
+    def test_tagged_release_with_missing_crates_is_resumed_without_recreating_release(self):
+        pr = release_pr()
+        pr["labels"] = [{"name": recover_pending_release.RELEASE_TAGGED}]
+        existing = {
+            "tag_name": TAG,
+            "draft": False,
+            "prerelease": False,
+            "immutable": False,
+            "assets": [{"name": name} for name in recover_pending_release.required_release_assets(TAG)],
+        }
+        github = FakeGitHub(prs=[], tagged_prs=[pr], tag_sha=SHA, release=existing)
+        missing = publish_crates.RegistryState(registered=True, version_exists=False)
+        registry = FakeRegistry({"baffle-client": missing, "baffle-proxy": missing})
+
+        outputs = recover_pending_release.recover_pending_release(github, registry)
+
+        self.assertEqual(
+            outputs,
+            {
+                "release_created": "true",
+                "tag_name": TAG,
+                "sha": SHA,
+                "package_binaries": "false",
+                "publish_crates": "true",
+            },
+        )
+        self.assertEqual(github.created_tags, [])
+        self.assertEqual(github.created, [])
+        self.assertEqual(github.github_writes, [])
+        self.assertEqual(registry.checked, ["baffle-client", "baffle-proxy"])
+
+    def test_tagged_release_with_all_artifacts_is_a_noop(self):
+        pr = release_pr()
+        pr["labels"] = [{"name": recover_pending_release.RELEASE_TAGGED}]
+        existing = {
+            "tag_name": TAG,
+            "draft": False,
+            "prerelease": False,
+            "immutable": False,
+            "assets": [{"name": name} for name in recover_pending_release.required_release_assets(TAG)],
+        }
+        github = FakeGitHub(prs=[], tagged_prs=[pr], tag_sha=SHA, release=existing)
+        published = publish_crates.RegistryState(registered=True, version_exists=True)
+        registry = FakeRegistry({"baffle-client": published, "baffle-proxy": published})
+
+        outputs = recover_pending_release.recover_pending_release(github, registry)
+
+        self.assertEqual(
+            outputs,
+            {
+                "release_created": "false",
+                "tag_name": "",
+                "sha": "",
+                "package_binaries": "false",
+                "publish_crates": "false",
+            },
+        )
+        self.assertEqual(github.github_writes, [])
+        self.assertEqual(registry.checked, ["baffle-client", "baffle-proxy"])
+
+    def test_tagged_release_with_missing_assets_is_resumed_when_crates_exist(self):
+        pr = release_pr()
+        pr["labels"] = [{"name": recover_pending_release.RELEASE_TAGGED}]
+        existing = {
+            "tag_name": TAG,
+            "draft": False,
+            "prerelease": False,
+            "immutable": False,
+            "assets": [],
+        }
+        github = FakeGitHub(prs=[], tagged_prs=[pr], tag_sha=SHA, release=existing)
+        published = publish_crates.RegistryState(registered=True, version_exists=True)
+        registry = FakeRegistry({"baffle-client": published, "baffle-proxy": published})
+
+        outputs = recover_pending_release.recover_pending_release(github, registry)
+
+        self.assertEqual(
+            outputs,
+            {
+                "release_created": "true",
+                "tag_name": TAG,
+                "sha": SHA,
+                "package_binaries": "true",
+                "publish_crates": "false",
+            },
+        )
+        self.assertEqual(github.github_writes, [])
+        self.assertEqual(registry.checked, ["baffle-client", "baffle-proxy"])
+
+    def test_tagged_immutable_release_missing_assets_stops_recovery(self):
+        pr = release_pr()
+        pr["labels"] = [{"name": recover_pending_release.RELEASE_TAGGED}]
+        existing = {
+            "tag_name": TAG,
+            "draft": False,
+            "prerelease": False,
+            "immutable": True,
+            "assets": [],
+        }
+        github = FakeGitHub(prs=[], tagged_prs=[pr], tag_sha=SHA, release=existing)
+        missing = publish_crates.RegistryState(registered=True, version_exists=False)
+        registry = FakeRegistry({"baffle-client": missing, "baffle-proxy": missing})
+
+        with self.assertRaisesRegex(recover_pending_release.RecoveryError, "immutable and is missing"):
+            recover_pending_release.recover_pending_release(github, registry)
+
+        self.assertEqual(github.github_writes, [])
+
     def test_dry_run_does_not_create_release_or_change_labels(self):
         github = FakeGitHub()
         outputs = recover_pending_release.recover_pending_release(github, FakeRegistry(), dry_run=True)
-        self.assertEqual(outputs, {"release_created": "true", "tag_name": TAG, "sha": SHA})
+        self.assertEqual(
+            outputs,
+            {
+                "release_created": "true",
+                "tag_name": TAG,
+                "sha": SHA,
+                "package_binaries": "true",
+                "publish_crates": "true",
+            },
+        )
         self.assertEqual(github.created, [])
         self.assertEqual(github.updated_labels, [])
 
