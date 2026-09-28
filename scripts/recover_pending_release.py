@@ -154,13 +154,32 @@ class GitHubApi:
             raise RecoveryError(f"GitHub returned an invalid Release object for {tag}.")
         return result
 
-    def create_release(self, tag: str, sha: str, notes: str) -> dict:
+    def create_tag_ref(self, tag: str, sha: str) -> dict:
+        ref_name = f"refs/tags/{tag}"
+        result = self.request(
+            "POST",
+            "git/refs",
+            {"ref": ref_name, "sha": sha},
+        )
+        if not isinstance(result, dict):
+            raise RecoveryError(f"GitHub did not return the created tag reference {tag}.")
+        object_ref = result.get("object", {})
+        if (
+            result.get("ref") != ref_name
+            or not isinstance(object_ref, dict)
+            or object_ref.get("type") != "commit"
+            or not isinstance(object_ref.get("sha"), str)
+            or object_ref["sha"].lower() != sha.lower()
+        ):
+            raise RecoveryError(f"GitHub returned an unexpected tag reference for {tag}.")
+        return result
+
+    def create_release(self, tag: str, notes: str) -> dict:
         result = self.request(
             "POST",
             "releases",
             {
                 "tag_name": tag,
-                "target_commitish": sha,
                 "name": tag,
                 "body": notes,
                 "draft": False,
@@ -316,13 +335,30 @@ def recover_pending_release(
         return {"release_created": "true", "tag_name": tag, "sha": sha}
 
     if not release:
+        if not tag_sha:
+            tag_create_error: GitHubApiError | None = None
+            try:
+                github.create_tag_ref(tag, sha)
+            except GitHubApiError as error:
+                if error.status not in (409, 422):
+                    raise
+                tag_create_error = error
+                # Another workflow may have created the ref after our preflight.
+                # Continue only if it points to the exact verified merge SHA.
+            tag_sha = github.tag_sha(tag)
+            if not tag_sha and tag_create_error:
+                raise tag_create_error
+            if not tag_sha:
+                raise RecoveryError(f"GitHub did not create the expected tag reference {tag} at {sha}.")
+            if tag_sha.lower() != sha.lower():
+                raise RecoveryError(f"Tag {tag} already points to {tag_sha}, not the Release Please merge SHA {sha}.")
         try:
-            github.create_release(tag, sha, notes)
+            github.create_release(tag, notes)
         except GitHubApiError as error:
             if error.status not in (409, 422):
                 raise
-            # Another workflow may have created it after our preflight. Only
-            # continue when the resulting tag and Release exactly match.
+            # Another workflow may have created the release after our preflight.
+            # Only continue when the resulting tag and Release exactly match.
         tag_sha, release = validate_existing_state(github, tag, sha)
         if not tag_sha or not release:
             raise RecoveryError(f"GitHub did not create the expected tag and Release {tag} at {sha}.")

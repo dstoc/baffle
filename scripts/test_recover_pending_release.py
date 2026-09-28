@@ -37,6 +37,11 @@ class FakeGitHub:
         self.existing_tag_sha = tag_sha
         self.existing_release = release
         self.created = []
+        self.created_tags = []
+        self.github_writes = []
+        self.events = []
+        self.tag_create_error = None
+        self.tag_after_create_error = None
         self.updated_labels = []
         self.manifest = manifest or {".": VERSION, "crates/baffle-client": VERSION}
         self.files = {
@@ -69,14 +74,27 @@ class FakeGitHub:
         return self.files[path]
 
     def tag_sha(self, _tag):
+        self.events.append("tag_sha")
         return self.existing_tag_sha
 
     def release(self, _tag):
+        self.events.append("release")
         return self.existing_release
 
-    def create_release(self, tag, sha, notes):
-        self.created.append((tag, sha, notes))
+    def create_tag_ref(self, tag, sha):
+        self.events.append("create_tag_ref")
+        self.github_writes.append("create_tag_ref")
+        if self.tag_create_error:
+            self.existing_tag_sha = self.tag_after_create_error
+            raise self.tag_create_error
+        self.created_tags.append((tag, sha))
         self.existing_tag_sha = sha
+        return {"ref": f"refs/tags/{tag}", "object": {"type": "commit", "sha": sha}}
+
+    def create_release(self, tag, notes):
+        self.events.append("create_release")
+        self.github_writes.append("create_release")
+        self.created.append((tag, notes))
         self.existing_release = {"tag_name": tag, "draft": False, "prerelease": False}
         return self.existing_release
 
@@ -96,6 +114,45 @@ class FakeRegistry:
 
 
 class RecoverPendingReleaseTests(unittest.TestCase):
+    def test_github_api_creates_tag_ref_and_release_without_target_commitish(self):
+        requests = []
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = json.dumps(payload).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return self.payload
+
+        def opener(request, timeout):
+            requests.append(request)
+            if request.full_url.endswith("/git/refs"):
+                payload = {"ref": f"refs/tags/{TAG}", "object": {"type": "commit", "sha": SHA}}
+            else:
+                payload = {"tag_name": TAG}
+            return FakeResponse(payload)
+
+        github = recover_pending_release.GitHubApi("dstoc/baffle", "test-token", opener=opener)
+        github.create_tag_ref(TAG, SHA)
+        github.create_release(TAG, "Verified notes.")
+
+        self.assertEqual([request.get_method() for request in requests], ["POST", "POST"])
+        self.assertTrue(requests[0].full_url.endswith("/git/refs"))
+        self.assertEqual(
+            json.loads(requests[0].data),
+            {"ref": f"refs/tags/{TAG}", "sha": SHA},
+        )
+        self.assertTrue(requests[1].full_url.endswith("/releases"))
+        release_body = json.loads(requests[1].data)
+        self.assertEqual(release_body["tag_name"], TAG)
+        self.assertNotIn("target_commitish", release_body)
+
     def test_combined_component_summaries_accept_the_same_linked_version(self):
         pr = release_pr()
         pr["body"] = (
@@ -130,10 +187,48 @@ class RecoverPendingReleaseTests(unittest.TestCase):
             outputs = recover_pending_release.recover_pending_release(github, registry)
 
         self.assertEqual(outputs, {"release_created": "true", "tag_name": TAG, "sha": SHA})
-        self.assertEqual(github.created, [(TAG, SHA, "Verified notes.")])
+        self.assertEqual(github.created_tags, [(TAG, SHA)])
+        self.assertEqual(github.created, [(TAG, "Verified notes.")])
+        self.assertEqual(github.github_writes, ["create_tag_ref", "create_release"])
+        tag_created_at = github.events.index("create_tag_ref")
+        tag_verified_at = github.events.index("tag_sha", tag_created_at + 1)
+        release_created_at = github.events.index("create_release")
+        self.assertLess(tag_created_at, tag_verified_at)
+        self.assertLess(tag_verified_at, release_created_at)
         self.assertEqual(github.updated_labels, [47])
         self.assertEqual(registry.checked, ["baffle-client", "baffle-proxy"])
         self.assertIn(f"{TAG} at {SHA}", output.getvalue())
+
+    def test_existing_exact_tag_is_reused_before_creating_release(self):
+        github = FakeGitHub(tag_sha=SHA)
+        outputs = recover_pending_release.recover_pending_release(github, FakeRegistry())
+
+        self.assertEqual(outputs["release_created"], "true")
+        self.assertEqual(github.created_tags, [])
+        self.assertEqual(github.created, [(TAG, "Verified notes.")])
+        self.assertEqual(github.github_writes, ["create_release"])
+
+    def test_tag_create_conflict_is_reused_only_when_ref_matches_verified_sha(self):
+        github = FakeGitHub()
+        github.tag_create_error = recover_pending_release.GitHubApiError(422, "ref already exists")
+        github.tag_after_create_error = SHA
+
+        outputs = recover_pending_release.recover_pending_release(github, FakeRegistry())
+
+        self.assertEqual(outputs["release_created"], "true")
+        self.assertEqual(github.created, [(TAG, "Verified notes.")])
+        self.assertEqual(github.github_writes, ["create_tag_ref", "create_release"])
+
+    def test_tag_create_conflict_with_wrong_ref_stops_before_release(self):
+        github = FakeGitHub()
+        github.tag_create_error = recover_pending_release.GitHubApiError(422, "ref already exists")
+        github.tag_after_create_error = "b" * 40
+
+        with self.assertRaisesRegex(recover_pending_release.RecoveryError, "not the Release Please merge SHA"):
+            recover_pending_release.recover_pending_release(github, FakeRegistry())
+
+        self.assertEqual(github.created, [])
+        self.assertEqual(github.github_writes, ["create_tag_ref"])
 
     def test_existing_exact_release_is_idempotent(self):
         existing = {"tag_name": TAG, "draft": False, "prerelease": False}
