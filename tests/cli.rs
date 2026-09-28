@@ -3,7 +3,10 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
-    os::unix::{fs::MetadataExt, net::UnixListener},
+    os::unix::{
+        fs::MetadataExt,
+        net::{UnixListener, UnixStream},
+    },
     path::{Path, PathBuf},
     process::{Child, ChildStdout, Command, ExitStatus, Stdio},
     thread,
@@ -190,6 +193,42 @@ fn wait_for_exit(child: &mut Child) -> ExitStatus {
     }
 }
 
+fn session_is_listed(listed: &str, session_id: &str) -> bool {
+    listed
+        .lines()
+        .any(|line| line.split('\t').next() == Some(session_id))
+}
+
+fn wait_for_session_release(
+    daemon: &TestDaemon,
+    session: &AttachedCreate,
+    sessions_to_preserve: &[&AttachedCreate],
+) -> String {
+    let timeout = Duration::from_secs(5);
+    let deadline = Instant::now() + timeout;
+    loop {
+        let socket_exists = session.socket_path.exists();
+        let listed = daemon.list();
+        let target_is_listed = session_is_listed(&listed, &session.id);
+        let missing_preserved = sessions_to_preserve
+            .iter()
+            .filter(|preserved| !session_is_listed(&listed, &preserved.id))
+            .map(|preserved| preserved.id.as_str())
+            .collect::<Vec<_>>();
+
+        if !socket_exists && !target_is_listed && missing_preserved.is_empty() {
+            return listed;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "session {} was not released within {timeout:?} (socket exists: {socket_exists}, registry entry exists: {target_is_listed}, missing preserved sessions: {missing_preserved:?}); last session list:\n{listed}",
+            session.id
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn write_test_ca(directory: &Path) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
@@ -272,8 +311,54 @@ fn inline_create_lists_sessions_and_independent_stop_preserves_other_lease() {
         second_status.success(),
         "second CLI failed: {second_status}"
     );
-    assert!(!second.socket_path.exists());
-    assert!(daemon.list().contains("No active sessions."));
+    let listed = wait_for_session_release(&daemon, &second, &[]);
+    assert!(
+        listed.contains("No active sessions."),
+        "all sessions should be released after both CLI processes exit:\n{listed}"
+    );
+}
+
+#[test]
+fn inline_create_cli_exit_releases_only_its_own_lease() {
+    let daemon = TestDaemon::start(false);
+    let config = inline_config(daemon._directory.path(), false);
+    let mut first = AttachedCreate::start(&daemon, &config);
+    let mut second = AttachedCreate::start(&daemon, &config);
+
+    let second_status = second.signal_and_wait("INT");
+    assert!(
+        second_status.success(),
+        "second CLI failed: {second_status}"
+    );
+    let listed = wait_for_session_release(&daemon, &second, &[&first]);
+    assert!(
+        first.socket_path.exists(),
+        "the first session's data socket should remain after the second lease closes"
+    );
+    assert!(
+        first
+            .child
+            .try_wait()
+            .expect("first CLI status should be readable")
+            .is_none(),
+        "closing the second lease must not interrupt the first CLI"
+    );
+    assert!(
+        session_is_listed(&listed, &first.id),
+        "the first lease should remain in the session registry:\n{listed}"
+    );
+    {
+        let _connection = UnixStream::connect(&first.socket_path)
+            .expect("the first session should still accept data connections");
+    }
+
+    let first_status = first.signal_and_wait("INT");
+    assert!(first_status.success(), "first CLI failed: {first_status}");
+    let listed = wait_for_session_release(&daemon, &first, &[]);
+    assert!(
+        listed.contains("No active sessions."),
+        "all sessions should be released after the first CLI exits:\n{listed}"
+    );
 }
 
 #[test]
@@ -501,8 +586,11 @@ fn cli_reports_unavailable_control_socket_and_sigterm_releases_lease() {
     let mut create = AttachedCreate::start(&daemon, &config);
     let status = create.signal_and_wait("TERM");
     assert!(status.success(), "SIGTERM should close the lease: {status}");
-    assert!(!create.socket_path.exists());
-    assert!(daemon.list().contains("No active sessions."));
+    let listed = wait_for_session_release(&daemon, &create, &[]);
+    assert!(
+        listed.contains("No active sessions."),
+        "SIGTERM should release all sessions:\n{listed}"
+    );
 
     let mut disconnected = AttachedCreate::start(&daemon, &config);
     let sent = Command::new("kill")
@@ -516,15 +604,11 @@ fn cli_reports_unavailable_control_socket_and_sigterm_releases_lease() {
         !status.success(),
         "SIGKILL should terminate the CLI process"
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while disconnected.socket_path.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "disconnect did not release the lease"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(daemon.list().contains("No active sessions."));
+    let listed = wait_for_session_release(&daemon, &disconnected, &[]);
+    assert!(
+        listed.contains("No active sessions."),
+        "SIGKILL should release all sessions:\n{listed}"
+    );
 }
 
 #[test]
