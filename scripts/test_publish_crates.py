@@ -260,12 +260,24 @@ class PublishCratesTests(unittest.TestCase):
         self.assertEqual(observed["CARGO_REGISTRY_TOKEN"], "opaque-test-token")
         self.assertNotIn("opaque-test-token", output.getvalue())
 
-    def test_workflow_exports_release_outputs_and_limits_secret_to_publish_step(self):
+    def test_workflow_exports_release_outputs_and_limits_registry_secret_to_trusted_steps(self):
         workflow = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
         ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
-        self.assertIn("release_created: ${{ steps.release.outputs.release_created }}", workflow)
-        self.assertIn("tag_name: ${{ steps.release.outputs.tag_name }}", workflow)
-        self.assertIn("sha: ${{ steps.release.outputs.sha }}", workflow)
+        self.assertIn(
+            "release_created: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.release_created }}",
+            workflow,
+        )
+        self.assertIn(
+            "tag_name: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.tag_name || steps.recover_release.outputs.tag_name }}",
+            workflow,
+        )
+        self.assertIn(
+            "sha: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.sha || steps.recover_release.outputs.sha }}",
+            workflow,
+        )
+        self.assertIn("id: recover_release", workflow)
+        self.assertIn("run: python3 scripts/recover_pending_release.py", workflow)
+        self.assertIn("if: ${{ steps.release.outputs.release_created != 'true' }}", workflow)
         self.assertIn("needs.release-please.outputs.release_created == 'true'", workflow)
         self.assertIn("ref: ${{ needs.release-please.outputs.tag_name }}", workflow)
         self.assertIn("group: baffle-crates-io-publish", workflow)
@@ -281,10 +293,13 @@ class PublishCratesTests(unittest.TestCase):
         self.assertIn("ref: ${{ inputs.ref || github.sha }}", namespace_job)
         self.assertIn("needs: [release-please, validate-release]", workflow)
         self.assertIn("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}", workflow)
-        self.assertEqual(workflow.count("secrets.CARGO_REGISTRY_TOKEN"), 1)
+        self.assertEqual(workflow.count("secrets.CARGO_REGISTRY_TOKEN"), 2)
+        recovery_step = workflow.split("id: recover_release", 1)[1].split("  synchronize-release-candidates:", 1)[0]
+        self.assertIn("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}", recovery_step)
+        self.assertNotIn("CARGO_REGISTRY_TOKEN", workflow.split("id: release\n", 1)[1].split("- name: Check out", 1)[0])
         self.assertLess(
             workflow.index("name: Publish both crates to crates.io"),
-            workflow.index("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}"),
+            workflow.rindex("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}"),
         )
 
 
