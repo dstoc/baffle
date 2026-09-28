@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/dstoc/baffle/compare/v0.2.0...v0.3.0) (2026-09-28)
+
+
+### Features
+
+* **release:** publish Linux and Apple Silicon archives ([#46](https://github.com/dstoc/baffle/issues/46)) ([5d60a97](https://github.com/dstoc/baffle/commit/5d60a970b046ea7c9484f4d47ab45698debb625e))
+
+
+### Bug Fixes
+
+* **release:** synchronize generated Cargo candidates ([#49](https://github.com/dstoc/baffle/issues/49)) ([6fa7c6d](https://github.com/dstoc/baffle/commit/6fa7c6db6cb37cd377d58a0e9df7dc06db675bbd))
+
 ## [0.2.0](https://github.com/dstoc/baffle/compare/v0.1.0...v0.2.0) (2026-09-27)
 
 

@@ -1,6 +1,6 @@
 [package]
 name = "baffle-proxy"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.96"
 description = "A standalone daemon for policy-controlled HTTP and HTTPS proxies"
