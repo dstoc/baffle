@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.0.0](https://github.com/dstoc/baffle/compare/v0.3.0...v1.0.0) (2026-10-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **config:** add v2 session file format ([#55](https://github.com/dstoc/baffle/issues/55))
+
+### Features
+
+* **ca:** add configured CA initialization ([#58](https://github.com/dstoc/baffle/issues/58)) ([739e63f](https://github.com/dstoc/baffle/commit/739e63fc427f9499656fbaf80992f4d9eb7a9e52))
+* **config:** add v2 session file format ([#55](https://github.com/dstoc/baffle/issues/55)) ([4822a6a](https://github.com/dstoc/baffle/commit/4822a6a27bb0002202ba3eca03c87ba153db975b))
+* **policy:** add unmatched host tunnel fallback ([#57](https://github.com/dstoc/baffle/issues/57)) ([498d250](https://github.com/dstoc/baffle/commit/498d250a674f4a2cf5314fffd5d388d578b0c30e))
+
+
+### Bug Fixes
+
+* **release:** handle empty PR outputs (baffle/54) ([#50](https://github.com/dstoc/baffle/issues/50)) ([9ecf564](https://github.com/dstoc/baffle/commit/9ecf564a9c6750a51877ebdd739ff7e36b05dca2))
+* **release:** recover pending merged releases (baffle/54) ([#51](https://github.com/dstoc/baffle/issues/51)) ([8384251](https://github.com/dstoc/baffle/commit/8384251e2893292463a7d1a4b8cd969c527a8b3d))
+* **release:** resume partial release artifact recovery ([#53](https://github.com/dstoc/baffle/issues/53)) ([d46d17d](https://github.com/dstoc/baffle/commit/d46d17d150e5a55dbed8afcb46a8f37493669bf8))
+* **release:** surface recovery failures ([#52](https://github.com/dstoc/baffle/issues/52)) ([27e8891](https://github.com/dstoc/baffle/commit/27e8891d5b460355a8f95d764268043bc00eb16a))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * baffle-client bumped from 0.3.0 to 0.4.0
+
 ## [0.3.0](https://github.com/dstoc/baffle/compare/v0.2.0...v0.3.0) (2026-09-28)
 
 
