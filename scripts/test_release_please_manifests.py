@@ -29,10 +29,8 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         self.assertIn("template template1 header header1 commit commit1 footer footer1", ci_workflow)
         self.assertNotIn("npm ci", ci_workflow)
         self.assertIn("scripts/test_release_please_version_selection.cjs", ci_workflow)
-        self.assertLess(
-            ci_workflow.index("scripts/test_release_please_version_selection.cjs"),
-            ci_workflow.index("name: Run tests"),
-        )
+        self.assertIn("release-please-version-selection:", ci_workflow)
+        self.assertIn("if: ${{ !inputs.workflow_ref }}", ci_workflow)
         self.assertIn("recover_release:", workflow)
         self.assertIn("type: boolean", workflow)
         self.assertIn("default: false", workflow)
@@ -72,11 +70,45 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         self.assertIn('--ref "$RELEASE_PR_BRANCH"', workflow)
         self.assertIn('--field ref="$candidate_sha"', workflow)
         self.assertIn("workflow_dispatch:\n    inputs:\n      ref:", ci_workflow)
+        self.assertEqual(
+            ci_workflow.count(
+                "workflow_ref:\n        description: Commit that contains current workflow regression fixtures"
+            ),
+            1,
+        )
         self.assertLess(
             workflow.index("name: Commit synchronized release candidate"),
             workflow.index("name: Dispatch Rust CI for generated release candidate"),
         )
         self.assertIn("needs.synchronize-release-candidates.result == 'skipped'", workflow)
+
+    def test_historical_release_validation_uses_current_workflow_fixture_checkout(self):
+        workflow = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
+        ci_workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
+        checks_job = ci_workflow.split("  checks:", 1)[1].split(
+            "\n  release-please-version-selection:", 1
+        )[0]
+        version_selection_job = ci_workflow.split(
+            "  release-please-version-selection:", 1
+        )[1].split("\n  namespace-integration:", 1)[0]
+        validate_job = workflow.split("  validate-release:", 1)[1].split(
+            "\n  package-binaries:", 1
+        )[0]
+        required_job = ci_workflow.split("  required-checks:", 1)[1]
+
+        self.assertNotIn("test_release_please_version_selection.cjs", checks_job)
+        self.assertIn("ref: ${{ inputs.ref || github.sha }}", checks_job)
+        self.assertIn(
+            "ref: ${{ inputs.workflow_ref || github.sha }}", version_selection_job
+        )
+        self.assertIn("if: ${{ !inputs.workflow_ref }}", version_selection_job)
+        self.assertIn("node scripts/test_release_please_version_selection.cjs", version_selection_job)
+        self.assertIn("ref: ${{ needs.release-please.outputs.sha }}", validate_job)
+        self.assertIn("workflow_ref: ${{ github.sha }}", validate_job)
+        self.assertIn("needs.release-please-version-selection", required_job)
+        self.assertIn("VERSION_SELECTION_RESULT", required_job)
+        self.assertIn('VERSION_SELECTION_RESULT" != "skipped"', required_job)
+        self.assertIn('[ -z "$WORKFLOW_REF" ]', required_job)
 
     def test_release_creation_calls_reusable_binary_packaging_at_exact_sha(self):
         release_please = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
@@ -128,7 +160,7 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         self.assertIn("RUSTFLAGS: --cfg baffle_integration_test", workflow)
         self.assertIn("--test daemon_proxy", workflow)
         self.assertIn(
-            "needs: [checks, namespace-integration, macos-unix-integration, verify-release-packages]",
+            "needs: [checks, release-please-version-selection, namespace-integration, macos-unix-integration, verify-release-packages]",
             workflow,
         )
         self.assertIn("MACOS_RESULT: ${{ needs.macos-unix-integration.result }}", workflow)
