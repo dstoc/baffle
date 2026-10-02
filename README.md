@@ -1,272 +1,257 @@
 # Baffle
 
-Baffle is a policy-controlled HTTPS proxy daemon for Linux x86-64 and macOS
-Apple Silicon. One daemon can manage multiple sessions. Each session has its
-own policy, Unix data socket, and lifecycle. A required native Apple Silicon CI
-check builds Baffle and exercises the control and proxy sockets against a
-local HTTPS origin before changes can merge.
+Baffle is a policy-controlled HTTPS proxy. A trusted orchestrator creates a
+session through a private Unix control socket. Baffle returns a separate Unix
+data socket for that session, which the orchestrator gives to its workload.
+This gives each workload a dedicated proxy route. Requests sent through its
+socket can reach only the exact hosts and ports in the session policy.
 
-Baffle allows traffic only to exact host and port rules. A rule can tunnel
-HTTPS without decrypting it or intercept HTTPS so Baffle can check paths and
-add daemon-managed credentials. Baffle denies destinations and requests that
-do not match a session policy.
-
-## Security model and limitations
-
-* **Trust model:** Clients are untrusted and may deliberately try to bypass
-  restrictions. Sites on the allowlist are assumed trustworthy. Baffle permits
-  only explicitly configured hostnames and ports; the default port is 443.
-* **HTTPS-only:** Clients must use HTTP `CONNECT` to reach HTTPS destinations.
-  Baffle rejects plaintext HTTP requests on every port. HTTPS on other
-  explicitly configured ports is supported.
-* **Path restrictions:** When path restrictions apply, Baffle intercepts HTTPS
-  and validates the CONNECT hostname, TLS SNI, and HTTP authority. It checks
-  every intercepted request. If required interception fails, Baffle rejects
-  the connection instead of opening an opaque tunnel.
-* **Credential handling:** Baffle injects daemon-managed credentials only
-  into authorized HTTPS requests after successful interception, upstream TLS
-  identity verification, and policy checks. It does not inject credentials
-  into plaintext requests or opaque tunnels. Baffle forwards upstream
-  responses without filtering credential values, so trust allowlisted sites
-  with injected credentials.
-* **Opaque tunnels:** Explicit tunnel-only rules support destinations without
-  path restrictions or credential injection. Baffle cannot inspect tunnel
-  contents, prove they carry HTTPS, or verify the upstream certificate; the
-  client must verify the upstream TLS identity.
-* **Network limitations:** Baffle does not prevent DNS rebinding or restrict
-  resolved destination IP addresses. An allowlisted hostname may resolve to
-  an internal or otherwise sensitive address.
-
-Only the trusted operator should access the control socket. Give each client
-access only to its assigned Unix data socket. Baffle has no internal per-session
-TCP listeners. Deployments that require destination-IP restrictions must still
-enforce suitable DNS and network-egress controls.
-
-For CA provisioning, configuration, detailed policy behavior, secret storage,
-and isolation requirements, see the [security and deployment guide](docs/security-deployment.md)
-and [configuration reference](docs/configuration.md). Baffle does not create
-the sandbox or install its CA into client trust stores; the deployment must
-arrange those separately.
+Baffle can tunnel HTTPS without inspecting it, or intercept HTTPS to check
+request paths and add daemon-managed credentials. It is currently verified on
+Linux x86-64 and macOS Apple Silicon.
 
 ## Install
 
-The executable is named `baffle`, the Cargo package is named `baffle-proxy`,
-and the client library is the separate workspace package `baffle-client`.
+Each [GitHub release](https://github.com/dstoc/baffle/releases/latest)
+provides these assets:
 
-Release Please maintains version and changelog pull requests. Each published
-release includes Linux x86-64 and Apple Silicon macOS archives. Download the
-[Linux x86-64 archive](https://github.com/dstoc/baffle/releases/latest), the
-[Apple Silicon macOS archive](https://github.com/dstoc/baffle/releases/latest), and
-the [combined checksum file](https://github.com/dstoc/baffle/releases/latest/download/SHA256SUMS)
-from the GitHub release page:
-
-- Linux: `baffle-proxy-v<version>-x86_64-unknown-linux-gnu.tar.gz`
+- Linux x86-64: `baffle-proxy-v<version>-x86_64-unknown-linux-gnu.tar.gz`
 - macOS Apple Silicon: `baffle-proxy-v<version>-aarch64-apple-darwin.tar.gz`
-- Both archives: [`SHA256SUMS`](https://github.com/dstoc/baffle/releases/latest/download/SHA256SUMS)
+- Both platforms: `SHA256SUMS`
 
-Each archive includes Baffle's root `LICENSE`, README, documentation, examples,
-and target-specific third-party license and notice texts at
-`share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt`.
+Set `VERSION` to the version shown on the latest release page. The examples
+below download the archive and `SHA256SUMS`, then verify the archive before
+extracting it. For example, on Linux:
 
 ```sh
-VERSION=vX.Y.Z
-tar -xzf "baffle-proxy-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+set -e
+VERSION=0.3.0 # set this to the current release version
+ARCHIVE="baffle-proxy-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+curl -fL -o "$ARCHIVE" "https://github.com/dstoc/baffle/releases/download/v${VERSION}/$ARCHIVE"
+curl -fL -o SHA256SUMS "https://github.com/dstoc/baffle/releases/download/v${VERSION}/SHA256SUMS"
+CHECKSUM="$(grep " $ARCHIVE$" SHA256SUMS)"
+printf '%s\n' "$CHECKSUM" | sha256sum -c -
+tar -xzf "$ARCHIVE"
 sudo install -m 0755 baffle /usr/local/bin/baffle
 baffle --help
 ```
 
-On macOS Apple Silicon, use the `aarch64-apple-darwin` archive and install it in
-your user-owned `PATH` directory:
+On macOS Apple Silicon, use the `aarch64-apple-darwin` archive and verify it
+with `shasum -a 256 -c -`:
 
 ```sh
-VERSION=vX.Y.Z
-tar -xzf "baffle-proxy-${VERSION}-aarch64-apple-darwin.tar.gz"
+set -e
+VERSION=0.3.0 # set this to the current release version
+ARCHIVE="baffle-proxy-v${VERSION}-aarch64-apple-darwin.tar.gz"
+curl -fL -o "$ARCHIVE" "https://github.com/dstoc/baffle/releases/download/v${VERSION}/$ARCHIVE"
+curl -fL -o SHA256SUMS "https://github.com/dstoc/baffle/releases/download/v${VERSION}/SHA256SUMS"
+CHECKSUM="$(grep " $ARCHIVE$" SHA256SUMS)"
+printf '%s\n' "$CHECKSUM" | shasum -a 256 -c -
+tar -xzf "$ARCHIVE"
 mkdir -p "$HOME/.local/bin"
 install -m 0755 baffle "$HOME/.local/bin/baffle"
 export PATH="$HOME/.local/bin:$PATH"
 baffle --help
 ```
 
-The Linux binary links to the system GNU C library. To build from source on
-Linux, install these native dependencies first:
-
-```sh
-sudo apt-get install build-essential cmake libclang-dev
-cargo install --path . --locked --bin baffle
-```
-
-On macOS, install CMake and LLVM with Homebrew, set `LIBCLANG_PATH` to
-`$(brew --prefix llvm)/lib`, then build with Rust 1.96 or newer:
-
-```sh
-brew install cmake llvm
-export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
-cargo build --locked --target aarch64-apple-darwin --bin baffle
-```
-
-These native packages are needed only when compiling from source. A prebuilt
-release binary does not require them at runtime. See the
-[release process](docs/releasing.md) for versioning, review, CI, and packaging
-instructions.
+The Linux archive targets GNU/Linux and links to the system GNU C library.
+Source builds require Rust 1.96 or newer, CMake, Clang, and libclang. See the
+[release guide](docs/releasing.md) for platform build dependencies.
 
 ## Quick start
 
-Create the daemon user, runtime directories, CA, and daemon configuration as
-described in the [security and deployment guide](docs/security-deployment.md).
-Edit [`examples/daemon.toml`](examples/daemon.toml) for the daemon UID and your
-installation paths. The command below uses the Linux paths from that example.
-For macOS, use per-user configuration and runtime paths as described in the
-[security and deployment guide](docs/security-deployment.md).
+This local example runs Baffle as your current user. It creates a temporary CA
+because the daemon requires one, even though this tunnel-only session does not
+use it. Keep the temporary directory private.
+
+In a first terminal, create the daemon and session configuration files:
 
 ```sh
-baffle daemon --config /etc/baffle/daemon.toml
+set -e
+umask 077
+export BAFFLE_DIR="$(mktemp -d "/tmp/baffle-quickstart.XXXXXX")"
+mkdir -p "$BAFFLE_DIR/proxies" "$BAFFLE_DIR/secrets"
+chmod 0700 "$BAFFLE_DIR" "$BAFFLE_DIR/proxies" "$BAFFLE_DIR/secrets"
+BAFFLE_UID="$(id -u)"
+
+cat > "$BAFFLE_DIR/ca.cnf" <<'EOF'
+[req]
+distinguished_name = distinguished_name
+x509_extensions = v3_ca
+prompt = no
+
+[distinguished_name]
+CN = Baffle Quick Start CA
+
+[v3_ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+EOF
+
+openssl genpkey \
+  -algorithm EC \
+  -pkeyopt ec_paramgen_curve:P-256 \
+  -out "$BAFFLE_DIR/ca-key.pem"
+openssl req \
+  -new -x509 \
+  -key "$BAFFLE_DIR/ca-key.pem" \
+  -out "$BAFFLE_DIR/ca.pem" \
+  -days 365 \
+  -config "$BAFFLE_DIR/ca.cnf"
+chmod 0600 "$BAFFLE_DIR/ca-key.pem"
+
+cat > "$BAFFLE_DIR/daemon.toml" <<EOF
+[daemon]
+control_socket = "$BAFFLE_DIR/control.sock"
+socket_dir = "$BAFFLE_DIR/proxies"
+trusted_operator_uid = $BAFFLE_UID
+create_mode = "inline"
+
+[ca]
+certificate = "$BAFFLE_DIR/ca.pem"
+private_key = "$BAFFLE_DIR/ca-key.pem"
+
+[secrets]
+directory = "$BAFFLE_DIR/secrets"
+EOF
+
+cat > "$BAFFLE_DIR/session.toml" <<'EOF'
+version = 2
+persistent = true
+socket_name = "quickstart.sock"
+
+[rules."example.com"]
+EOF
+
+echo "Use this directory in the second terminal: $BAFFLE_DIR"
+baffle daemon --config "$BAFFLE_DIR/daemon.toml"
 ```
 
-On Linux, top-level control commands use `/run/baffle/control.sock` by default.
-On macOS, they use `$HOME/Library/Caches/Baffle/control.sock`. Use
-`--control-socket PATH` to select the path from the daemon configuration:
-
-Create a minimal tunnel session in `github.toml`:
+The minimum session policy is a version and one quoted host rule:
 
 ```toml
 version = 2
 
-[rules."github.com"]
+[rules."example.com"]
 ```
+
+This rule defaults to an opaque HTTPS tunnel because it has no path checks or
+managed credentials.
+
+The walkthrough adds `persistent = true` and a socket name so `create` returns
+and the socket path is predictable.
+
+In a second terminal, set `BAFFLE_DIR` to the path printed above, then create
+the session:
 
 ```sh
-# Inline mode: Baffle reads and validates the version 2 session file.
-baffle create --config ./github.toml
-
-# File-only mode: Baffle sends this name; the daemon loads it from its
-# configured session directory.
-baffle create cladding/github.toml
-
-baffle list
-baffle stop <session-id>
-baffle reload <session-id>
-baffle reload --all
+export BAFFLE_DIR="/tmp/baffle-quickstart.<your-suffix>"
+baffle create \
+  --control-socket "$BAFFLE_DIR/control.sock" \
+  --config "$BAFFLE_DIR/session.toml"
 ```
 
-The control socket is private. Run these commands as the configured
-`trusted_operator_uid`, with access to the socket's mode-`0700` parent
-directory. An ephemeral create prints its session ID and data-socket path, then
-keeps running as the lease owner until Ctrl+C or process termination. A
-persistent create prints that it is persistent and returns; stop it with
-`baffle stop <session-id>`.
+The command prints a session ID and its assigned data socket:
 
-For a file-backed session, update its administrator-managed TOML file and run
-`baffle reload <session-id>` to apply the validated configuration to newly
-accepted connections. `baffle reload --all` reports each file-backed session
-separately and exits unsuccessfully if any reload fails. Reload preserves the
-session ID and creator lease. Existing connections keep their policy and
-credentials until they close, so reload is not immediate credential
-revocation. See the [deployment guide](docs/security-deployment.md) for a
-safe update sequence.
+```text
+Created persistent session <session-id> (it remains active after this command exits).
+Data socket: <BAFFLE_DIR>/proxies/quickstart.sock
+```
 
-The two create forms are exclusive. `--config` names a local file and is
-available when the daemon accepts inline creates. The positional name is
-relative to the daemon's `session_config_dir`; the client does not read that
-file. See [configuration](docs/configuration.md) and the
-[control protocol](docs/control-protocol.md) for file ownership and path rules.
+The example uses `$BAFFLE_DIR/proxies/quickstart.sock`. By default, a session
+is ephemeral: `create` prints a leased-session message and stays open to hold
+the lease. The session stops when that command exits.
 
-The Rust `client` example creates an ephemeral session and sends CONNECT for
-`example.com:443`. It confirms the tunnel response and then closes the session;
-it does not send a TLS request. For a complete HTTPS request, use the
-[Cladding integration](docs/cladding-integration.md). The checked-in Linux
-example sets the daemon's session socket directory to `/run/baffle/proxies`.
-On macOS, use a private directory under
-`$HOME/Library/Caches/Baffle`. See
-[`examples/session.toml`](examples/session.toml) for a version 2 session file.
+To send a real HTTPS request, connect a local consumer-side TCP adapter to the
+Unix socket. `curl` uses TCP here, so `socat` exposes the socket through a
+loopback-only adapter outside Baffle. Baffle itself listens only on Unix
+sockets:
 
-Consumers can connect to the assigned Unix data socket directly. The
-[Cladding integration example](docs/cladding-integration.md) uses `socat`
-outside Baffle to expose that socket through a local TCP listener. Protect the
-socket and listener, and apply the client egress controls described in the
-[deployment guide](docs/security-deployment.md).
+```sh
+socat TCP-LISTEN:18080,bind=127.0.0.1,reuseaddr,fork \
+  UNIX-CONNECT:"$BAFFLE_DIR/proxies/quickstart.sock" &
+ADAPTER_PID=$!
+curl --noproxy "" --proxy http://127.0.0.1:18080 https://example.com/
+kill "$ADAPTER_PID"
+```
 
-## How it works
+Stop the persistent session with the ID printed by `create`, then stop the
+daemon with Ctrl+C in the first terminal:
 
-The daemon owns a private Unix control socket and a managed certificate
-authority. A trusted orchestrator creates a session over the control socket
-and gets the path to that session's Unix data socket. Rama handles proxy
-traffic directly on the Baffle-owned Unix listener.
+```sh
+SESSION_ID="paste-session-id-from-create-output"
+baffle stop "$SESSION_ID" --control-socket "$BAFFLE_DIR/control.sock"
+```
 
-The current implementation gives every session immutable policy generations,
-a Rama runtime, credential state, and resource counters. Each accepted
-connection keeps the generation active when it was accepted. The runtime authorizes
-the configured hostname and port before dialing. Baffle does not filter or pin
-DNS answers. The session manager shares the Tokio runtime and CA material. See
-the [architecture guide](docs/architecture.md) for component details and data
-flows.
+## Security model
 
-Apply the controls described in [Security model and
-limitations](#security-model-and-limitations) when your deployment's threat
-model requires them.
+- Baffle accepts HTTPS destinations through `CONNECT` and rejects plaintext
+  HTTP requests.
+- A tunnel rule is opaque. Baffle cannot inspect its paths, add managed
+  credentials, or verify the upstream TLS certificate. The client must verify
+  the upstream TLS identity.
+- Path restrictions and managed credentials require HTTPS interception.
+  Interception fails closed if Baffle cannot inspect the connection. Baffle
+  adds managed credentials only after it verifies upstream TLS identity and
+  the request policy. Baffle forwards upstream responses without filtering
+  injected credential values. Only allowlist sites that you trust with those
+  credentials, because a site can return them in a response.
+- Baffle authorizes exact configured hostnames and ports. It does not filter
+  DNS answers or destination IP addresses; apply DNS and network egress
+  controls when your deployment needs address restrictions.
+- Keep the control socket available only to the trusted operator. Give a
+  workload only its assigned data socket. Baffle does not create a sandbox or
+  prevent clients from using another network route.
+
+See the [security and deployment guide](docs/security-deployment.md) for the
+full threat model, CA setup, socket permissions, and isolation requirements.
+
+## Sessions and reloads
+
+Each session has its own policy and data socket. A rule without `paths` or
+`inject` defaults to an opaque tunnel unless it sets `mode = "intercept"`.
+Rules with `paths` or `inject` inspect HTTPS requests; Baffle checks the
+configured paths or adds the authorized credential. See the
+[session configuration reference](docs/configuration.md) and the checked-in
+[credential example](examples/session-credentials.toml).
+
+When an operator reloads a daemon-managed session file, new connections use
+the validated policy. Existing connections continue with the policy they
+already accepted until they close. Reload does not revoke credentials on an
+open connection. See the [deployment guide](docs/security-deployment.md) for
+safe updates and the [architecture guide](docs/architecture.md) for component
+details.
+
+## Documentation
+
+- [Configuration](docs/configuration.md): daemon settings, v2 session files,
+  defaults, validation, and policy examples.
+- [Security and deployment](docs/security-deployment.md): threat model, CA
+  provisioning, secret storage, socket access, and network isolation.
+- [Control protocol](docs/control-protocol.md): request framing, response
+  schemas, errors, and session leases.
+- [Rust client](docs/client.md): typed client API and direct protocol use.
+- [Consumer integration](docs/cladding-integration.md): connect a workload to
+  its assigned socket, including an external `socat` adapter example.
+- [Architecture](docs/architecture.md): request flow and session lifecycle.
+- [Integration testing](docs/integration-testing.md): test coverage and the
+  privileged Linux namespace test.
+- [Release process](docs/releasing.md): versioning, release review, and
+  binary packaging.
+
+The [`examples/`](examples/) directory includes daemon and v2 session files.
+The archive contains Baffle's MIT license and third-party license notices.
 
 ## Development
 
-Build the workspace and run its checks:
+Build the workspace and run its checks with:
 
 ```sh
 cargo build --locked
 cargo test --locked
 cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo check --locked --examples
 ```
-
-Rama is the only supported runtime. Source builds require Rust 1.96 or newer,
-CMake, Clang, and libclang. Linux builds use `build-essential` and
-`libclang-dev`. macOS builds use Homebrew `cmake` and `llvm`, with
-`LIBCLANG_PATH` set to `$(brew --prefix llvm)/lib`. The release workflow
-installs these platform-specific dependencies before compiling each binary.
-
-GitHub Actions runs these checks, parses the checked-in TOML examples, runs the
-privileged Linux network-namespace integration job, and tests the daemon's Unix
-control and proxy sockets on native Apple Silicon macOS. See
-[integration testing](docs/integration-testing.md) for test coverage and the
-manual namespace test command.
-
-## Documentation
-
-- [Configuration reference](docs/configuration.md): daemon and session TOML,
-  defaults, validation, path matching, secrets, and examples.
-- [Control protocol](docs/control-protocol.md): version 1 framing, request and
-  response schemas, error codes, and session leases.
-- [Security and deployment](docs/security-deployment.md): threat model, CA
-  provisioning, secret storage, socket access, and network isolation.
-- [Architecture](docs/architecture.md): components, request flow, session
-  lifecycle, the runtime boundary, policy boundaries, and failure behavior.
-- [Rust client](docs/client.md): typed client API and direct protocol use.
-- [Cladding integration](docs/cladding-integration.md): a standalone
-  `socat` bridge example and integration steps for other consumers.
-- [Integration testing](docs/integration-testing.md): automated coverage and
-  the privileged namespace test.
-- [Benchmark report](docs/benchmarking.md): current Rama benchmark commands and
-  historical Hudsucker comparisons.
-- [Runtime migration note](docs/runtime-migration.md): the Hudsucker removal,
-  Rama-only status, and daemon-facing runtime boundary.
-- [Release review](docs/release-review.md): package, dependency, logging,
-  error-handling, and credential-protection review.
-- [Original v1 proposal (historical)](docs/baffle-proposal.md): product goals,
-  security requirements, and the original implementation plan.
-
-## Platform scope
-
-Baffle runs on Linux x86-64 and macOS Apple Silicon. It is a forward proxy. It
-does not install its CA into system trust stores, configure client proxy
-settings, or create a sandbox. Linux network namespaces are not available on
-macOS; deployments on either platform must apply their own client egress and
-outbound network controls when the threat model requires them. Baffle accepts
-client traffic directly on Unix data sockets and has no internal per-session
-TCP listeners. A consumer integrates through the public control protocol or
-`baffle-client` crate.
 
 ## License
 
 Baffle's original code is licensed under the MIT License. See [LICENSE](LICENSE).
-Third-party dependencies remain under their respective licenses. The release
-archive includes their license and notice texts at
-`share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt`. It also includes the
-CDLA-Permissive-2.0 agreement for the bundled Mozilla root certificate data.
