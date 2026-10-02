@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/dstoc/baffle/compare/v1.0.0...v1.0.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **release:** unify workspace version selection ([#60](https://github.com/dstoc/baffle/issues/60)) ([ed5f125](https://github.com/dstoc/baffle/commit/ed5f125b87c40e7e6f15171cb2ab3cc7627c9f15))
+
 ## [1.0.0](https://github.com/dstoc/baffle/compare/v0.3.0...v1.0.0) (2026-10-02)
 
 
