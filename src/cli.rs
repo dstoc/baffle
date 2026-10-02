@@ -100,8 +100,17 @@ pub struct CaArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum CaCommand {
+    /// Generate the configured CA private key and self-signed certificate.
+    Init(CaInitArgs),
     /// Export the public CA certificate for client trust stores.
     Export(CaExportArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CaInitArgs {
+    /// Path to the daemon TOML configuration file.
+    #[arg(long, value_name = "PATH")]
+    pub config: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -473,6 +482,31 @@ mod tests {
                     assert_eq!(args.config, PathBuf::from("/etc/baffle/daemon.toml"));
                     assert_eq!(args.output, PathBuf::from("/tmp/baffle-ca.pem"));
                 }
+                CaCommand::Init(_) => panic!("expected CA export command"),
+            },
+            _ => panic!("expected CA command"),
+        }
+    }
+
+    #[test]
+    fn ca_init_requires_a_daemon_config_path() {
+        assert!(Cli::try_parse_from(["baffle", "ca", "init"]).is_err());
+
+        let cli = Cli::try_parse_from([
+            "baffle",
+            "ca",
+            "init",
+            "--config",
+            "/etc/baffle/daemon.toml",
+        ])
+        .expect("CA init arguments should parse");
+
+        match cli.command {
+            Command::Ca(args) => match args.command {
+                CaCommand::Init(args) => {
+                    assert_eq!(args.config, PathBuf::from("/etc/baffle/daemon.toml"));
+                }
+                _ => panic!("expected CA init command"),
             },
             _ => panic!("expected CA command"),
         }

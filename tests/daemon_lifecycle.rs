@@ -1,28 +1,5 @@
 use std::process::{Command, Stdio};
 
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
-
-#[cfg(unix)]
-fn write_test_ca(directory: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let key_pair = KeyPair::generate().expect("CA key should be generated");
-    let mut parameters = CertificateParams::default();
-    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let certificate = parameters
-        .self_signed(&key_pair)
-        .expect("CA certificate should be generated");
-
-    let certificate_path = directory.join("ca.pem");
-    let private_key_path = directory.join("ca-key.pem");
-    std::fs::write(&certificate_path, certificate.pem()).expect("CA certificate should be saved");
-    std::fs::write(&private_key_path, key_pair.serialize_pem()).expect("CA key should be saved");
-    std::fs::set_permissions(&private_key_path, std::fs::Permissions::from_mode(0o600))
-        .expect("CA key permissions should be restricted");
-    (certificate_path, private_key_path)
-}
-
 #[test]
 fn binary_help_lists_daemon_command() {
     let output = Command::new(env!("CARGO_BIN_EXE_baffle"))
@@ -33,6 +10,26 @@ fn binary_help_lists_daemon_command() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).expect("help should be UTF-8");
     assert!(help.contains("daemon"));
+}
+
+#[test]
+fn ca_init_reports_invalid_daemon_configuration() {
+    let directory = tempfile::tempdir().expect("temporary config directory should be created");
+    let config_path = directory.path().join("daemon.toml");
+    std::fs::write(&config_path, "[daemon]\n").expect("invalid daemon config should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("ca")
+        .arg("init")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("CA init command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid daemon configuration at"));
+    assert!(stderr.contains(&config_path.display().to_string()));
 }
 
 #[cfg(unix)]
@@ -49,7 +46,8 @@ fn daemon_starts_and_stops_on_interrupt() {
 
     let config_dir = tempfile::tempdir().expect("temporary config directory should be created");
     let config_path = config_dir.path().join("daemon.toml");
-    let (certificate_path, private_key_path) = write_test_ca(config_dir.path());
+    let certificate_path = config_dir.path().join("ca.pem");
+    let private_key_path = config_dir.path().join("ca-key.pem");
     let control_socket = config_dir.path().join("run/control.sock");
     let socket_directory =
         tempfile::tempdir_in("/tmp").expect("short temporary socket directory should be created");
@@ -80,6 +78,49 @@ directory = "{secrets}"
         secrets = config_dir.path().join("secrets").display(),
     );
     fs::write(&config_path, config).expect("temporary config should be written");
+
+    let initialize = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("ca")
+        .arg("init")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("CA init command should run");
+    assert!(
+        initialize.status.success(),
+        "CA init should succeed: {}",
+        String::from_utf8_lossy(&initialize.stderr)
+    );
+    let initialize_stdout = String::from_utf8_lossy(&initialize.stdout);
+    assert!(initialize_stdout.contains("Created Baffle interception CA"));
+    assert!(initialize_stdout.contains(&certificate_path.display().to_string()));
+    assert!(initialize_stdout.contains(&private_key_path.display().to_string()));
+    let initialize_output = format!(
+        "{}{}",
+        initialize_stdout,
+        String::from_utf8_lossy(&initialize.stderr)
+    );
+    assert!(!initialize_output.contains("PRIVATE KEY"));
+
+    let exported_certificate = config_dir.path().join("exported-ca.pem");
+    let export = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("ca")
+        .arg("export")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--output")
+        .arg(&exported_certificate)
+        .output()
+        .expect("CA export command should run");
+    assert!(
+        export.status.success(),
+        "CA export should work after init: {}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    assert_eq!(
+        fs::read(&exported_certificate).expect("exported CA should be readable"),
+        fs::read(&certificate_path).expect("initialized CA should be readable")
+    );
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_baffle"))
         .arg("daemon")
