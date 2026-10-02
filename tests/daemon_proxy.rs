@@ -535,6 +535,125 @@ async fn real_daemon_applies_v2_inferred_interception_and_policy_through_file_re
 }
 
 #[tokio::test]
+async fn real_daemon_reloads_unmatched_tunnel_policy_without_cancelling_connections() {
+    let upstream = spawn_echo_origin().await;
+    let daemon = DaemonProcess::start_file_only_with_upstream_ca(2, &[], None);
+    let config_name = "policies/unmatched.toml";
+    let config = |unmatched: Option<&str>| {
+        let unmatched_setting = unmatched
+            .map(|policy| format!("unmatched = \"{policy}\"\n"))
+            .unwrap_or_default();
+        format!(
+            "version = 2\npersistent = true\n{unmatched_setting}\n[rules.\"localhost\"]\nmode = \"tunnel\"\nports = [{}]\n",
+            upstream.address.port(),
+        )
+    };
+    daemon.write_session_config(config_name, &config(None));
+    let (_, created) = daemon.create_from_file(config_name);
+    assert_eq!(created["ok"], true, "v2 file create failed: {created:?}");
+    let proxy_socket = socket_from(&created);
+    let id = created["result"]["id"]
+        .as_str()
+        .expect("file-backed session should have an ID")
+        .to_owned();
+
+    daemon.write_session_config(config_name, &config(Some("deny")));
+    let (_, unchanged) = daemon.request(&reload_request(&id));
+    assert_eq!(unchanged["result"]["status"], "unchanged", "{unchanged}");
+
+    assert_status(
+        &proxy_socket,
+        "CONNECT unmatched.localhost:443 HTTP/1.1\r\nHost: unmatched.localhost:443\r\n\r\n",
+        &["403"],
+    )
+    .await;
+
+    let mut established = connect_tunnel(
+        &proxy_socket,
+        &format!("localhost:{}", upstream.address.port()),
+    )
+    .await;
+    established
+        .write_all(b"before-reload")
+        .await
+        .expect("existing tunnel should accept data");
+    let mut response = [0; 13];
+    established
+        .read_exact(&mut response)
+        .await
+        .expect("existing tunnel should receive its echo");
+    assert_eq!(&response, b"before-reload");
+
+    daemon.write_session_config(config_name, &config(Some("tunnel")));
+    let (_, reloaded) = daemon.request(&reload_request(&id));
+    assert_eq!(reloaded["result"]["status"], "reloaded", "{reloaded}");
+    let (_, unchanged) = daemon.request(&reload_request(&id));
+    assert_eq!(unchanged["result"]["status"], "unchanged", "{unchanged}");
+
+    assert_status(
+        &proxy_socket,
+        "CONNECT unmatched.localhost:443 HTTP/1.1\r\nHost: unmatched.localhost:443\r\n\r\n",
+        &["200", "502"],
+    )
+    .await;
+    established
+        .write_all(b"after-enable")
+        .await
+        .expect("reload must keep an accepted tunnel active");
+    let mut response = [0; 12];
+    established
+        .read_exact(&mut response)
+        .await
+        .expect("accepted tunnel should remain usable after reload");
+    assert_eq!(&response, b"after-enable");
+
+    daemon.write_session_config(config_name, &config(Some("deny")));
+    let (_, denied) = daemon.request(&reload_request(&id));
+    assert_eq!(denied["result"]["status"], "reloaded", "{denied}");
+    assert_status(
+        &proxy_socket,
+        "CONNECT unmatched.localhost:443 HTTP/1.1\r\nHost: unmatched.localhost:443\r\n\r\n",
+        &["403"],
+    )
+    .await;
+    established
+        .write_all(b"after-disable")
+        .await
+        .expect("reload must not revoke an accepted tunnel");
+    let mut response = [0; 13];
+    established
+        .read_exact(&mut response)
+        .await
+        .expect("accepted tunnel should remain usable after policy removal");
+    assert_eq!(&response, b"after-disable");
+
+    let generic_config = "version = 2\npersistent = true\nunmatched = \"tunnel\"\n";
+    daemon.write_session_config("policies/generic.toml", generic_config);
+    let (_, generic_created) = daemon.create_from_file("policies/generic.toml");
+    assert_eq!(
+        generic_created["ok"], true,
+        "empty unmatched-tunnel file should create: {generic_created:?}"
+    );
+    let generic_socket = socket_from(&generic_created);
+    assert_status(
+        &generic_socket,
+        "CONNECT unmatched.localhost:443 HTTP/1.1\r\nHost: unmatched.localhost:443\r\n\r\n",
+        &["200", "502"],
+    )
+    .await;
+    let generic_id = generic_created["result"]["id"]
+        .as_str()
+        .expect("generic session should have an ID");
+    let (_, stopped) = daemon.request(&format!(
+        "version = 1\noperation = \"stop\"\nsession_id = {generic_id:?}\n"
+    ));
+    assert_eq!(stopped["result"]["stopped"], true, "{stopped}");
+
+    drop(established);
+    drop(upstream);
+}
+
+#[tokio::test]
 async fn real_daemon_isolates_injected_credentials_across_http2_streams_and_sessions() {
     let upstream_directory = tempfile::tempdir().expect("upstream fixture directory should exist");
     let (upstream_root, upstream_certificate, upstream_key) =

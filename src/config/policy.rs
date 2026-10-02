@@ -99,10 +99,6 @@ pub struct HeaderInjection {
     pub username: Option<String>,
 }
 pub(super) fn validate_rules(raw_rules: Vec<RawHostRule>) -> Result<Vec<HostRule>, ConfigError> {
-    if raw_rules.is_empty() {
-        return Err(ConfigError::new("at least one rule is required"));
-    }
-
     let mut hosts = HashSet::new();
     let mut rules = Vec::with_capacity(raw_rules.len());
     for (index, raw) in raw_rules.into_iter().enumerate() {

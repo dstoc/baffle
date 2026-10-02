@@ -225,7 +225,7 @@ fn reload_failure_text(reason: Option<&str>) -> &str {
         Some("configuration_not_found") => "configuration file was not found",
         Some("configuration_unavailable") => "configuration file could not be read safely",
         Some("configuration_invalid") => {
-            "configuration file is invalid; use version = 2, move session settings to the root, and use [rules.\"hostname\"] tables"
+            "configuration file is invalid; use version = 2, move session settings to the root, set unmatched to \"deny\" or \"tunnel\", and use [rules.\"hostname\"] tables"
         }
         Some("credentials_unavailable") => "credentials are unavailable",
         Some("listener_unavailable") => "replacement listener could not be created",
@@ -245,6 +245,12 @@ fn load_local_session_config(path: &std::path::Path) -> Result<SessionConfig> {
     Ok(SessionConfig {
         persistent: session.persistent,
         socket_name: session.socket_name,
+        unmatched: match session.unmatched {
+            crate::config::UnmatchedHostPolicy::Deny => baffle_client::UnmatchedHostPolicy::Deny,
+            crate::config::UnmatchedHostPolicy::Tunnel => {
+                baffle_client::UnmatchedHostPolicy::Tunnel
+            }
+        },
         rules: session
             .rules
             .into_iter()

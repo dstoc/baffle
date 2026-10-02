@@ -10,6 +10,11 @@ Baffle can tunnel HTTPS without inspecting it, or intercept HTTPS to check
 request paths and add daemon-managed credentials. It is currently verified on
 Linux x86-64 and macOS Apple Silicon.
 
+Sessions default to exact host and port rules. A session can also permit
+opaque HTTPS tunnels to DNS hostnames absent from its rules, on port 443 only.
+An explicit host rule always governs that hostname, including when the rule
+denies a port or path.
+
 ## Install
 
 Each [GitHub release](https://github.com/dstoc/baffle/releases/latest)
@@ -137,6 +142,11 @@ version = 2
 
 This rule defaults to an opaque HTTPS tunnel because it has no path checks or
 managed credentials.
+
+To allow opaque tunnels to DNS hostnames absent from the explicit `rules` map,
+add `unmatched = "tunnel"` at the document root. This fallback applies only to
+port 443. Omit the setting to keep the default-deny behavior. A hostname in
+`rules` always uses its explicit rule, even when that rule denies a request.
 
 The walkthrough adds `persistent = true` and a socket name so `create` returns
 and the socket path is predictable.

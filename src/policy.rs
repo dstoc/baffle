@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use url::Host;
 
 use crate::config::{
-    HeaderInjection, PathRule, RuleMode, SessionConfig, canonicalize_request_path,
+    HeaderInjection, PathRule, RuleMode, SessionConfig, UnmatchedHostPolicy,
+    canonicalize_request_path,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +46,7 @@ struct CompiledRule {
 /// Proxy handler clones share this value through an `Arc`.
 pub(crate) struct SessionPolicy {
     rules: HashMap<String, CompiledRule>,
+    unmatched: UnmatchedHostPolicy,
 }
 
 impl SessionPolicy {
@@ -64,7 +66,10 @@ impl SessionPolicy {
                 )
             })
             .collect();
-        Self { rules }
+        Self {
+            rules,
+            unmatched: session.unmatched,
+        }
     }
 
     /// Authorize a CONNECT target. A CONNECT authority without a port uses 443.
@@ -75,15 +80,19 @@ impl SessionPolicy {
     ) -> Result<(RuleMode, Destination), AuthorizationError> {
         let destination = parse_authority_text(authority, Some(443))?;
         validate_host_header_text(host_headers, &destination)?;
-        let rule = self
-            .rules
-            .get(&destination.host)
-            .filter(|rule| rule.ports.contains(&destination.port))
-            .ok_or(AuthorizationError::Denied)?;
-        if rule.mode == RuleMode::Tunnel && !rule.paths.is_empty() {
-            return Err(AuthorizationError::Denied);
+        if let Some(rule) = self.rules.get(&destination.host) {
+            if !rule.ports.contains(&destination.port)
+                || (rule.mode == RuleMode::Tunnel && !rule.paths.is_empty())
+            {
+                return Err(AuthorizationError::Denied);
+            }
+            return Ok((rule.mode, destination));
         }
-        Ok((rule.mode, destination))
+
+        if self.unmatched == UnmatchedHostPolicy::Tunnel && destination.port == 443 {
+            return Ok((RuleMode::Tunnel, destination));
+        }
+        Err(AuthorizationError::Denied)
     }
 
     /// Confirm that CONNECT authority and TLS SNI identify one intercept rule.
@@ -250,7 +259,7 @@ fn normalize_dns_name(input: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::ControlRequest;
+    use crate::config::{ControlRequest, SessionFile};
 
     use super::*;
 
@@ -267,6 +276,106 @@ mod tests {
         policy(&format!(
             "version = 1\noperation = \"create\"\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\nports = [443]\npaths = {paths}\n"
         ))
+    }
+
+    fn session_file_policy(input: &str) -> SessionPolicy {
+        SessionPolicy::compile(
+            &SessionFile::from_toml(input).expect("test session file should be valid"),
+        )
+    }
+
+    #[test]
+    fn unmatched_tunnel_policy_allows_only_valid_dns_hosts_on_port_443() {
+        let policy = session_file_policy("version = 2\nunmatched = \"tunnel\"\n");
+        let (mode, destination) = policy
+            .authorize_connect_authority("Other.Example.", &[])
+            .expect("an unmatched DNS hostname should use the tunnel fallback");
+        assert_eq!(mode, RuleMode::Tunnel);
+        assert_eq!(destination.host, "other.example");
+        assert_eq!(destination.port, 443);
+
+        for authority in [
+            "other.example:8443",
+            "127.0.0.1:443",
+            "127.1:443",
+            "*.example.com:443",
+            "bad host:443",
+            "user@other.example:443",
+        ] {
+            assert!(
+                policy.authorize_connect_authority(authority, &[]).is_err(),
+                "unmatched policy must reject {authority}"
+            );
+        }
+        assert_eq!(
+            policy.authorize_connect_authority("other.example:443", &["evil.example"]),
+            Err(AuthorizationError::InvalidAuthority)
+        );
+    }
+
+    #[test]
+    fn explicit_normalized_hosts_never_fall_back_after_a_denied_port() {
+        let policy = session_file_policy(
+            "version = 2\nunmatched = \"tunnel\"\n\n[rules.\"api.example.com\"]\nmode = \"intercept\"\nports = [443]\n",
+        );
+
+        assert_eq!(
+            policy
+                .authorize_connect_authority("other.example:443", &[])
+                .expect("absent hosts should use the unmatched policy")
+                .0,
+            RuleMode::Tunnel
+        );
+        assert_eq!(
+            policy
+                .authorize_connect_authority("API.EXAMPLE.COM.:443", &[])
+                .expect("normalized explicit host should match its rule")
+                .0,
+            RuleMode::Intercept
+        );
+        assert_eq!(
+            policy.authorize_connect_authority("api.example.com:8443", &[]),
+            Err(AuthorizationError::Denied)
+        );
+
+        let explicit_non_443 = session_file_policy(
+            "version = 2\nunmatched = \"tunnel\"\n\n[rules.\"api.example.com\"]\nports = [8443]\n",
+        );
+        assert_eq!(
+            explicit_non_443.authorize_connect_authority("api.example.com:443", &[]),
+            Err(AuthorizationError::Denied),
+            "a present rule that omits 443 must not use the 443 fallback"
+        );
+    }
+
+    #[test]
+    fn explicit_path_rules_remain_fail_closed_with_unmatched_tunneling() {
+        let policy = session_file_policy(
+            "version = 2\nunmatched = \"tunnel\"\n\n[rules.\"api.example.com\"]\npaths = [\"/allowed\"]\n",
+        );
+        let facts = RequestFacts {
+            method: "GET",
+            scheme: Some("https"),
+            uri_authority: Some("api.example.com:443"),
+            path: "/private",
+            host_headers: &["api.example.com"],
+            secure_transport: true,
+        };
+        assert_eq!(
+            policy.authorize_intercepted_request(&facts, "api.example.com:443"),
+            Err(AuthorizationError::Denied)
+        );
+    }
+
+    #[test]
+    fn empty_default_policy_denies_connect_destinations() {
+        for input in ["version = 2\n", "version = 2\nunmatched = \"deny\"\n"] {
+            let policy = session_file_policy(input);
+            assert_eq!(
+                policy.authorize_connect_authority("other.example:443", &[]),
+                Err(AuthorizationError::Denied)
+            );
+        }
     }
 
     #[test]

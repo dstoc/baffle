@@ -62,14 +62,19 @@ authority. Only after an intercepted request passes all checks can the handler
 add its configured headers. The Rama adapter maps its request and TLS context
 to shared request facts before applying the session policy.
 
-For HTTPS, `tunnel` rules permit an opaque CONNECT tunnel only when no path
-restriction or credential injection requires inspection. `intercept` rules
+For HTTPS, explicit `tunnel` rules permit an opaque CONNECT tunnel only when no
+path restriction or credential injection requires inspection. `intercept` rules
 require supported TLS negotiation and a matching SNI. The current code closes
 unsupported CONNECT payloads, missing or mismatched SNI, malformed, incomplete,
 or stalled ClientHello data, and TLS interception failures; it does not select
 an opaque fallback tunnel. A client must not force an opaque tunnel for a rule
 that needs inspection. Baffle treats proxy clients as untrusted and assumes
 allowlisted sites behave legitimately.
+
+The session-level unmatched-host policy defaults to deny. When enabled, it
+permits opaque CONNECT tunnels to unmatched DNS hostnames on port 443. A
+normalized hostname with an explicit rule always uses that rule, including
+when its port or request policy denies access.
 
 The policy authorizes the exact hostname and port before the runtime dials the
 destination. Baffle does not classify DNS answers, filter addresses,

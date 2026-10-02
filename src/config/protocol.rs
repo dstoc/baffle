@@ -5,7 +5,7 @@ pub(crate) const MAX_SESSION_CONFIG_COMPONENT_BYTES: usize = 255;
 use super::{
     ConfigError, MAX_SESSION_CONFIG_NAME_BYTES, PROTOCOL_VERSION, deserialize,
     policy::{RawHostRule, validate_rules},
-    session::{SessionConfig, validate_socket_name},
+    session::{SessionConfig, UnmatchedHostPolicy, validate_socket_name},
 };
 
 /// A validated control request. `Create` carries a validated policy, not raw TOML.
@@ -55,6 +55,7 @@ impl ControlRequest {
                             .socket_name
                             .map(|name| validate_socket_name(&name))
                             .transpose()?,
+                        unmatched: session.unmatched,
                         rules,
                     },
                 })
@@ -180,4 +181,6 @@ struct RawSessionSettings {
     persistent: bool,
     #[serde(default)]
     socket_name: Option<String>,
+    #[serde(default)]
+    unmatched: UnmatchedHostPolicy,
 }

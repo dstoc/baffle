@@ -118,10 +118,10 @@ async fn client_returns_typed_policy_and_capacity_errors() {
     let error = client
         .create(SessionConfig::new())
         .await
-        .expect_err("empty policy should be rejected");
+        .expect_err("the configured session limit should apply to an empty policy too");
     assert!(matches!(
         error,
-        baffle_client::ClientError::InvalidPolicy(_)
+        baffle_client::ClientError::CapacityLimit(_)
     ));
 
     client

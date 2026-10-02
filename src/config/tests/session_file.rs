@@ -1,4 +1,4 @@
-use crate::config::{RuleMode, SessionFile};
+use crate::config::{RuleMode, SessionFile, UnmatchedHostPolicy};
 
 const MINIMAL: &str = "version = 2\n\n[rules.\"example.com\"]\n";
 
@@ -19,7 +19,28 @@ fn parses_root_settings_quoted_hosts_and_session_defaults() {
     let minimal = SessionFile::from_toml(MINIMAL).expect("minimal v2 file should parse");
     assert!(!minimal.persistent);
     assert_eq!(minimal.socket_name, None);
+    assert_eq!(minimal.unmatched, UnmatchedHostPolicy::Deny);
     assert_eq!(minimal.rules[0].mode, RuleMode::Tunnel);
+}
+
+#[test]
+fn parses_unmatched_policy_and_allows_empty_rule_sets() {
+    let explicit_deny = SessionFile::from_toml("version = 2\nunmatched = \"deny\"\n")
+        .expect("an empty deny-all session should parse");
+    assert!(explicit_deny.rules.is_empty());
+    assert_eq!(explicit_deny.unmatched, UnmatchedHostPolicy::Deny);
+
+    let tunnel = SessionFile::from_toml("version = 2\nunmatched = \"tunnel\"\n")
+        .expect("an empty unmatched-tunnel session should parse");
+    assert!(tunnel.rules.is_empty());
+    assert_eq!(tunnel.unmatched, UnmatchedHostPolicy::Tunnel);
+
+    let invalid = SessionFile::from_toml("version = 2\nunmatched = \"intercept\"\n")
+        .expect_err("unsupported unmatched policies must fail");
+    assert_eq!(
+        invalid.to_string(),
+        "unmatched must be \"deny\" or \"tunnel\""
+    );
 }
 
 #[test]
@@ -186,7 +207,7 @@ fn rejects_v1_and_protocol_shaped_session_files_with_migration_hints() {
     assert!(
         session_table
             .to_string()
-            .contains("move persistent and socket_name")
+            .contains("move persistent, socket_name, and unmatched")
     );
 
     let old_rules = SessionFile::from_toml(
@@ -222,7 +243,8 @@ fn rejects_malformed_or_empty_v2_documents_without_echoing_values() {
             .expect("a path rule should infer interception");
     assert_eq!(inferred.rules[0].mode, RuleMode::Intercept);
 
-    let error =
-        SessionFile::from_toml("version = 2\n").expect_err("a session needs at least one rule");
-    assert!(error.to_string().contains("at least one rule"));
+    let empty = SessionFile::from_toml("version = 2\n")
+        .expect("an empty session should be a valid deny-all policy");
+    assert!(empty.rules.is_empty());
+    assert_eq!(empty.unmatched, UnmatchedHostPolicy::Deny);
 }

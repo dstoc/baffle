@@ -54,6 +54,7 @@ impl Client {
             session: SessionSettings {
                 persistent: config.persistent,
                 socket_name: config.socket_name,
+                unmatched: config.unmatched,
             },
             rules: config.rules,
         };
@@ -168,6 +169,8 @@ pub struct SessionConfig {
     pub persistent: bool,
     /// Optional Unix socket path relative to the daemon's session socket directory.
     pub socket_name: Option<String>,
+    /// Action for CONNECT destinations that have no explicit host rule.
+    pub unmatched: UnmatchedHostPolicy,
     /// Host allowlist rules for this proxy.
     pub rules: Vec<HostRule>,
 }
@@ -190,10 +193,33 @@ impl SessionConfig {
         self
     }
 
+    /// Set the policy for CONNECT destinations without an explicit host rule.
+    pub fn unmatched_host_policy(mut self, policy: UnmatchedHostPolicy) -> Self {
+        self.unmatched = policy;
+        self
+    }
+
     /// Add one host rule.
     pub fn with_rule(mut self, rule: HostRule) -> Self {
         self.rules.push(rule);
         self
+    }
+}
+
+/// Policy for CONNECT destinations that have no explicit host rule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnmatchedHostPolicy {
+    /// Deny destinations without an explicit host rule.
+    #[default]
+    Deny,
+    /// Permit opaque HTTPS tunnels to unmatched DNS hostnames on port 443.
+    Tunnel,
+}
+
+impl UnmatchedHostPolicy {
+    fn is_deny(&self) -> bool {
+        *self == Self::Deny
     }
 }
 
@@ -506,6 +532,8 @@ struct SessionSettings {
     persistent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     socket_name: Option<String>,
+    #[serde(skip_serializing_if = "UnmatchedHostPolicy::is_deny")]
+    unmatched: UnmatchedHostPolicy,
 }
 
 #[derive(Serialize)]
@@ -671,7 +699,8 @@ fn validate_session_config_name(name: &str) -> Result<(), ClientError> {
 mod tests {
     use super::{
         ClientError, CreateFromFileRequest, CreateRequest, HostRule, InjectionFormat,
-        SessionConfig, SessionSettings, map_remote_error, validate_session_config_name,
+        SessionConfig, SessionSettings, UnmatchedHostPolicy, map_remote_error,
+        validate_session_config_name,
     };
 
     #[test]
@@ -686,6 +715,7 @@ mod tests {
             session: SessionSettings {
                 persistent: true,
                 socket_name: policy.socket_name,
+                unmatched: policy.unmatched,
             },
             rules: policy.rules,
         })
@@ -709,12 +739,32 @@ mod tests {
             session: SessionSettings {
                 persistent: policy.persistent,
                 socket_name: policy.socket_name,
+                unmatched: policy.unmatched,
             },
             rules: policy.rules,
         })
         .expect("request should serialize");
 
         assert!(!encoded.contains("socket_name"));
+        assert!(!encoded.contains("unmatched"));
+    }
+
+    #[test]
+    fn serializes_opt_in_unmatched_tunneling_in_session_settings() {
+        let policy = SessionConfig::new().unmatched_host_policy(UnmatchedHostPolicy::Tunnel);
+        let encoded = toml::to_string(&CreateRequest {
+            version: 1,
+            operation: "create",
+            session: SessionSettings {
+                persistent: policy.persistent,
+                socket_name: policy.socket_name,
+                unmatched: policy.unmatched,
+            },
+            rules: policy.rules,
+        })
+        .expect("request should serialize");
+
+        assert!(encoded.contains("unmatched = \"tunnel\""));
     }
 
     #[test]

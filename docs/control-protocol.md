@@ -87,7 +87,9 @@ ports = [443]
 
 The checked-in [`examples/session.toml`](../examples/session.toml) is a
 version 2 session file parsed by a CI test. The control-protocol create request
-has a `session` table and one or more rules. `persistent` defaults to false.
+has a `session` table and zero or more rules. `persistent` defaults to false.
+`session.unmatched` defaults to `deny`; `tunnel` permits only opaque unmatched
+HTTPS tunnels on port 443.
 Each rule defaults to HTTPS port 443.
 
 Create a session from a daemon-managed file when the daemon uses
@@ -132,10 +134,10 @@ operation = "reload_all"
 The daemon remembers the relative file name used at creation. A reload does
 not accept a replacement file name. The daemon reads and validates that file
 with the same directory-confined, no-symlink checks used by create, then
-resolves its authorized credentials again. It compares the validated rules,
-effective socket path, and resolved credential values. TOML comments and
-formatting do not cause a reload. The session's persistence lifetime remains
-the lifetime selected at creation.
+resolves its authorized credentials again. It compares the unmatched-host
+policy, validated rules, effective socket path, and resolved credential values.
+TOML comments and formatting do not cause a reload. The session's persistence
+lifetime remains the lifetime selected at creation.
 
 A changed policy becomes active for connections accepted after the atomic
 generation switch. Connections already accepted keep their original policy

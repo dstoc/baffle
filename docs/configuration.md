@@ -185,15 +185,43 @@ version = 2
 [rules."example.com"]
 ```
 
+The optional `unmatched` setting controls CONNECT destinations whose normalized
+DNS hostname has no entry in `rules`:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `unmatched` | `deny` | `deny` rejects unmatched hosts. `tunnel` permits opaque HTTPS tunnels to unmatched DNS hostnames on port 443 only. |
+
+For example, this policy permits a generic HTTPS tunnel while keeping explicit
+host rules authoritative:
+
+```toml
+version = 2
+unmatched = "tunnel"
+
+[rules."api.example.com"]
+ports = [443]
+```
+
+The explicit rule controls every request for `api.example.com`. Its port or
+policy denials do not use the unmatched fallback. Baffle rejects IP literals,
+wildcards, malformed authorities, and unmatched ports other than 443. Tunnel
+traffic is opaque. Baffle does not inspect paths, inject managed credentials,
+or verify the upstream TLS certificate. The client must verify the upstream
+TLS identity.
+
+A session can have no explicit rules. With the default or explicit `deny`, it
+denies all CONNECT destinations. With `unmatched = "tunnel"`, it permits
+unmatched DNS hostnames on port 443.
+
 The schema version is separate from control protocol version 1. `persistent`
 defaults to `false`. Omit `socket_name` to use a generated session path. A
 named socket path is relative to `daemon.socket_dir` and can include nested
 directories. Baffle rejects absolute paths, empty, `.` or `..` components,
 symlinks, and paths that exceed the Unix socket path limit. It creates missing
 nested directories with mode `0700`, refuses occupied socket names, and
-removes Baffle-created directories when they are empty. At least one hostname
-rule is required. Duplicate hostnames after lowercasing and trailing-dot
-removal are invalid.
+removes Baffle-created directories when they are empty. Duplicate hostnames
+after lowercasing and trailing-dot removal are invalid.
 
 Move session settings to the document root and use quoted hostname table keys.
 For example, migrate this version 1 file:
