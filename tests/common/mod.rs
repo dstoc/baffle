@@ -151,7 +151,9 @@ impl DaemonProcess {
                 .try_wait()
                 .expect("daemon status should be readable")
             {
-                panic!("daemon exited before binding control socket: {status}");
+                let log = fs::read_to_string(&daemon.log_path)
+                    .unwrap_or_else(|error| format!("failed to read daemon log: {error}"));
+                panic!("daemon exited before binding control socket: {status}\n{log}");
             }
             assert!(
                 Instant::now() < deadline,
