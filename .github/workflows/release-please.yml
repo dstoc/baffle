@@ -121,6 +121,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ needs.release-please.outputs.sha }}
+      workflow_ref: ${{ github.sha }}
     permissions:
       contents: read
 
