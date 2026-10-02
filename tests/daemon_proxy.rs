@@ -21,8 +21,8 @@ use rcgen::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, UnixStream},
-    sync::mpsc,
-    task::JoinHandle,
+    sync::{mpsc, oneshot},
+    task::{JoinHandle, JoinSet},
     time::{sleep, timeout},
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector, rustls};
@@ -400,7 +400,7 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
     ));
     assert_eq!(stopped["result"]["stopped"], true);
     wait_for_path(&proxy_socket, false).await;
-    drop(upstream);
+    upstream.shutdown().await;
 }
 
 #[tokio::test]
@@ -531,7 +531,7 @@ async fn real_daemon_applies_v2_inferred_interception_and_policy_through_file_re
     ));
     assert_eq!(stopped["result"]["stopped"], true);
     wait_for_path(&proxy_socket, false).await;
-    drop(upstream);
+    upstream.shutdown().await;
 }
 
 #[tokio::test]
@@ -855,12 +855,32 @@ async fn spawn_echo_origin() -> EchoOrigin {
 struct TlsOrigin {
     address: std::net::SocketAddr,
     requests: mpsc::UnboundedReceiver<String>,
-    task: JoinHandle<()>,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
 }
 
 impl Drop for TlsOrigin {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl TlsOrigin {
+    async fn shutdown(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.take() {
+            timeout(Duration::from_secs(3), task)
+                .await
+                .expect("TLS origin should stop cleanly")
+                .expect("TLS origin task should not panic");
+        }
     }
 }
 
@@ -902,53 +922,65 @@ async fn spawn_tls_origin(certificate: Vec<u8>, key: Vec<u8>) -> TlsOrigin {
     .expect("TLS origin certificate should be accepted");
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let (requests_tx, requests) = mpsc::unbounded_channel();
+    let (shutdown, mut shutdown_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
+        let mut connections = JoinSet::new();
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let acceptor = acceptor.clone();
-            let requests = requests_tx.clone();
-            tokio::spawn(async move {
-                let Ok(tls) = timeout(Duration::from_secs(2), acceptor.accept(stream))
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .ok_or(())
-                else {
-                    return;
-                };
-                let mut reader = BufReader::new(tls);
-                let mut request = String::new();
-                loop {
-                    let mut line = String::new();
-                    let Ok(Ok(read)) =
-                        timeout(Duration::from_millis(500), reader.read_line(&mut line)).await
-                    else {
-                        return;
-                    };
-                    if read == 0 {
-                        return;
-                    }
-                    request.push_str(&line);
-                    if line == "\r\n" {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                accepted = listener.accept() => {
+                    let Ok((stream, _)) = accepted else {
                         break;
-                    }
+                    };
+                    let acceptor = acceptor.clone();
+                    let requests = requests_tx.clone();
+                    connections.spawn(async move {
+                        let Ok(tls) = timeout(Duration::from_secs(2), acceptor.accept(stream))
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                            .ok_or(())
+                        else {
+                            return;
+                        };
+                        let mut reader = BufReader::new(tls);
+                        let mut request = String::new();
+                        loop {
+                            let mut line = String::new();
+                            let Ok(Ok(read)) = timeout(
+                                Duration::from_millis(500),
+                                reader.read_line(&mut line),
+                            )
+                            .await else {
+                                return;
+                            };
+                            if read == 0 {
+                                return;
+                            }
+                            request.push_str(&line);
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                        let _ = requests.send(request);
+                        let mut tls = reader.into_inner();
+                        let _ = tls
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                            )
+                            .await;
+                    });
                 }
-                let _ = requests.send(request);
-                let mut tls = reader.into_inner();
-                let _ = tls
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                    )
-                    .await;
-            });
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
+            }
         }
+        while connections.join_next().await.is_some() {}
     });
     TlsOrigin {
         address,
         requests,
-        task,
+        shutdown: Some(shutdown),
+        task: Some(task),
     }
 }
 
