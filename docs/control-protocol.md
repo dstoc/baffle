@@ -68,7 +68,9 @@ The request tables and policy fields are defined in the
 [configuration reference](configuration.md).
 
 Create an ephemeral session with an inline policy when the daemon uses the
-default `inline` mode:
+default `inline` mode. This is the version 1 control-protocol request sent by
+the typed client; it is not a session file. `baffle create --config` reads the
+separate version 2 session-file format in the [configuration reference](configuration.md):
 
 ```toml
 version = 1
@@ -83,9 +85,10 @@ mode = "tunnel"
 ports = [443]
 ```
 
-The checked-in [`examples/session.toml`](../examples/session.toml) is parsed
-by a CI test. A create request requires a `session` table and at least one
-rule. `persistent` defaults to false. Each rule defaults to HTTPS port 443.
+The checked-in [`examples/session.toml`](../examples/session.toml) is a
+version 2 session file parsed by a CI test. The control-protocol create request
+has a `session` table and one or more rules. `persistent` defaults to false.
+Each rule defaults to HTTPS port 443.
 
 Create a session from a daemon-managed file when the daemon uses
 `create_mode = "file_only"`:
@@ -100,10 +103,10 @@ The path is relative to `daemon.session_config_dir`. It must end in `.toml`,
 use `/` between components, and contain no empty, `.` or `..` components.
 Backslashes, colons, control characters, absolute paths, and components over
 255 bytes are rejected. The full name is limited to 1,024 UTF-8 bytes. The
-file must contain a valid version 1 `create` request, including its session
-policy. The daemon reads at most 262,144 bytes and uses that snapshot for this
-create. See [configuration](configuration.md) for directory ownership,
-permissions, and symlink rules.
+file must contain a valid version 2 session file. The daemon reads at most
+262,144 bytes and uses that snapshot for this create. See
+[configuration](configuration.md) for the session schema and directory
+ownership, permissions, and symlink rules.
 
 The Rust client exposes `Client::create_from_file`; its returned `Session`
 holds the ephemeral lease in the same way as `Client::create`. Inline `create`
@@ -166,8 +169,8 @@ select another path. Run it as the daemon's `trusted_operator_uid`; the control
 socket is mode `0600` inside a mode-`0700` directory, and the daemon checks peer
 UID.
 
-For inline mode, the client reads a local TOML request and submits it through
-the typed `baffle-client` API:
+For inline mode, the client reads a local version 2 session file and submits
+the validated policy through the typed `baffle-client` API:
 
 ```sh
 baffle create --config ./github.toml
@@ -283,7 +286,7 @@ not the message.
 | `operation_not_allowed` | The requested create operation is disabled by daemon configuration. |
 | `config_file_not_found` | The named session configuration file does not exist. |
 | `config_file_unavailable` | The file cannot be read safely, including because of a symlink, unsafe owner, unsafe permissions, or inaccessible path. |
-| `config_file_invalid` | The file exceeds the size limit, is not UTF-8, or does not contain a valid session create request. |
+| `config_file_invalid` | The file exceeds the size limit, is not UTF-8, or does not contain a valid version 2 session file. |
 | `internal_error` | The daemon could not complete the request. |
 | `shutting_down` | The daemon is shutting down and does not accept new sessions. |
 

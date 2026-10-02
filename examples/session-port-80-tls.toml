@@ -1,16 +1,10 @@
-version = 1
-operation = "create"
+version = 2
 
-[session]
-persistent = false
-
-[[rules]]
-host = "api.example.com"
-mode = "intercept"
+[rules."api.example.com"]
 ports = [80]
 paths = ["/v1/**"]
 
-  [[rules.inject]]
-  header = "Authorization"
-  secret = "example-api"
-  format = "bearer"
+[[rules."api.example.com".inject]]
+header = "Authorization"
+secret = "example-api"
+format = "bearer"

@@ -72,7 +72,7 @@ const ERR_CONFIG_FILE_UNAVAILABLE: (&str, &str) = (
 );
 const ERR_CONFIG_FILE_INVALID: (&str, &str) = (
     "config_file_invalid",
-    "session configuration file is invalid",
+    "session configuration file is invalid; use version = 2, remove operation and [session], move settings to the root, and use [rules.\"hostname\"] tables",
 );
 
 pub struct ControlServer {
@@ -562,9 +562,9 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
                         return;
                     }
                 };
-                let session = match ControlRequest::from_toml(&text) {
-                    Ok(ControlRequest::Create { session, .. }) => session,
-                    _ => {
+                let session = match crate::config::SessionFile::from_toml(&text) {
+                    Ok(session) => session,
+                    Err(_) => {
                         let _ = write_error(&mut stream, ERR_CONFIG_FILE_INVALID).await;
                         return;
                     }

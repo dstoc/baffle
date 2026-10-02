@@ -12,6 +12,7 @@ mod daemon;
 mod policy;
 mod protocol;
 mod session;
+mod session_file;
 #[cfg(test)]
 mod tests;
 
@@ -20,6 +21,7 @@ pub(crate) use policy::canonicalize_request_path;
 pub use policy::{HeaderInjection, HostRule, InjectionFormat, PathRule, RuleMode, SecretRef};
 pub use protocol::ControlRequest;
 pub use session::SessionConfig;
+pub use session_file::SessionFile;
 pub(crate) const MAX_SESSION_CONFIG_NAME_BYTES: usize = 1_024;
 pub const PROTOCOL_VERSION: u16 = 1;
 

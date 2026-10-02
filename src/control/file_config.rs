@@ -14,6 +14,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
+use crate::platform::normalize_system_path;
+
 const MAX_SESSION_CONFIG_BYTES: usize = 256 * 1024;
 
 #[derive(Clone)]
@@ -31,7 +33,8 @@ pub(super) enum SessionConfigFileError {
 
 impl SessionConfigStore {
     pub(super) fn open(directory: &Path, trusted_uid: u32) -> Result<Self> {
-        let directory = open_trusted_directory_tree(directory, trusted_uid)?;
+        let normalized_directory = normalize_system_path(directory);
+        let directory = open_trusted_directory_tree(&normalized_directory, trusted_uid)?;
         Ok(Self {
             directory: Arc::new(directory),
             trusted_uid,
@@ -192,5 +195,29 @@ fn classify_config_file_io(error: io::Error) -> SessionConfigFileError {
         SessionConfigFileError::NotFound
     } else {
         SessionConfigFileError::Unavailable
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::SessionConfigStore;
+    use std::{os::unix::fs::MetadataExt, path::Path};
+
+    #[test]
+    fn opens_session_config_directory_through_var_alias() {
+        let directory = tempfile::tempdir_in("/private/var/tmp")
+            .expect("temporary session directory should be created");
+        let canonical = std::fs::canonicalize(directory.path())
+            .expect("temporary session directory should resolve");
+        let suffix = canonical
+            .strip_prefix(Path::new("/private/var"))
+            .expect("temporary session directory should be under /private/var");
+        let alias = Path::new("/var").join(suffix);
+        let trusted_uid = std::fs::metadata(&alias)
+            .expect("session directory should have metadata")
+            .uid();
+
+        SessionConfigStore::open(&alias, trusted_uid)
+            .expect("session directory under the /var alias should open securely");
     }
 }

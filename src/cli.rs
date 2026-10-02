@@ -51,7 +51,7 @@ pub struct Cli {
 pub enum Command {
     /// Start the Baffle daemon.
     Daemon(DaemonArgs),
-    /// Create a session from a daemon-managed file or local inline TOML.
+    /// Create a session from a daemon-managed or local version 2 session file.
     Create(CreateArgs),
     /// List active sessions owned by the current user.
     List,
@@ -66,10 +66,10 @@ pub enum Command {
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("source").required(true).args(["file", "config"]))) ]
 pub struct CreateArgs {
-    /// Relative TOML filename beneath the daemon's session configuration directory.
+    /// Relative version 2 session TOML filename beneath the daemon's session configuration directory.
     #[arg(value_name = "SERVER_FILE", conflicts_with = "config")]
     pub file: Option<String>,
-    /// Local session TOML file to send through the inline create operation.
+    /// Local version 2 session TOML file for inline creation.
     #[arg(long, value_name = "PATH", conflicts_with = "file")]
     pub config: Option<PathBuf>,
 }
@@ -224,7 +224,9 @@ fn reload_failure_text(reason: Option<&str>) -> &str {
         Some("inline_session") => "inline-configured sessions cannot be reloaded",
         Some("configuration_not_found") => "configuration file was not found",
         Some("configuration_unavailable") => "configuration file could not be read safely",
-        Some("configuration_invalid") => "configuration file is invalid",
+        Some("configuration_invalid") => {
+            "configuration file is invalid; use version = 2, move session settings to the root, and use [rules.\"hostname\"] tables"
+        }
         Some("credentials_unavailable") => "credentials are unavailable",
         Some("listener_unavailable") => "replacement listener could not be created",
         Some("generation_limit") => "reload resource limit reached",
@@ -237,14 +239,8 @@ fn reload_failure_text(reason: Option<&str>) -> &str {
 fn load_local_session_config(path: &std::path::Path) -> Result<SessionConfig> {
     let toml = fs::read_to_string(path)
         .with_context(|| format!("could not read local session config {}", path.display()))?;
-    let request = crate::config::ControlRequest::from_toml(&toml)
+    let session = crate::config::SessionFile::from_toml(&toml)
         .with_context(|| format!("could not parse local session config {}", path.display()))?;
-    let crate::config::ControlRequest::Create { session, .. } = request else {
-        return Err(anyhow!(
-            "local session config {} must contain a version 1 create request",
-            path.display()
-        ));
-    };
 
     Ok(SessionConfig {
         persistent: session.persistent,
@@ -443,7 +439,7 @@ mod tests {
         let config_path = directory.path().join("session.toml");
         std::fs::write(
             &config_path,
-            "version = 1\noperation = \"create\"\n\n[session]\nsocket_name = \"cladding/github.sock\"\n\n[[rules]]\nhost = \"github.com\"\nmode = \"tunnel\"\n",
+            "version = 2\nsocket_name = \"cladding/github.sock\"\n\n[rules.\"github.com\"]\n",
         )
         .expect("inline session config should be written");
 

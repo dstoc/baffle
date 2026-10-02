@@ -241,11 +241,7 @@ fn file_only_creates_nested_sessions_from_fresh_policy_snapshots_and_keeps_ephem
 
     // A live session keeps its parsed policy snapshot. A later create reads
     // the current file and rejects an invalid replacement.
-    write_session_policy_contents(
-        &daemon,
-        name,
-        "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"*.example.test\"\nmode = \"tunnel\"\n",
-    );
+    write_session_policy_contents(&daemon, name, "version = 2\n\n[rules.\"*.example.test\"]\n");
     assert_eq!(
         request(
             &daemon.socket,
@@ -1314,9 +1310,7 @@ fn write_session_policy(daemon: &DaemonProcess, name: &str, host: &str, persiste
 }
 
 fn session_policy(host: &str, persistent: bool) -> String {
-    format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n"
-    )
+    format!("version = 2\npersistent = {persistent}\n\n[rules.{host:?}]\n")
 }
 
 fn tunnel_policy(host: &str, port: u16, persistent: bool, socket_name: Option<&str>) -> String {
@@ -1324,13 +1318,13 @@ fn tunnel_policy(host: &str, port: u16, persistent: bool, socket_name: Option<&s
         .map(|name| format!("socket_name = {name:?}\n"))
         .unwrap_or_default();
     format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n{socket_setting}\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\nports = [{port}]\n"
+        "version = 2\npersistent = {persistent}\n{socket_setting}\n[rules.{host:?}]\nports = [{port}]\n"
     )
 }
 
 fn generation_policy(generation: usize, port: u16) -> String {
     format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{port}]\n\n[[rules]]\nhost = \"generation-{generation}.example\"\nmode = \"tunnel\"\n"
+        "version = 2\npersistent = true\n\n[rules.\"localhost\"]\nports = [{port}]\n\n[rules.\"generation-{generation}.example\"]\n"
     )
 }
 
@@ -1380,7 +1374,7 @@ fn start_echo_origin() -> (u16, Arc<AtomicBool>, thread::JoinHandle<()>) {
 
 fn intercept_policy_with_secret(host: &str, persistent: bool) -> String {
     format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n\n[[rules]]\nhost = \"{host}\"\nmode = \"intercept\"\npaths = [\"/allowed\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n"
+        "version = 2\npersistent = {persistent}\n\n[rules.{host:?}]\npaths = [\"/allowed\"]\n\n[[rules.{host:?}.inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n"
     )
 }
 
@@ -1439,7 +1433,7 @@ fn read_http_headers(stream: &mut UnixStream) -> String {
 
 fn session_policy_with_socket_name(host: &str, persistent: bool, socket_name: &str) -> String {
     format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\nsocket_name = {socket_name:?}\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n"
+        "version = 2\npersistent = {persistent}\nsocket_name = {socket_name:?}\n\n[rules.{host:?}]\n"
     )
 }
 
