@@ -16,6 +16,20 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         ci_workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
 
         self.assertIn("id: release", workflow)
+        self.assertIn(
+            "googleapis/release-please-action@8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5",
+            workflow,
+        )
+        self.assertIn(
+            "RELEASE_PLEASE_ACTION_SHA: 8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5",
+            ci_workflow,
+        )
+        self.assertIn("package-lock.json", ci_workflow)
+        self.assertIn("scripts/test_release_please_version_selection.cjs", ci_workflow)
+        self.assertLess(
+            ci_workflow.index("scripts/test_release_please_version_selection.cjs"),
+            ci_workflow.index("name: Run tests"),
+        )
         self.assertIn("recover_release:", workflow)
         self.assertIn("type: boolean", workflow)
         self.assertIn("default: false", workflow)

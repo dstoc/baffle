@@ -33,7 +33,8 @@ jobs:
     steps:
       - name: Create or update the release pull request
         id: release
-        uses: googleapis/release-please-action@v4
+        # v4.4.1 bundles release-please@17.3.0, the version-selection fixture in CI.
+        uses: googleapis/release-please-action@8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
