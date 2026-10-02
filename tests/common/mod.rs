@@ -26,6 +26,7 @@ pub struct DaemonProcess {
     pub secrets_dir: PathBuf,
     pub ca_certificate: PathBuf,
     pub log_path: PathBuf,
+    pub session_config_dir: Option<PathBuf>,
 }
 
 impl Drop for DaemonProcess {
@@ -45,6 +46,23 @@ impl DaemonProcess {
         allowed_secrets: &[&str],
         upstream_ca: Option<&Path>,
     ) -> Self {
+        Self::start_with_options(max_sessions, allowed_secrets, upstream_ca, false)
+    }
+
+    pub fn start_file_only_with_upstream_ca(
+        max_sessions: usize,
+        allowed_secrets: &[&str],
+        upstream_ca: Option<&Path>,
+    ) -> Self {
+        Self::start_with_options(max_sessions, allowed_secrets, upstream_ca, true)
+    }
+
+    fn start_with_options(
+        max_sessions: usize,
+        allowed_secrets: &[&str],
+        upstream_ca: Option<&Path>,
+        file_only: bool,
+    ) -> Self {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let control_socket = directory.path().join("run/control.sock");
         let socket_directory =
@@ -54,6 +72,10 @@ impl DaemonProcess {
         fs::create_dir(&secrets_dir).expect("secret directory should be created");
         fs::set_permissions(&secrets_dir, fs::Permissions::from_mode(0o700))
             .expect("secret directory should be private");
+        let session_config_dir = file_only.then(|| directory.path().join("sessions"));
+        if let Some(path) = &session_config_dir {
+            fs::create_dir(path).expect("session configuration directory should be created");
+        }
         let config_path = directory.path().join("daemon.toml");
         let log_path = directory.path().join("daemon.log");
         let log_file = fs::File::create(&log_path).expect("daemon log file should be created");
@@ -66,8 +88,17 @@ impl DaemonProcess {
             .map(|name| format!("\"{name}\""))
             .collect::<Vec<_>>()
             .join(", ");
+        let file_config = session_config_dir
+            .as_ref()
+            .map(|path| {
+                format!(
+                    "create_mode = \"file_only\"\nsession_config_dir = \"{}\"\n",
+                    path.display()
+                )
+            })
+            .unwrap_or_default();
         let config = format!(
-            "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\nmax_sessions = {max_sessions}\n\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"{}\"\nallowed = [{allowed}]\n",
+            "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\nmax_sessions = {max_sessions}\n{file_config}\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"{}\"\nallowed = [{allowed}]\n",
             control_socket.display(),
             socket_dir.display(),
             certificate_path.display(),
@@ -95,6 +126,7 @@ impl DaemonProcess {
             secrets_dir,
             ca_certificate: certificate_path,
             log_path,
+            session_config_dir,
         };
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -153,6 +185,26 @@ impl DaemonProcess {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
             .expect("test secret should be private");
         path
+    }
+
+    pub fn write_session_config(&self, name: &str, contents: &str) -> PathBuf {
+        let directory = self
+            .session_config_dir
+            .as_ref()
+            .expect("session configuration directory should be enabled");
+        let path = directory.join(name);
+        fs::create_dir_all(path.parent().expect("session config should have a parent"))
+            .expect("session config parent directories should be created");
+        fs::write(&path, contents).expect("session config should be written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("session config should be private");
+        path
+    }
+
+    pub fn create_from_file(&self, name: &str) -> (Vec<u8>, Value) {
+        self.request(&format!(
+            "version = 1\noperation = \"create_from_file\"\nname = {name:?}\n"
+        ))
     }
 }
 

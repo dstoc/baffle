@@ -6,6 +6,7 @@ use std::{
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
+    process::Command,
     sync::Arc,
     time::Duration,
 };
@@ -263,25 +264,41 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
         "an unentitled secret value must not appear in the control response"
     );
 
-    let mut lease = daemon.control();
-    let (body, created) = daemon.create_session(
-        &mut lease,
-        &injected_session("localhost", upstream.address.port(), "api-token"),
-    );
-    assert_eq!(
-        created["ok"], true,
-        "intercepted session creation failed: {created:?}"
-    );
+    let session_file = daemon.directory.path().join("api-v2.toml");
+    fs::write(
+        &session_file,
+        v2_injected_session(upstream.address.port(), "/allowed", "apps/api.sock"),
+    )
+    .expect("v2 CLI session file should be written");
+    let created = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("--control-socket")
+        .arg(&daemon.control_socket)
+        .arg("create")
+        .arg("--config")
+        .arg(&session_file)
+        .output()
+        .expect("v2 CLI create should run");
     assert!(
-        !String::from_utf8_lossy(&body).contains("daemon-only-token-42"),
-        "session creation must not serialize a resolved credential"
+        created.status.success(),
+        "intercepted v2 CLI create failed: {}",
+        String::from_utf8_lossy(&created.stderr)
     );
-    let proxy_socket = socket_from(&created);
-    let id = created["result"]["id"]
-        .as_str()
-        .expect("created session should have an ID")
+    let create_output = String::from_utf8(created.stdout).expect("create output should be UTF-8");
+    assert!(
+        !create_output.contains("daemon-only-token-42"),
+        "v2 CLI create must not display a resolved credential"
+    );
+    let id = create_output
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(3))
+        .expect("v2 CLI create should print a session ID")
         .to_owned();
-    drop(lease);
+    let proxy_socket = create_output
+        .lines()
+        .find_map(|line| line.strip_prefix("Data socket: "))
+        .map(PathBuf::from)
+        .expect("v2 CLI create should print the proxy socket");
 
     let (_, listed) = daemon.request("version = 1\noperation = \"list\"\n");
     let listed = serde_json::to_string(&listed).expect("session list should serialize");
@@ -380,6 +397,137 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
 
     let (_, stopped) = daemon.request(&format!(
         "version = 1\noperation = \"stop\"\nsession_id = \"{id}\"\n"
+    ));
+    assert_eq!(stopped["result"]["stopped"], true);
+    wait_for_path(&proxy_socket, false).await;
+    drop(upstream);
+}
+
+#[tokio::test]
+async fn real_daemon_applies_v2_inferred_interception_and_policy_through_file_reload() {
+    let upstream_directory = tempfile::tempdir().expect("upstream fixture directory should exist");
+    let (upstream_root, upstream_certificate, upstream_key) =
+        write_upstream_certificates(upstream_directory.path());
+    let mut upstream = spawn_tls_origin(upstream_certificate, upstream_key).await;
+    let daemon =
+        DaemonProcess::start_file_only_with_upstream_ca(2, &["api-token"], Some(&upstream_root));
+    daemon.write_secret("api-token", "v2-daemon-token-73");
+
+    let config_name = "policies/api.toml";
+    let initial_config = v2_injected_session(upstream.address.port(), "/allowed", "apps/api.sock");
+    assert!(
+        !initial_config.contains("mode ="),
+        "the fixture must exercise mode inference"
+    );
+    daemon.write_session_config(config_name, &initial_config);
+    let (create_body, created) = daemon.create_from_file(config_name);
+    assert_eq!(created["ok"], true, "v2 file create failed: {created:?}");
+    assert!(
+        !String::from_utf8_lossy(&create_body).contains("v2-daemon-token-73"),
+        "file-backed create must not serialize a resolved credential"
+    );
+    let proxy_socket = socket_from(&created);
+    assert_eq!(proxy_socket, daemon.socket_dir.join("apps/api.sock"));
+    let id = created["result"]["id"]
+        .as_str()
+        .expect("created session should have an ID")
+        .to_owned();
+
+    let (_, unchanged) = daemon.request(&reload_request(&id));
+    assert_eq!(unchanged["result"]["status"], "unchanged", "{unchanged}");
+
+    if cfg!(baffle_integration_test) {
+        let allowed = send_intercepted_request(
+            &proxy_socket,
+            &daemon.ca_certificate,
+            upstream.address.port(),
+            "/allowed",
+        )
+        .await;
+        assert!(allowed.starts_with("HTTP/1.1 200"), "{allowed}");
+        let observed = timeout(Duration::from_secs(3), upstream.requests.recv())
+            .await
+            .expect("upstream should observe the allowed v2 request")
+            .expect("TLS origin should remain active");
+        assert!(observed.contains("GET /allowed HTTP/1.1"), "{observed}");
+        assert!(
+            observed
+                .to_ascii_lowercase()
+                .contains("authorization: bearer v2-daemon-token-73"),
+            "v2 config should inject the daemon-managed credential: {observed}"
+        );
+        assert!(
+            !observed.contains("client-supplied-value"),
+            "the client must not override the managed credential"
+        );
+
+        let denied = send_intercepted_request(
+            &proxy_socket,
+            &daemon.ca_certificate,
+            upstream.address.port(),
+            "/forbidden",
+        )
+        .await;
+        assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
+        assert!(
+            timeout(Duration::from_millis(300), upstream.requests.recv())
+                .await
+                .is_err(),
+            "the path restriction must deny the request before it reaches upstream"
+        );
+    }
+
+    let reloaded_config = v2_injected_session(upstream.address.port(), "/new/**", "apps/api.sock");
+    daemon.write_session_config(config_name, &reloaded_config);
+    let (_, reloaded) = daemon.request(&reload_request(&id));
+    assert_eq!(reloaded["result"]["status"], "reloaded", "{reloaded}");
+    let (_, listed) = daemon.request("version = 1\noperation = \"list\"\n");
+    assert_eq!(listed["result"]["sessions"][0]["generation"], 2);
+
+    if cfg!(baffle_integration_test) {
+        let old_path = send_intercepted_request(
+            &proxy_socket,
+            &daemon.ca_certificate,
+            upstream.address.port(),
+            "/allowed",
+        )
+        .await;
+        assert!(old_path.starts_with("HTTP/1.1 403"), "{old_path}");
+        assert!(
+            timeout(Duration::from_millis(300), upstream.requests.recv())
+                .await
+                .is_err(),
+            "reload must remove the old path allowance"
+        );
+
+        let new_path = send_intercepted_request(
+            &proxy_socket,
+            &daemon.ca_certificate,
+            upstream.address.port(),
+            "/new/resource",
+        )
+        .await;
+        assert!(new_path.starts_with("HTTP/1.1 200"), "{new_path}");
+        let observed = timeout(Duration::from_secs(3), upstream.requests.recv())
+            .await
+            .expect("upstream should observe the reloaded v2 request")
+            .expect("TLS origin should remain active");
+        assert!(
+            observed.contains("GET /new/resource HTTP/1.1"),
+            "{observed}"
+        );
+        assert!(
+            observed
+                .to_ascii_lowercase()
+                .contains("authorization: bearer v2-daemon-token-73"),
+            "reload must preserve managed credential injection: {observed}"
+        );
+    }
+
+    let logs = fs::read_to_string(&daemon.log_path).expect("daemon log should be readable");
+    assert!(!logs.contains("v2-daemon-token-73"));
+    let (_, stopped) = daemon.request(&format!(
+        "version = 1\noperation = \"stop\"\nsession_id = {id:?}\n"
     ));
     assert_eq!(stopped["result"]["stopped"], true);
     wait_for_path(&proxy_socket, false).await;
@@ -976,6 +1124,24 @@ async fn connect_intercepted_tls_with_alpn(
     .expect("daemon CA should authenticate the intercepted endpoint")
 }
 
+async fn send_intercepted_request(socket: &Path, ca_path: &Path, port: u16, path: &str) -> String {
+    let mut tls = connect_intercepted_tls(socket, &format!("localhost:{port}"), ca_path).await;
+    tls.write_all(
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\nAuthorization: Bearer client-supplied-value\r\nConnection: close\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .await
+    .expect("intercepted HTTPS request should be sent");
+    let mut response = Vec::new();
+    timeout(Duration::from_secs(4), tls.read_to_end(&mut response))
+        .await
+        .expect("intercepted HTTPS response should arrive")
+        .expect("intercepted HTTPS response should be readable");
+    String::from_utf8_lossy(&response).into_owned()
+}
+
 async fn wait_for_path(path: &Path, expected: bool) {
     timeout(Duration::from_secs(3), async {
         loop {
@@ -999,6 +1165,16 @@ fn injected_session(host: &str, port: u16, secret: &str) -> String {
     format!(
         "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"{host}\"\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"{secret}\"\nformat = \"bearer\"\n"
     )
+}
+
+fn v2_injected_session(port: u16, path: &str, socket_name: &str) -> String {
+    format!(
+        "version = 2\npersistent = true\nsocket_name = {socket_name:?}\n\n[rules.\"localhost\"]\nports = [{port}]\npaths = [{path:?}]\n\n[[rules.\"localhost\".inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n"
+    )
+}
+
+fn reload_request(id: &str) -> String {
+    format!("version = 1\noperation = \"reload\"\nsession_id = {id:?}\n")
 }
 
 fn write_upstream_certificates(directory: &Path) -> (PathBuf, Vec<u8>, Vec<u8>) {
