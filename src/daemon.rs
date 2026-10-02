@@ -35,3 +35,11 @@ pub fn export_ca_certificate(config_path: &Path, output: &Path) -> Result<()> {
         .with_context(|| format!("invalid daemon configuration at {}", config_path.display()))?;
     crate::ca::export_public_certificate(&config.ca, output)
 }
+
+/// Generate and validate the CA pair configured in the daemon TOML file.
+pub fn initialize_ca(config_path: &Path) -> Result<crate::config::CaConfig> {
+    let config = DaemonConfig::load(config_path)
+        .with_context(|| format!("invalid daemon configuration at {}", config_path.display()))?;
+    crate::ca::initialize(&config.ca)?;
+    Ok(config.ca)
+}

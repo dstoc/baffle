@@ -21,6 +21,16 @@ async fn main() -> Result<()> {
             baffle_proxy::cli::reload(cli.control_socket, args).await
         }
         baffle_proxy::cli::Command::Ca(args) => match args.command {
+            baffle_proxy::cli::CaCommand::Init(args) => {
+                let ca = daemon::initialize_ca(&args.config)?;
+                println!("Created Baffle interception CA.");
+                println!("Certificate: {}", ca.certificate.display());
+                println!("Private key: {}", ca.private_key.display());
+                println!(
+                    "The CA is not installed in any trust store. Use `baffle ca export` to obtain its public certificate when needed."
+                );
+                Ok(())
+            }
             baffle_proxy::cli::CaCommand::Export(args) => {
                 daemon::export_ca_certificate(&args.config, &args.output)
             }

@@ -65,9 +65,10 @@ Source builds require Rust 1.96 or newer, CMake, Clang, and libclang. See the
 
 ## Quick start
 
-This local example runs Baffle as your current user. It creates a temporary CA
-because the daemon requires one, even though this tunnel-only session does not
-use it. Keep the temporary directory private.
+This local example runs Baffle as your current user. The daemon requires an
+interception CA even though this tunnel-only session does not use it. The
+command creates the CA files locally; it does not install the certificate in
+an OS or browser trust store.
 
 In a first terminal, create the daemon and session configuration files:
 
@@ -78,32 +79,6 @@ export BAFFLE_DIR="$(mktemp -d "/tmp/baffle-quickstart.XXXXXX")"
 mkdir -p "$BAFFLE_DIR/proxies" "$BAFFLE_DIR/secrets"
 chmod 0700 "$BAFFLE_DIR" "$BAFFLE_DIR/proxies" "$BAFFLE_DIR/secrets"
 BAFFLE_UID="$(id -u)"
-
-cat > "$BAFFLE_DIR/ca.cnf" <<'EOF'
-[req]
-distinguished_name = distinguished_name
-x509_extensions = v3_ca
-prompt = no
-
-[distinguished_name]
-CN = Baffle Quick Start CA
-
-[v3_ca]
-basicConstraints = critical,CA:TRUE
-keyUsage = critical,keyCertSign,cRLSign
-EOF
-
-openssl genpkey \
-  -algorithm EC \
-  -pkeyopt ec_paramgen_curve:P-256 \
-  -out "$BAFFLE_DIR/ca-key.pem"
-openssl req \
-  -new -x509 \
-  -key "$BAFFLE_DIR/ca-key.pem" \
-  -out "$BAFFLE_DIR/ca.pem" \
-  -days 365 \
-  -config "$BAFFLE_DIR/ca.cnf"
-chmod 0600 "$BAFFLE_DIR/ca-key.pem"
 
 cat > "$BAFFLE_DIR/daemon.toml" <<EOF
 [daemon]
@@ -119,6 +94,8 @@ private_key = "$BAFFLE_DIR/ca-key.pem"
 [secrets]
 directory = "$BAFFLE_DIR/secrets"
 EOF
+
+baffle ca init --config "$BAFFLE_DIR/daemon.toml"
 
 cat > "$BAFFLE_DIR/session.toml" <<'EOF'
 version = 2

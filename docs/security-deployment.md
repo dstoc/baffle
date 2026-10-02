@@ -208,35 +208,56 @@ session fails.
 ## CA provisioning
 
 Create a dedicated CA for Baffle. Do not reuse a corporate, browser, or
-production service CA. Keep the signing key readable only by the daemon
-account. The following commands create a P-256 key and a CA certificate that
-includes the required constraints:
+production service CA. Create the configured parent directory before CA
+initialization and make it writable only by the daemon account. For example,
+on a fresh Linux install:
 
 ```sh
-sudo -u baffle openssl genpkey \
-  -algorithm EC \
-  -pkeyopt ec_paramgen_curve:P-256 \
-  -out /var/lib/baffle/ca-key.pem
-sudo -u baffle openssl req \
-  -new -x509 \
-  -key /var/lib/baffle/ca-key.pem \
-  -out /var/lib/baffle/ca.pem \
-  -days 365 \
-  -subj "/CN=Baffle Interception CA" \
-  -addext "basicConstraints=critical,CA:TRUE" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign"
-sudo chmod 0600 /var/lib/baffle/ca-key.pem
-sudo chmod 0644 /var/lib/baffle/ca.pem
+sudo install -d -o baffle -g baffle -m 0700 /var/lib/baffle
+sudo -u baffle baffle ca init --config /etc/baffle/daemon.toml
 ```
 
-Choose a certificate lifetime that fits your rotation policy. The private key
-must be a regular, non-symlink file. Only its owner may access it, and the
-owner must have read permission. Baffle checks that the certificate is
-current, has CA signing constraints, and matches the private key before
-startup.
+Run `install -d` only when `/var/lib/baffle` does not already exist. For an
+existing operator-managed directory, verify its owner and permissions instead
+of resetting them.
 
-The daemon does not add its CA to any trust store. Export only the public
-certificate for clients that need intercepted HTTPS:
+For a per-user macOS daemon, put the configured CA paths under the user's
+Application Support directory and create that directory with private
+permissions before running the command. For a new directory, use:
+
+```sh
+mkdir -p "$HOME/Library/Application Support/Baffle"
+chmod 0700 "$HOME/Library/Application Support/Baffle"
+baffle ca init --config "$HOME/Library/Application Support/Baffle/daemon.toml"
+```
+
+Set the `[ca]` paths in that daemon file to files under the same Application
+Support directory. TOML does not expand `$HOME`. For an existing directory,
+check its owner and permissions instead of resetting them.
+
+The command reads `[ca].certificate` and `[ca].private_key` from the same
+daemon configuration used by `baffle daemon`. It creates a self-signed
+`Baffle Interception CA` with an ECDSA P-256 key and SHA-256 signatures. The
+certificate allows CA signing and CRL signing. It expires 365 days after
+creation and starts five minutes earlier to allow for small clock differences.
+On Linux and macOS, the private key is created with mode `0600` and the public
+certificate with mode `0644`.
+
+Both parent directories must already exist. The command does not change the
+ownership or permissions of existing directories. It refuses to replace
+either configured file, including when only one of the two files exists. It
+stages each file beside its target, validates the pair through the daemon's
+CA loader, and removes files created by this invocation if installation or
+validation fails. It does not print private key material.
+
+The generated CA must still pass Baffle's startup checks: the certificate
+must be current, include CA signing constraints, and match the private key.
+Keep the signing key readable only by the daemon account. The key must remain
+a regular, non-symlink file.
+
+CA generation does not install the certificate in an operating system,
+browser, or application trust store. Export only the public certificate for
+clients that need intercepted HTTPS:
 
 ```sh
 baffle ca export \

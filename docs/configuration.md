@@ -92,6 +92,21 @@ The CA certificate and private key must match. The daemon checks certificate
 validity and signing use at startup. The secret store is checked when a
 session references a secret.
 
+For first-run setup, generate the pair from the daemon configuration after
+creating the configured parent directories:
+
+```sh
+baffle ca init --config ./daemon.toml
+```
+
+This creates an ECDSA P-256 private key and a self-signed CA certificate that
+expires 365 days after creation. On Linux and macOS, the key uses mode `0600`
+and the certificate uses mode `0644`. The command never overwrites either
+target and does not install the CA in a system or browser trust store. Use
+`baffle ca export` to write the public certificate when a client needs to
+trust intercepted connections. See the [security guide](security-deployment.md)
+for directory setup, permissions, and deployment guidance.
+
 In `file_only` mode, the configured directory and its parent path must
 already exist. The daemon opens each path component without following
 symlinks and keeps an open descriptor to the configured directory. The
