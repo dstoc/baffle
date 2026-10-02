@@ -974,6 +974,7 @@ async fn spawn_tls_origin(certificate: Vec<u8>, key: Vec<u8>) -> TlsOrigin {
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
             }
         }
+        connections.abort_all();
         while connections.join_next().await.is_some() {}
     });
     TlsOrigin {
