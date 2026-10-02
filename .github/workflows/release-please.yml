@@ -34,7 +34,7 @@ jobs:
       - name: Create or update the release pull request
         id: release
         # v4.4.1 bundles release-please@17.3.0, the version-selection fixture in CI.
-        uses: googleapis/release-please-action@8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json

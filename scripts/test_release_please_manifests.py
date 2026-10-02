@@ -17,11 +17,11 @@ class ReleasePleaseManifestTests(unittest.TestCase):
 
         self.assertIn("id: release", workflow)
         self.assertIn(
-            "googleapis/release-please-action@8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5",
+            "googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071",
             workflow,
         )
         self.assertIn(
-            "RELEASE_PLEASE_ACTION_SHA: 8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5",
+            "RELEASE_PLEASE_ACTION_SHA: 5c625bfb5d1ff62eadeeb3772007f7f66fdcf071",
             ci_workflow,
         )
         self.assertIn("package-lock.json", ci_workflow)
