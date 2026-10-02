@@ -154,7 +154,19 @@ jobs:
 
           log_path = Path(os.environ["RUNNER_TEMP"]) / "macos-unix-integration.log"
           output = log_path.read_text(encoding="utf-8", errors="replace")
-          message = "Native integration output (last 3500 characters):\n" + output[-3500:]
+          lines = output.splitlines()
+          panic_context = []
+          for index, line in enumerate(lines):
+              if "panicked at" in line:
+                  start = max(0, index - 1)
+                  end = min(len(lines), index + 9)
+                  panic_context.append("\n".join(lines[start:end]))
+          details = "\n\n".join(panic_context)
+          tail = output[-3500:]
+          message = "Native integration failure details:\n"
+          if details:
+              message += "Panic context:\n" + details + "\n\n"
+          message += "Output tail:\n" + tail
           message = (
               message.replace("%", "%25")
               .replace("\r", "%0D")
