@@ -13,12 +13,6 @@ from pathlib import Path
 ROOT_PACKAGE = "baffle-proxy"
 CLIENT_PACKAGE = "baffle-client"
 CLIENT_PATH = "crates/baffle-client"
-MANIFEST_VERSIONS = {
-    ".": ROOT_PACKAGE,
-    CLIENT_PATH: CLIENT_PACKAGE,
-}
-
-
 class CandidateError(ValueError):
     """The generated candidate cannot be synchronized safely."""
 
@@ -56,6 +50,41 @@ def _replace_toml_version_dependency(contents: str, version: str) -> str:
     return "".join(result)
 
 
+def _replace_package_version(contents: str, package_name: str, version: str) -> str:
+    section = None
+    result: list[str] = []
+    package_matches = 0
+    version_matches = 0
+
+    for line in contents.splitlines(keepends=True):
+        header = re.match(r"^\s*\[([^]]+)\]\s*(?:#.*)?(?:\r?\n)?$", line)
+        if header:
+            section = header.group(1)
+
+        if section == "package" and re.match(r"^\s*name\s*=", line):
+            name = re.search(r'"([^"]+)"', line)
+            if not name or name.group(1) != package_name:
+                raise CandidateError(f"Cargo.toml package must be {package_name}")
+            package_matches += 1
+
+        if section == "package" and re.match(r"^\s*version\s*=", line):
+            line, replacements = re.subn(
+                r'^(\s*version\s*=\s*)"[^"]+"',
+                lambda match: match.group(1) + json.dumps(version),
+                line,
+                count=1,
+            )
+            if replacements != 1:
+                raise CandidateError(f"Cargo.toml package {package_name} has an invalid version")
+            version_matches += 1
+
+        result.append(line)
+
+    if package_matches != 1 or version_matches != 1:
+        raise CandidateError(f"Cargo.toml must contain one [package] name and version for {package_name}")
+    return "".join(result)
+
+
 def _synchronize_lockfile(contents: str, versions: dict[str, str]) -> str:
     blocks = re.split(r"(?m)(?=^\[\[package\]\]\s*$)", contents)
     counts = {name: 0 for name in versions}
@@ -88,11 +117,7 @@ def _synchronize_lockfile(contents: str, versions: dict[str, str]) -> str:
 
 
 def synchronize_candidate(repo_root: Path) -> bool:
-    """Align generated package, manifest, dependency, and lockfile versions.
-
-    Return True if the candidate files changed. Refuse to choose a package
-    version when Release Please has not synchronized the two Cargo packages.
-    """
+    """Apply the root Release Please version to every Cargo workspace package."""
 
     root_manifest_path = repo_root / "Cargo.toml"
     client_manifest_path = repo_root / CLIENT_PATH / "Cargo.toml"
@@ -102,17 +127,23 @@ def synchronize_candidate(repo_root: Path) -> bool:
     root_text = root_manifest_path.read_text()
     client_text = client_manifest_path.read_text()
     root = tomllib.loads(root_text)
-    client = tomllib.loads(client_text)
-    versions = {
-        ROOT_PACKAGE: root["package"]["version"],
-        CLIENT_PACKAGE: client["package"]["version"],
-    }
-    if versions[ROOT_PACKAGE] != versions[CLIENT_PACKAGE]:
+    release_manifest = json.loads(release_manifest_path.read_text())
+    version = release_manifest.get(".")
+    if not isinstance(version, str) or not re.fullmatch(
+        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version
+    ):
+        raise CandidateError("Release Please manifest must contain a stable root version")
+    if root.get("package", {}).get("name") != ROOT_PACKAGE:
+        raise CandidateError(f"Cargo.toml root package must be {ROOT_PACKAGE}")
+    if root.get("package", {}).get("version") != version:
         raise CandidateError(
-            "Release Please candidate package versions differ: "
-            f"{ROOT_PACKAGE} {versions[ROOT_PACKAGE]}, "
-            f"{CLIENT_PACKAGE} {versions[CLIENT_PACKAGE]}"
+            "Release Please root manifest and Cargo package disagree: "
+            f"{version} != {root.get('package', {}).get('version')}"
         )
+
+    client = tomllib.loads(client_text)
+    if client.get("package", {}).get("name") != CLIENT_PACKAGE:
+        raise CandidateError(f"{CLIENT_PATH}/Cargo.toml package must be {CLIENT_PACKAGE}")
 
     dependency = root.get("dependencies", {}).get(CLIENT_PACKAGE)
     if not isinstance(dependency, dict) or dependency.get("path") != CLIENT_PATH:
@@ -124,21 +155,17 @@ def synchronize_candidate(repo_root: Path) -> bool:
             f"Cargo.toml {CLIENT_PACKAGE} path dependency must have a version requirement"
         )
 
-    release_manifest = json.loads(release_manifest_path.read_text())
-    for path in MANIFEST_VERSIONS:
-        if path not in release_manifest:
-            raise CandidateError(f"Release Please manifest is missing package path {path!r}")
-
-    updated_root = _replace_toml_version_dependency(
-        root_text, versions[CLIENT_PACKAGE]
+    updated_root = _replace_package_version(root_text, ROOT_PACKAGE, version)
+    updated_root = _replace_toml_version_dependency(updated_root, version)
+    updated_client = _replace_package_version(client_text, CLIENT_PACKAGE, version)
+    updated_release_manifest = json.dumps({".": version}, indent=2) + "\n"
+    updated_lockfile = _synchronize_lockfile(
+        lockfile_path.read_text(), {ROOT_PACKAGE: version, CLIENT_PACKAGE: version}
     )
-    for path, package in MANIFEST_VERSIONS.items():
-        release_manifest[path] = versions[package]
-    updated_release_manifest = json.dumps(release_manifest, indent=2) + "\n"
-    updated_lockfile = _synchronize_lockfile(lockfile_path.read_text(), versions)
 
     changes = (
         (root_manifest_path, updated_root),
+        (client_manifest_path, updated_client),
         (release_manifest_path, updated_release_manifest),
         (lockfile_path, updated_lockfile),
     )

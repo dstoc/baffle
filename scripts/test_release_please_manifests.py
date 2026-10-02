@@ -16,6 +16,9 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         ci_workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
 
         self.assertIn("id: release", workflow)
+        self.assertIn("recover_release:", workflow)
+        self.assertIn("type: boolean", workflow)
+        self.assertIn("default: false", workflow)
         self.assertIn("actions: write", workflow)
         self.assertIn(
             "prs_created: ${{ steps.release.outputs.prs_created }}", workflow
@@ -35,6 +38,7 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         )
         self.assertIn("cargo metadata --locked --format-version 1", workflow)
         self.assertIn("python3 scripts/sync_release_please_candidate.py", workflow)
+        self.assertIn("crates/baffle-client/Cargo.toml", workflow)
         self.assertIn(
             "python3 -m unittest scripts.test_release_please_manifests scripts.test_release_please_candidate",
             workflow,
@@ -94,6 +98,9 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         self.assertIn("BAFFLE_SOURCE_DIR: ${{ github.workspace }}/source", workflow)
         self.assertIn("actions/download-artifact@v4", workflow)
         self.assertIn("SHA256SUMS", workflow)
+        self.assertIn("Verify both Cargo packages match the release tag", workflow)
+        self.assertIn("ref: ${{ github.workflow_sha }}", workflow)
+        self.assertIn("release-tools/scripts/publish_crates.py verify-versions --tag", workflow)
         self.assertIn("gh release upload", workflow)
         self.assertNotIn("--clobber", workflow)
 
@@ -152,6 +159,7 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         manifest = json.loads((REPO_ROOT / ".release-please-manifest.json").read_text())
         self.assertEqual(config["release-type"], "rust")
         self.assertFalse(config["include-component-in-tag"])
+        self.assertTrue(config["separate-pull-requests"])
         self.assertEqual(
             config["packages"],
             {
@@ -159,33 +167,11 @@ class ReleasePleaseManifestTests(unittest.TestCase):
                     "package-name": "baffle-proxy",
                     "component": "baffle-proxy",
                     "changelog-path": "CHANGELOG.md",
-                },
-                "crates/baffle-client": {
-                    "package-name": "baffle-client",
-                    "component": "baffle-client",
-                    "skip-changelog": True,
-                },
+                }
             },
         )
-        self.assertEqual(
-            config["plugins"],
-            [
-                {"type": "cargo-workspace", "merge": False},
-                {
-                    "type": "linked-versions",
-                    "groupName": "baffle",
-                    "components": ["baffle-proxy", "baffle-client"],
-                },
-            ],
-        )
-        self.assertEqual(
-            manifest,
-            {
-                ".": root["package"]["version"],
-                "crates/baffle-client": client["package"]["version"],
-            },
-        )
-        self.assertEqual(manifest["."], manifest["crates/baffle-client"])
+        self.assertNotIn("plugins", config)
+        self.assertEqual(manifest, {".": root["package"]["version"]})
         self.assertIn("crates/baffle-client", root["workspace"]["members"])
 
         lockfile = tomllib.loads((REPO_ROOT / "Cargo.lock").read_text())

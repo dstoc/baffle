@@ -24,9 +24,10 @@ open or update a release pull request and to write `CHANGELOG.md`.
   when the change is breaking. Use another Conventional Commit type when the
   change should not trigger a release.
 - Review the generated pull request's changelog and Cargo version updates.
-  Release Please updates the root `baffle-proxy` version, workspace member
-  versions, and `Cargo.lock` together. The client crate stays in the same
-  workspace release.
+  Release Please calculates one version from the repository root. The
+  candidate synchronization step applies that version to both workspace
+  crates, the root path dependency, the release manifest, and `Cargo.lock`.
+  Changes under `crates/baffle-client` are part of the same root release.
 - Merge the release pull request only after the generated-candidate checks
   below succeed. The merge creates the `vX.Y.Z` tag and GitHub Release. The
   same Release Please workflow run validates the exact release commit, runs
@@ -66,20 +67,22 @@ and notice files for its bundled dependencies.
 `baffle-proxy` keeps a local path to `baffle-client` and also declares the
 matching registry version. The path supports workspace development. The
 version lets Cargo resolve the client crate after `baffle-proxy` is published.
-The Release Please manifest tracks both crates at their current versions. The
-`linked-versions` plugin keeps them at the same version. The
-`cargo-workspace` plugin runs with `merge: false`, then `linked-versions`
-combines the crate updates into one release pull request. The client package
-skips its own changelog so the repository keeps one `CHANGELOG.md`. With
-`include-component-in-tag: false`, the shared release keeps the existing
-`vX.Y.Z` tag convention. See the [Cargo workspace plugin](https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md#cargo-workspace), [linked versions plugin](https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md#linked-versions), and [Cargo manifest updater](https://github.com/googleapis/release-please/blob/main/src/updaters/rust/cargo-toml.ts) documentation.
+Release Please manages one root package and one root version. It does not use
+the `linked-versions` plugin: that plugin cannot identify configured
+components when `include-component-in-tag` is false. The root package uses a
+component-specific release branch, while the tag remains the unprefixed
+`vX.Y.Z` format. This gives Release Please one version and one release entry
+for both crates. The candidate synchronization step writes that version to
+both Cargo package manifests, the root dependency, the root-only
+`.release-please-manifest.json`, and the two local package entries in
+`Cargo.lock`.
 
-Review each generated release pull request. Both `Cargo.toml` package
-versions, the `baffle-client` dependency version in the root manifest,
-`.release-please-manifest.json`, and both local package entries in `Cargo.lock`
-must match. The `Format, lint, and test` required check runs on regular pull
-requests and verifies the Release Please package and plugin configuration.
-The generated release pull request is checked separately as described below.
+Review each generated release pull request. Its one root manifest version,
+both `Cargo.toml` package versions, the `baffle-client` dependency version in
+the root manifest, and both local package entries in `Cargo.lock` must match.
+The `Format, lint, and test` required check runs on regular pull requests and
+verifies the Release Please package configuration. The generated release pull
+request is checked separately as described below.
 
 Crate names are allocated on a first-come basis. Before the first release,
 confirm that `baffle-client` and `baffle-proxy` are available and that the
@@ -105,6 +108,10 @@ Before a release, run these package checks from the repository root:
 
 ```sh
 cargo metadata --locked --format-version 1
+version="$(cargo metadata --locked --no-deps --format-version 1 \
+  | jq -r '.packages[] | select(.name == "baffle-proxy") | .version')"
+python3 scripts/publish_crates.py verify-versions --tag "v${version}"
+python3 -m unittest discover -s scripts -p 'test_*.py'
 python3 -m unittest scripts.test_release_please_manifests scripts.test_publish_crates
 cargo package --list --locked --package baffle-client
 cargo package --list --locked --package baffle-proxy
@@ -174,6 +181,42 @@ A tag created with `GITHUB_TOKEN` does not trigger another workflow run. The
 same Release Please run calls the reusable binary packaging workflow and the
 independent crates.io publisher. No PAT, GitHub App token, or separate manual
 run is needed for a new release.
+
+## Recover an incomplete release
+
+Use recovery only after you inspect the merged Release Please pull request and
+record its merge SHA, the existing tag and GitHub Release assets, the manifest
+and both Cargo versions at that SHA, and the registry state for both crates.
+The manifest, both crate versions, the local dependency, and the lockfile must
+identify one version. A version in the Release Please pull request must match
+that version. If they do not match, stop and correct the release metadata
+before publication.
+
+The normal `push` workflow does not run recovery. To backfill a merged release
+that Release Please did not report, open **Release Please** in GitHub Actions,
+choose **Run workflow** on `main`, and set `recover_release` to `true`. The
+workflow verifies the release pull request, exact merge SHA, selected version,
+registry ownership, and existing release state before it writes a tag or
+release. It creates only a missing tag for the verified package version. It
+does not move an existing tag. It reports which crate versions or binary
+assets remain so the normal validation, client-first publication, and binary
+packaging jobs can resume.
+
+For the 2026-10-03 incident, `v0.4.0` points to
+`be6180a9946a5f95188384f2dd4067a4093417fd`, while both Cargo
+packages and the merged release manifest identify `1.0.0`. The existing
+`v0.4.0` Release has no uploaded Baffle assets. The crates.io index contains
+only `0.2.0` and `0.3.0` for both crates. Keep `v0.4.0` unchanged. After this
+configuration fix reaches `main`, the guarded recovery selects `1.0.0` from the
+matching release metadata and can create `v1.0.0` at the same verified SHA.
+
+Use **Binary release assets** only to backfill assets on an existing valid
+release. That workflow does not create tags or GitHub Releases and does not
+publish crates. Existing assets must match the newly built output; the
+workflow never overwrites them. Stop for maintainer review if the existing
+tag points to another SHA, crates.io reports an unexpected crate owner or
+repository, the GitHub release has conflicting assets, or GitHub marks the
+release immutable.
 
 ## Manually package a release
 

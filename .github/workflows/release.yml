@@ -66,6 +66,17 @@ jobs:
           ref: ${{ steps.release.outputs.tag }}
           fetch-depth: 0
 
+      - name: Check out release verification tools
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-tools
+
+      - name: Verify both Cargo packages match the release tag
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: python3 release-tools/scripts/publish_crates.py verify-versions --tag "$RELEASE_TAG" --workspace "$GITHUB_WORKSPACE"
+
       - name: Verify tag, published release, and merged Release Please PR
         id: verify
         shell: bash
