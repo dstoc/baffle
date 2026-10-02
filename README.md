@@ -69,7 +69,7 @@ In a first terminal, create the daemon and session configuration files:
 ```sh
 set -e
 umask 077
-export BAFFLE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/baffle-quickstart.XXXXXX")"
+export BAFFLE_DIR="$(mktemp -d "/tmp/baffle-quickstart.XXXXXX")"
 mkdir -p "$BAFFLE_DIR/proxies" "$BAFFLE_DIR/secrets"
 chmod 0700 "$BAFFLE_DIR" "$BAFFLE_DIR/proxies" "$BAFFLE_DIR/secrets"
 BAFFLE_UID="$(id -u)"
