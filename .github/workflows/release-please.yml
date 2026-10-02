@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      recover_release:
+        description: Run the guarded backfill for a merged release that Release Please did not report
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -17,17 +23,18 @@ jobs:
       issues: write
       pull-requests: write
     outputs:
-      release_created: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.tag_name || steps.recover_release.outputs.tag_name }}
-      sha: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.sha || steps.recover_release.outputs.sha }}
-      package_binaries: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.package_binaries }}
-      publish_crates: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.publish_crates }}
+      release_created: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.release_created || 'false' }}
+      tag_name: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.tag_name || steps.recover_release.outputs.tag_name || '' }}
+      sha: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.sha || steps.recover_release.outputs.sha || '' }}
+      package_binaries: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.package_binaries || 'false' }}
+      publish_crates: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.publish_crates || 'false' }}
       prs_created: ${{ steps.release.outputs.prs_created }}
       pull_requests: ${{ steps.release-pr.outputs.pull_requests }}
     steps:
       - name: Create or update the release pull request
         id: release
-        uses: googleapis/release-please-action@v4
+        # v4.4.1 bundles release-please@17.3.0, the version-selection fixture in CI.
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
@@ -46,9 +53,9 @@ jobs:
           PR_JSON: ${{ steps.release.outputs.pr }}
         run: python3 scripts/release_please_outputs.py
 
-      - name: Recover a merged release not reported by Release Please
+      - name: Backfill a merged release after explicit manual request
         id: recover_release
-        if: ${{ steps.release.outputs.release_created != 'true' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_release == true && steps.release.outputs.release_created != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -88,10 +95,10 @@ jobs:
         env:
           RELEASE_PR_BRANCH: ${{ matrix.release_pr.headBranchName }}
         run: |
-          if ! git diff --quiet -- Cargo.toml .release-please-manifest.json Cargo.lock; then
+          if ! git diff --quiet -- Cargo.toml crates/baffle-client/Cargo.toml .release-please-manifest.json Cargo.lock; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add Cargo.toml .release-please-manifest.json Cargo.lock
+            git add Cargo.toml crates/baffle-client/Cargo.toml .release-please-manifest.json Cargo.lock
             git commit -m "fix(release): synchronize generated Cargo candidate"
             git push origin "HEAD:${RELEASE_PR_BRANCH}"
           fi

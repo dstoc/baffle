@@ -34,11 +34,13 @@ def release_pr(number=47):
 
 
 class FakeGitHub:
-    def __init__(self, prs=None, *, tagged_prs=None, tag_sha=None, release=None, manifest=None):
+    def __init__(self, prs=None, *, tagged_prs=None, tag_sha=None, tags=None, release=None, releases=None, manifest=None):
         self.prs = [release_pr()] if prs is None else prs
         self.tagged_prs = [] if tagged_prs is None else tagged_prs
         self.existing_tag_sha = tag_sha
+        self.tags = {} if tags is None else dict(tags)
         self.existing_release = release
+        self.releases = {} if releases is None else dict(releases)
         self.created = []
         self.created_tags = []
         self.github_writes = []
@@ -52,7 +54,10 @@ class FakeGitHub:
             "release-please-config.json": json.dumps(
                 {
                     "include-component-in-tag": False,
-                    "packages": {".": {}, "crates/baffle-client": {}},
+                    "packages": {
+                        ".": {"package-name": "baffle-proxy"},
+                        "crates/baffle-client": {"package-name": "baffle-client"},
+                    },
                 }
             ),
             "Cargo.toml": (
@@ -79,13 +84,15 @@ class FakeGitHub:
     def file_at(self, path, _ref):
         return self.files[path]
 
-    def tag_sha(self, _tag):
+    def tag_sha(self, tag):
         self.events.append("tag_sha")
-        return self.existing_tag_sha
+        return self.tags.get(tag, self.existing_tag_sha)
 
-    def release(self, _tag):
+    def release(self, tag):
         self.events.append("release")
-        return self.existing_release
+        if self.existing_release and self.existing_release.get("tag_name") == tag:
+            return self.existing_release
+        return self.releases.get(tag)
 
     def create_tag_ref(self, tag, sha):
         self.events.append("create_tag_ref")
@@ -94,6 +101,7 @@ class FakeGitHub:
             self.existing_tag_sha = self.tag_after_create_error
             raise self.tag_create_error
         self.created_tags.append((tag, sha))
+        self.tags[tag] = sha
         self.existing_tag_sha = sha
         return {"ref": f"refs/tags/{tag}", "object": {"type": "commit", "sha": sha}}
 
@@ -102,6 +110,7 @@ class FakeGitHub:
         self.github_writes.append("create_release")
         self.created.append((tag, notes))
         self.existing_release = {"tag_name": tag, "draft": False, "prerelease": False}
+        self.releases[tag] = self.existing_release
         return self.existing_release
 
     def set_release_labels(self, pr):
@@ -178,6 +187,72 @@ class RecoverPendingReleaseTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(recover_pending_release.RecoveryError, "multiple versions"):
             recover_pending_release.release_version_from_pr(pr)
+
+    def test_incident_candidate_uses_only_the_version_shared_by_manifest_and_cargo(self):
+        pr = release_pr()
+        pr["labels"] = [{"name": recover_pending_release.RELEASE_TAGGED}]
+        pr["body"] = (
+            "<details><summary>0.4.0</summary>Client notes.</details>\n"
+            "<details><summary>1.0.0</summary>Breaking proxy notes.</details>\n"
+            + recover_pending_release.RELEASE_PLEASE_FOOTER
+        )
+        github = FakeGitHub(
+            prs=[],
+            tagged_prs=[pr],
+            tags={"v0.4.0": SHA},
+            releases={"v0.4.0": {"tag_name": "v0.4.0", "draft": False, "prerelease": False, "assets": []}},
+            manifest={".": "1.0.0", "crates/baffle-client": "1.0.0"},
+        )
+        github.files["Cargo.toml"] = (
+            '[package]\nname="baffle-proxy"\nversion="1.0.0"\n'
+            '[dependencies.baffle-client]\nversion="1.0.0"\npath="crates/baffle-client"\n'
+        )
+        github.files["crates/baffle-client/Cargo.toml"] = '[package]\nname="baffle-client"\nversion="1.0.0"\n'
+        github.files["Cargo.lock"] = (
+            'version = 4\n\n[[package]]\nname = "baffle-proxy"\nversion = "1.0.0"\n\n'
+            '[[package]]\nname = "baffle-client"\nversion = "1.0.0"\n'
+        )
+        github.files["CHANGELOG.md"] = (
+            "# Changelog\n\n## [1.0.0](https://example.test/compare) (2026-10-02)\n\n"
+            "Breaking notes.\n\n## [0.4.0](https://example.test/compare) (2026-10-02)\n\nClient notes.\n"
+        )
+
+        registered_missing = publish_crates.RegistryState(registered=True, version_exists=False)
+        registry = FakeRegistry({"baffle-client": registered_missing, "baffle-proxy": registered_missing})
+        outputs = recover_pending_release.recover_pending_release(github, registry)
+
+        self.assertEqual(outputs["tag_name"], "v1.0.0")
+        self.assertEqual(outputs["sha"], SHA)
+        self.assertEqual(github.created_tags, [("v1.0.0", SHA)])
+        self.assertEqual(github.tags["v0.4.0"], SHA)
+        self.assertEqual(github.created[0][0], "v1.0.0")
+
+    def test_single_root_release_config_validates_both_workspace_packages(self):
+        pr = release_pr()
+        pr["head"]["ref"] = "release-please--branches--main--components--baffle-proxy"
+        github = FakeGitHub(prs=[pr], manifest={".": VERSION})
+        github.files["release-please-config.json"] = json.dumps(
+            {
+                "include-component-in-tag": False,
+                "packages": {".": {"package-name": "baffle-proxy"}},
+            }
+        )
+
+        version, tag, notes = recover_pending_release.validate_release_pr(pr, github)
+
+        self.assertEqual((version, tag), (VERSION, TAG))
+        self.assertEqual(notes, "Verified notes.")
+
+    def test_release_pr_versions_without_a_matching_cargo_manifest_are_rejected(self):
+        pr = release_pr()
+        pr["body"] = (
+            "<details><summary>0.4.0</summary>Client notes.</details>\n"
+            "<details><summary>1.0.0</summary>Proxy notes.</details>\n"
+            + recover_pending_release.RELEASE_PLEASE_FOOTER
+        )
+        github = FakeGitHub(prs=[pr], manifest={".": "0.3.0", "crates/baffle-client": "0.3.0"})
+        with self.assertRaisesRegex(recover_pending_release.RecoveryError, "do not include the synchronized package version"):
+            recover_pending_release.validate_release_pr(pr, github)
 
     def test_no_pending_release_does_not_query_crates_or_write_github(self):
         github = FakeGitHub(prs=[], tagged_prs=[])
@@ -428,7 +503,7 @@ class RecoverPendingReleaseTests(unittest.TestCase):
     def test_inconsistent_release_manifest_stops_before_registry_or_github_writes(self):
         github = FakeGitHub(manifest={".": VERSION, "crates/baffle-client": "0.4.0"})
         registry = FakeRegistry()
-        with self.assertRaisesRegex(recover_pending_release.RecoveryError, "does not identify both packages"):
+        with self.assertRaisesRegex(recover_pending_release.RecoveryError, "do not identify one synchronized version"):
             recover_pending_release.recover_pending_release(github, registry)
         self.assertEqual(registry.checked, [])
         self.assertEqual(github.created, [])

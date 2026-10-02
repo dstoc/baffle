@@ -209,7 +209,7 @@ class GitHubApi:
         )
 
 
-def release_version_from_pr(pr: dict) -> str:
+def release_versions_from_pr(pr: dict) -> set[str]:
     body = pr.get("body") or ""
     if RELEASE_PLEASE_FOOTER not in body:
         raise RecoveryError("The pending merged PR does not have the Release Please footer.")
@@ -220,12 +220,17 @@ def release_version_from_pr(pr: dict) -> str:
             versions.add(match.group(1))
     if not versions:
         raise RecoveryError("The pending Release Please PR has no parseable release version in its body.")
+    for version in versions:
+        if not VERSION_RE.fullmatch(version):
+            raise RecoveryError(f"The pending Release Please PR contains invalid version {version!r}.")
+    return versions
+
+
+def release_version_from_pr(pr: dict) -> str:
+    versions = release_versions_from_pr(pr)
     if len(versions) != 1:
         raise RecoveryError(f"The pending Release Please PR contains multiple versions: {sorted(versions)}.")
-    version = versions.pop()
-    if not VERSION_RE.fullmatch(version):
-        raise RecoveryError(f"The pending Release Please PR contains invalid version {version!r}.")
-    return version
+    return versions.pop()
 
 
 def release_notes_from_changelog(changelog: str, version: str) -> str:
@@ -245,10 +250,13 @@ def validate_release_pr(pr: dict, github: GitHubApi) -> tuple[str, str, str]:
     sha = pr.get("merge_commit_sha")
     if not isinstance(number, int) or not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
         raise RecoveryError("The pending Release Please PR has no valid merge commit SHA.")
-    if pr.get("head", {}).get("ref") != "release-please--branches--main":
-        raise RecoveryError("The pending PR branch is not Baffle's combined main Release Please branch.")
-    version = release_version_from_pr(pr)
-    tag = f"v{version}"
+    allowed_release_branches = {
+        "release-please--branches--main",
+        "release-please--branches--main--components--baffle-proxy",
+    }
+    if pr.get("head", {}).get("ref") not in allowed_release_branches:
+        raise RecoveryError("The pending PR branch is not Baffle's main Release Please branch.")
+    pull_request_versions = release_versions_from_pr(pr)
 
     try:
         manifest = json.loads(github.file_at(".release-please-manifest.json", sha))
@@ -260,27 +268,49 @@ def validate_release_pr(pr: dict, github: GitHubApi) -> tuple[str, str, str]:
     except (json.JSONDecodeError, tomllib.TOMLDecodeError) as error:
         raise RecoveryError(f"Release metadata at {sha} is invalid: {error}") from error
 
-    expected_manifest = {".": version, "crates/baffle-client": version}
-    if manifest != expected_manifest:
-        raise RecoveryError(
-            f"Release manifest at {sha} does not identify both packages at {version}: {manifest!r}."
-        )
+    package_config = config.get("packages", {})
+    if not isinstance(package_config, dict) or set(package_config) not in (
+        {"."}, {".", "crates/baffle-client"}
+    ):
+        raise RecoveryError("Release config must manage the root package and may include the legacy client path.")
+    if not isinstance(manifest, dict) or set(manifest) != set(package_config):
+        raise RecoveryError("Release manifest paths do not match the configured Release Please packages.")
     if config.get("include-component-in-tag") is not False:
         raise RecoveryError("Release config no longer specifies the shared unprefixed tag format.")
-    package_config = config.get("packages", {})
-    if not isinstance(package_config, dict) or set(package_config) != set(expected_manifest):
-        raise RecoveryError("Release config package paths do not match the two Baffle release packages.")
     for path, package in package_config.items():
         if not isinstance(package, dict):
             raise RecoveryError(f"Release config for {path} is invalid.")
+        expected_name = "baffle-proxy" if path == "." else "baffle-client"
+        if package.get("package-name") != expected_name:
+            raise RecoveryError(f"Release config for {path} does not manage {expected_name}.")
         include_component = package.get("include-component-in-tag", config["include-component-in-tag"])
         include_v = package.get("include-v-in-tag", config.get("include-v-in-tag", True))
         if include_component is not False or include_v is not True:
             raise RecoveryError(f"Release config for {path} no longer specifies the expected vX.Y.Z tag format.")
-    if root.get("package", {}).get("name") != "baffle-proxy" or root.get("package", {}).get("version") != version:
-        raise RecoveryError(f"baffle-proxy Cargo metadata at {sha} does not match {version}.")
-    if client.get("package", {}).get("name") != "baffle-client" or client.get("package", {}).get("version") != version:
-        raise RecoveryError(f"baffle-client Cargo metadata at {sha} does not match {version}.")
+    if root.get("package", {}).get("name") != "baffle-proxy":
+        raise RecoveryError(f"baffle-proxy Cargo metadata at {sha} has an unexpected package name.")
+    if client.get("package", {}).get("name") != "baffle-client":
+        raise RecoveryError(f"baffle-client Cargo metadata at {sha} has an unexpected package name.")
+    cargo_versions = {
+        root.get("package", {}).get("version"),
+        client.get("package", {}).get("version"),
+    }
+    if not all(isinstance(value, str) for value in manifest.values()):
+        raise RecoveryError("Release manifest versions must be strings.")
+    manifest_versions = set(manifest.values())
+    if len(cargo_versions) != 1 or len(manifest_versions) != 1 or cargo_versions != manifest_versions:
+        raise RecoveryError(
+            "Release manifest and both Cargo packages do not identify one synchronized version: "
+            f"manifest={manifest!r}, Cargo={sorted(str(value) for value in cargo_versions)}."
+        )
+    version = next(iter(cargo_versions))
+    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+        raise RecoveryError(f"Release metadata contains invalid version {version!r}.")
+    if version not in pull_request_versions:
+        raise RecoveryError(
+            f"Release PR versions {sorted(pull_request_versions)} do not include the synchronized package version {version}."
+        )
+    tag = f"v{version}"
     dependency = root.get("dependencies", {}).get("baffle-client", {})
     if not isinstance(dependency, dict) or dependency.get("path") != "crates/baffle-client" or dependency.get("version") != version:
         raise RecoveryError(f"baffle-proxy's local baffle-client dependency at {sha} does not match {version}.")

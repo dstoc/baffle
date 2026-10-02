@@ -35,7 +35,14 @@ class PackageReleaseTests(unittest.TestCase):
         result, output_dir_exists = self.run_packager("v99.99.99")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("does not match baffle-proxy Cargo version", result.stderr)
+        self.assertIn("does not match the checked-out Cargo versions", result.stderr)
+        self.assertFalse(output_dir_exists)
+
+    def test_rejects_the_incident_v0_4_tag_for_the_1_0_workspace(self) -> None:
+        result, output_dir_exists = self.run_packager("v0.4.0")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Tag v0.4.0 does not match the checked-out Cargo versions", result.stderr)
         self.assertFalse(output_dir_exists)
 
     def test_rejects_unsupported_release_target(self) -> None:

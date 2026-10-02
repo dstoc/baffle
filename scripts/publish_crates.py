@@ -362,6 +362,9 @@ def publish_release(tag: str, workspace: Path, registry: CratesIo, token: str) -
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    versions_parser = commands.add_parser("verify-versions")
+    versions_parser.add_argument("--tag", required=True)
+    versions_parser.add_argument("--workspace", type=Path, default=Path.cwd())
     verify_parser = commands.add_parser("verify-release")
     verify_parser.add_argument("--repo", required=True)
     verify_parser.add_argument("--tag", required=True)
@@ -373,7 +376,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        if args.command == "verify-release":
+        if args.command == "verify-versions":
+            version = validate_tag_versions(args.tag, args.workspace)
+            print(f"Verified both Cargo packages and their local dependency match {args.tag} ({version}).")
+        elif args.command == "verify-release":
             verify_release(
                 args.repo,
                 args.tag,

@@ -39,14 +39,12 @@ case "$target" in
 esac
 
 version="${release_tag#v}"
+python3 "$tool_root/scripts/publish_crates.py" verify-versions \
+  --tag "$release_tag" \
+  --workspace "$repo_root"
 metadata="$(cargo metadata --locked --no-deps --format-version 1)"
-package_version="$(jq -r '.packages[] | select(.name == "baffle-proxy") | .version' <<< "$metadata")"
 package_license="$(jq -r '.packages[] | select(.name == "baffle-proxy") | .license // empty' <<< "$metadata")"
 
-if [[ "$package_version" != "$version" ]]; then
-  echo "Tag '$release_tag' does not match baffle-proxy Cargo version '$package_version'." >&2
-  exit 1
-fi
 if [[ ! -s LICENSE || "$package_license" != MIT ]]; then
   echo "Release packaging requires a non-empty LICENSE and Cargo license = MIT." >&2
   exit 1

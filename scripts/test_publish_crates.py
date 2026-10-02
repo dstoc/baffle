@@ -56,6 +56,8 @@ class PublishCratesTests(unittest.TestCase):
 
     def test_checked_out_cargo_versions_match_release_tag(self):
         self.assertEqual(publish_crates.validate_tag_versions(RELEASE_TAG, REPO_ROOT), RELEASE_VERSION)
+        with self.assertRaisesRegex(publish_crates.PublishError, "v0.4.0 does not match"):
+            publish_crates.validate_tag_versions("v0.4.0", REPO_ROOT)
         with self.assertRaisesRegex(publish_crates.PublishError, "does not match"):
             wrong_version = "0.0.0" if RELEASE_VERSION != "0.0.0" else "0.0.1"
             publish_crates.validate_tag_versions(f"v{wrong_version}", REPO_ROOT)
@@ -265,28 +267,29 @@ class PublishCratesTests(unittest.TestCase):
         workflow = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
         ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn(
-            "release_created: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.release_created }}",
+            "release_created: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.release_created || 'false' }}",
             workflow,
         )
         self.assertIn(
-            "tag_name: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.tag_name || steps.recover_release.outputs.tag_name }}",
+            "tag_name: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.tag_name || steps.recover_release.outputs.tag_name || '' }}",
             workflow,
         )
         self.assertIn(
-            "sha: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.sha || steps.recover_release.outputs.sha }}",
+            "sha: ${{ steps.release.outputs.release_created == 'true' && steps.release.outputs.sha || steps.recover_release.outputs.sha || '' }}",
             workflow,
         )
         self.assertIn(
-            "package_binaries: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.package_binaries }}",
+            "package_binaries: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.package_binaries || 'false' }}",
             workflow,
         )
         self.assertIn(
-            "publish_crates: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.publish_crates }}",
+            "publish_crates: ${{ steps.release.outputs.release_created == 'true' && 'true' || steps.recover_release.outputs.publish_crates || 'false' }}",
             workflow,
         )
         self.assertIn("id: recover_release", workflow)
         self.assertIn("run: python3 scripts/recover_pending_release.py", workflow)
-        self.assertIn("if: ${{ steps.release.outputs.release_created != 'true' }}", workflow)
+        self.assertIn("if: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_release == true && steps.release.outputs.release_created != 'true' }}", workflow)
+        self.assertNotIn("Recover a merged release not reported by Release Please", workflow)
         self.assertIn("needs.release-please.outputs.release_created == 'true'", workflow)
         self.assertIn("ref: ${{ needs.release-please.outputs.tag_name }}", workflow)
         self.assertIn("group: baffle-crates-io-publish", workflow)
@@ -304,6 +307,7 @@ class PublishCratesTests(unittest.TestCase):
         self.assertIn("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}", workflow)
         self.assertEqual(workflow.count("secrets.CARGO_REGISTRY_TOKEN"), 2)
         recovery_step = workflow.split("id: recover_release", 1)[1].split("  synchronize-release-candidates:", 1)[0]
+        self.assertIn("Backfill a merged release after explicit manual request", workflow)
         self.assertIn("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}", recovery_step)
         self.assertNotIn("CARGO_REGISTRY_TOKEN", workflow.split("id: release\n", 1)[1].split("- name: Check out", 1)[0])
         self.assertLess(
