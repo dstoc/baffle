@@ -25,6 +25,9 @@ class ReleasePleaseManifestTests(unittest.TestCase):
             ci_workflow,
         )
         self.assertIn("package-lock.json", ci_workflow)
+        self.assertIn("dist/index.js", ci_workflow)
+        self.assertIn("template template1 header header1 commit commit1 footer footer1", ci_workflow)
+        self.assertNotIn("npm ci", ci_workflow)
         self.assertIn("scripts/test_release_please_version_selection.cjs", ci_workflow)
         self.assertLess(
             ci_workflow.index("scripts/test_release_please_version_selection.cjs"),

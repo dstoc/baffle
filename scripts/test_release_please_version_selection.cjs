@@ -1,17 +1,56 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const Module = require('node:module');
 const path = require('node:path');
 
 const repositoryRoot = path.resolve(__dirname, '..');
-const packagePath = process.env.RELEASE_PLEASE_FIXTURE_PACKAGE;
-if (!packagePath) {
-  throw new Error('RELEASE_PLEASE_FIXTURE_PACKAGE must point to release-please@17.3.0');
+const actionFixturePath = process.env.RELEASE_PLEASE_ACTION_FIXTURE;
+if (!actionFixturePath) {
+  throw new Error('RELEASE_PLEASE_ACTION_FIXTURE must point to the pinned action fixture');
 }
 
-const packageVersion = require(path.join(packagePath, 'package.json')).version;
-assert.equal(packageVersion, '17.3.0', 'fixture must match the action bundled Release Please version');
-const {GitHub, Manifest} = require(packagePath);
+const actionVersion = require(path.join(actionFixturePath, 'package.json')).version;
+assert.equal(actionVersion, '4.4.1', 'fixture must match the pinned Release Please Action version');
+const packageLock = JSON.parse(fs.readFileSync(path.join(actionFixturePath, 'package-lock.json'), 'utf8'));
+const releasePleaseVersion = packageLock.packages['node_modules/release-please'].version;
+assert.equal(releasePleaseVersion, '17.3.0', 'fixture must match the pinned Release Please engine version');
+
+// The action bundles Release Please into dist/index.js. Expose its internal package exports
+// in memory so this fixture exercises that exact bundle without installing npm packages.
+const actionBundle = fs.readFileSync(path.join(actionFixturePath, 'dist/index.js'), 'utf8');
+for (const template of [
+  'template.hbs',
+  'template1.hbs',
+  'header.hbs',
+  'header1.hbs',
+  'commit.hbs',
+  'commit1.hbs',
+  'footer.hbs',
+  'footer1.hbs',
+]) {
+  assert(fs.existsSync(path.join(actionFixturePath, 'dist', template)), `pinned action fixture must include dist/${template}`);
+}
+const releasePleaseMarker = 'exports.VERSION = exports.manifestSchema = exports.configSchema = exports.GitHub';
+const releasePleaseOffset = actionBundle.indexOf(releasePleaseMarker);
+assert.notEqual(releasePleaseOffset, -1, 'pinned action bundle must export the Release Please API');
+const moduleHeaders = [...actionBundle.slice(0, releasePleaseOffset).matchAll(/\/\*\*\*\/\s+(\d+):/g)];
+assert.notEqual(moduleHeaders.length, 0, 'Release Please API module must exist in the pinned bundle');
+const releasePleaseModuleId = moduleHeaders[moduleHeaders.length - 1][1];
+const bundleExport = 'module.exports = __webpack_exports__;';
+assert.equal(actionBundle.split(bundleExport).length - 1, 1, 'pinned bundle export point must be unique');
+const exposedBundle = actionBundle.replace(
+  bundleExport,
+  `module.exports = {releasePlease: __nccwpck_require__(${releasePleaseModuleId})};`
+);
+const bundleFilename = path.join(actionFixturePath, 'dist', `fixture-${actionVersion}.cjs`);
+const bundleModule = new Module(bundleFilename, module);
+bundleModule.filename = bundleFilename;
+bundleModule.paths = Module._nodeModulePaths(path.dirname(bundleFilename));
+require.cache[bundleFilename] = bundleModule;
+bundleModule._compile(exposedBundle, bundleFilename);
+const {GitHub, Manifest, VERSION} = bundleModule.exports.releasePlease;
+assert.equal(VERSION, releasePleaseVersion, 'action bundle and package lock must use the same engine version');
 const quietLogger = {
   debug() {},
   info() {},
@@ -39,6 +78,11 @@ const files = new Map([
       '[[package]]\nname = "baffle-proxy"\nversion = "0.3.0"\ndependencies = ["baffle-client"]\n',
   ],
 ]);
+assert.deepEqual(
+  Object.keys(JSON.parse(files.get('release-please-config.json')).packages),
+  ['.'],
+  'both Cargo crates must use the single root Release Please package'
+);
 
 const scenarios = [
   {
@@ -144,8 +188,7 @@ async function exerciseScenario(scenario) {
   );
   const generated = await manifest.buildPullRequests();
   assert.equal(generated.length, 1, `${scenario.name}: one combined release PR`);
-  const generatedPullRequest = generated[0].pullRequest;
-  assert.equal(generated[0].path, '.', `${scenario.name}: root release path`);
+  const generatedPullRequest = generated[0];
   assert.equal(
     generatedPullRequest.version.toString(),
     scenario.version,
@@ -209,7 +252,7 @@ async function exerciseScenario(scenario) {
   );
   assert.equal(
     releases[0].name,
-    scenario.version,
+    `v${scenario.version}`,
     `${scenario.name}: release name uses the selected version`
   );
 }

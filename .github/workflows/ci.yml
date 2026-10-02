@@ -37,14 +37,19 @@ jobs:
           RELEASE_PLEASE_ACTION_SHA: 5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
         run: |
           fixture_dir="$RUNNER_TEMP/release-please-fixture"
-          mkdir -p "$fixture_dir"
+          mkdir -p "$fixture_dir/dist"
           action_source="https://raw.githubusercontent.com/googleapis/release-please-action/$RELEASE_PLEASE_ACTION_SHA"
           curl --fail --silent --show-error --location "$action_source/package.json" \
             --output "$fixture_dir/package.json"
           curl --fail --silent --show-error --location "$action_source/package-lock.json" \
             --output "$fixture_dir/package-lock.json"
-          npm ci --prefix "$fixture_dir" --omit=dev --ignore-scripts --no-audit --no-fund
-          RELEASE_PLEASE_FIXTURE_PACKAGE="$RUNNER_TEMP/release-please-fixture/node_modules/release-please" \
+          curl --fail --silent --show-error --location "$action_source/dist/index.js" \
+            --output "$fixture_dir/dist/index.js"
+          for template in template template1 header header1 commit commit1 footer footer1; do
+            curl --fail --silent --show-error --location "$action_source/dist/${template}.hbs" \
+              --output "$fixture_dir/dist/${template}.hbs"
+          done
+          RELEASE_PLEASE_ACTION_FIXTURE="$fixture_dir" \
             node scripts/test_release_please_version_selection.cjs
 
       - name: Install Rama native build tools
