@@ -14,7 +14,7 @@ control connection and releases the session lease. A persistent session does
 not keep that connection open; call `stop` with its ID to remove it.
 
 ```rust
-use baffle_client::{Client, HostRule, SessionConfig};
+use baffle_client::{Client, HostRule, SessionConfig, UnmatchedHostPolicy};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,6 +34,11 @@ The [client example](../examples/client.rs) sends CONNECT for
 send a TLS request. Use an HTTP proxy client that establishes HTTPS with
 CONNECT. An `http://` proxy URL can describe the local proxy endpoint; it does
 not permit an `http://` origin.
+
+The typed client denies unmatched destinations by default. To permit opaque
+HTTPS tunnels to otherwise-unmatched DNS hostnames on port 443, use
+`SessionConfig::new().unmatched_host_policy(UnmatchedHostPolicy::Tunnel)`.
+The client must verify the upstream TLS identity inside those tunnels.
 
 When the daemon uses `create_mode = "file_only"`, create a session by naming
 an administrator-managed TOML file:

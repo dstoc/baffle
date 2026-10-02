@@ -17,7 +17,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ## Create a session
 
 ```rust
-use baffle_client::{Client, HostRule, SessionConfig};
+use baffle_client::{Client, HostRule, SessionConfig, UnmatchedHostPolicy};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,6 +32,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+To permit opaque tunnels to otherwise-unmatched DNS hostnames on port 443,
+create the policy with `SessionConfig::new().unmatched_host_policy(UnmatchedHostPolicy::Tunnel)`.
+The default policy denies unmatched hosts.
 
 The orchestrator must retain the returned session while its workload runs. The
 workload uses the session's Unix data socket with an HTTPS client that supports

@@ -317,6 +317,74 @@ fn inline_create_lists_sessions_and_independent_stop_preserves_other_lease() {
 }
 
 #[test]
+fn inline_create_accepts_empty_deny_and_unmatched_tunnel_policies() {
+    let daemon = TestDaemon::start(false);
+
+    for (name, setting, allowed_status) in [
+        ("deny", "", &["403"][..]),
+        ("tunnel", "unmatched = \"tunnel\"\n", &["200", "502"][..]),
+    ] {
+        let path = daemon._directory.path().join(format!("{name}.toml"));
+        fs::write(&path, format!("version = 2\npersistent = true\n{setting}"))
+            .expect("empty session file should be written");
+        let created = daemon
+            .cli()
+            .arg("create")
+            .arg("--config")
+            .arg(&path)
+            .output()
+            .expect("local config create should run");
+        assert!(
+            created.status.success(),
+            "empty {name} policy should be accepted: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let stdout = String::from_utf8(created.stdout).expect("create output should be UTF-8");
+        let mut lines = stdout.lines();
+        let created_line = lines.next().expect("create output should include a status");
+        let id = created_line
+            .split_whitespace()
+            .nth(3)
+            .expect("create output should include the session ID");
+        let socket_path = lines
+            .next()
+            .and_then(|line| line.strip_prefix("Data socket: "))
+            .expect("create output should include the data socket");
+        let mut stream = UnixStream::connect(socket_path)
+            .expect("created proxy should accept an unmatched CONNECT request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .expect("CONNECT response timeout should be set");
+        write!(
+            stream,
+            "CONNECT unmatched.localhost:443 HTTP/1.1\r\nHost: unmatched.localhost:443\r\n\r\n"
+        )
+        .expect("CONNECT request should be written");
+        let mut response = String::new();
+        BufReader::new(stream)
+            .read_line(&mut response)
+            .expect("CONNECT status should arrive");
+        assert!(
+            allowed_status
+                .iter()
+                .any(|code| response.split_whitespace().nth(1) == Some(*code)),
+            "unexpected status for empty {name} policy: {response:?}"
+        );
+        let stopped = daemon
+            .cli()
+            .arg("stop")
+            .arg(id)
+            .output()
+            .expect("created session should stop");
+        assert!(
+            stopped.status.success(),
+            "empty {name} policy should remain manageable: {}",
+            String::from_utf8_lossy(&stopped.stderr)
+        );
+    }
+}
+
+#[test]
 fn inline_create_cli_exit_releases_only_its_own_lease() {
     let daemon = TestDaemon::start(false);
     let config = inline_config(daemon._directory.path(), false);

@@ -6,16 +6,17 @@ own policy, Unix data socket, and lifecycle. A required native Apple Silicon CI
 check builds Baffle and exercises the control and proxy sockets against a
 local HTTPS origin before changes can merge.
 
-Baffle allows traffic only to exact host and port rules. A rule can tunnel
-HTTPS without decrypting it or intercept HTTPS so Baffle can check paths and
-add daemon-managed credentials. Baffle denies destinations and requests that
-do not match a session policy.
+Baffle allows traffic only to exact host and port rules by default. A session
+can opt into opaque HTTPS tunnels to otherwise-unmatched DNS hostnames on port
+443. Explicit host rules remain authoritative. Baffle can also intercept HTTPS
+so it can check paths and add daemon-managed credentials.
 
 ## Security model and limitations
 
 * **Trust model:** Clients are untrusted and may deliberately try to bypass
   restrictions. Sites on the allowlist are assumed trustworthy. Baffle permits
-  only explicitly configured hostnames and ports; the default port is 443.
+  only explicitly configured hostnames and ports unless the session enables
+  unmatched tunneling; the default port is 443.
 * **HTTPS-only:** Clients must use HTTP `CONNECT` to reach HTTPS destinations.
   Baffle rejects plaintext HTTP requests on every port. HTTPS on other
   explicitly configured ports is supported.
@@ -32,7 +33,8 @@ do not match a session policy.
 * **Opaque tunnels:** Explicit tunnel-only rules support destinations without
   path restrictions or credential injection. Baffle cannot inspect tunnel
   contents, prove they carry HTTPS, or verify the upstream certificate; the
-  client must verify the upstream TLS identity.
+  client must verify the upstream TLS identity. The optional unmatched-host
+  tunnel policy has the same limits and applies only on port 443.
 * **Network limitations:** Baffle does not prevent DNS rebinding or restrict
   resolved destination IP addresses. An allowlisted hostname may resolve to
   an internal or otherwise sensitive address.
@@ -133,6 +135,10 @@ version = 2
 
 [rules."github.com"]
 ```
+
+Add `unmatched = "tunnel"` at the document root to permit opaque tunnels to
+otherwise-unmatched DNS hostnames on port 443. Omit it to keep the default-deny
+policy. An explicit hostname rule always takes precedence.
 
 ```sh
 # Inline mode: Baffle reads and validates the version 2 session file.

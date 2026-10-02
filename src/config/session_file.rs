@@ -5,7 +5,7 @@ use serde::Deserialize;
 use super::{
     ConfigError,
     policy::{RawNamedRule, validate_named_rules},
-    session::{SessionConfig, validate_socket_name},
+    session::{SessionConfig, UnmatchedHostPolicy, validate_socket_name},
 };
 
 const SESSION_FILE_VERSION: i64 = 2;
@@ -59,13 +59,20 @@ impl SessionFile {
         }
         if root.contains_key("session") {
             return Err(ConfigError::new(
-                "the [session] table is not valid in a version 2 session file; move persistent and socket_name to the document root",
+                "the [session] table is not valid in a version 2 session file; move persistent, socket_name, and unmatched to the document root",
             ));
         }
         if root.get("rules").is_some_and(toml::Value::is_array) {
             return Err(ConfigError::new(
                 "[[rules]] entries are not valid in a version 2 session file; use quoted hostname tables such as [rules.\"example.com\"]",
             ));
+        }
+        if root.get("unmatched").is_some_and(|value| {
+            !value
+                .as_str()
+                .is_some_and(|policy| matches!(policy, "deny" | "tunnel"))
+        }) {
+            return Err(ConfigError::new("unmatched must be \"deny\" or \"tunnel\""));
         }
 
         let raw: RawSessionConfig = toml::from_str(input).map_err(|_| {
@@ -85,6 +92,7 @@ impl SessionFile {
                 .socket_name
                 .map(|name| validate_socket_name(&name))
                 .transpose()?,
+            unmatched: raw.unmatched,
             rules,
         })
     }
@@ -98,6 +106,8 @@ struct RawSessionConfig {
     persistent: bool,
     #[serde(default)]
     socket_name: Option<String>,
+    #[serde(default)]
+    unmatched: UnmatchedHostPolicy,
     #[serde(default)]
     rules: BTreeMap<String, RawNamedRule>,
 }
