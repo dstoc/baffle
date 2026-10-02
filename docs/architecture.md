@@ -17,7 +17,7 @@ credential state, data socket, and counters.
 | Component | Source | Responsibility |
 | --- | --- | --- |
 | CLI and daemon entry point | `src/main.rs`, `src/cli.rs`, `src/daemon.rs` | Parse `daemon` and `ca export` commands, load configuration, start the control server, and handle Ctrl-C. |
-| Configuration | `src/config.rs`, `src/config/{daemon,policy,protocol,session}.rs` | Parse strict daemon and session TOML, normalize exact host rules, and reject invalid policy before provisioning. |
+| Configuration | `src/config.rs`, `src/config/{daemon,policy,protocol,session,session_file}.rs` | Parse daemon settings, version 2 session files, and control requests; normalize exact host rules and reject invalid policy before provisioning. |
 | Control server and session manager | `src/control.rs` | Authenticate Unix peers, frame requests and responses, create/list/stop sessions, track leases, enforce limits, and remove sockets. |
 | Proxy runtime | `src/proxy_runtime.rs`, `src/proxy_runtime/rama.rs`, `src/proxy_runtime/rama/ingress.rs` | Expose the opaque session lifecycle to the daemon. Baffle binds the Unix data socket and Rama handles accepted Unix streams with connection limits, timeouts, and supervised tasks. |
 | CONNECT and TLS | `src/proxy_runtime/rama/connect.rs`, `src/proxy_runtime/rama/tls.rs` | Admit authorized CONNECT requests, preserve explicit tunnel behavior, inspect ClientHello, and verify the upstream TLS identity. |

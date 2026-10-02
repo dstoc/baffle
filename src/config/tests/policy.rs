@@ -1,21 +1,36 @@
 use super::{MINIMAL_CREATE, SESSION_EXAMPLE, config_with};
-use crate::config::{ControlRequest, InjectionFormat, PROTOCOL_VERSION, RuleMode, SessionConfig};
+use crate::config::{
+    ControlRequest, InjectionFormat, PROTOCOL_VERSION, RuleMode, SessionConfig, SessionFile,
+};
 
 #[test]
 fn parses_the_proposal_session_example_into_a_validated_policy() {
-    let request = ControlRequest::from_toml(SESSION_EXAMPLE)
+    let session = SessionFile::from_toml(SESSION_EXAMPLE)
         .expect("proposal session configuration should parse");
-    let ControlRequest::Create { version, session } = request else {
-        panic!("expected create request");
-    };
-    assert_eq!(version, PROTOCOL_VERSION);
     assert!(!session.persistent);
     assert_eq!(session.rules.len(), 3);
-    assert_eq!(session.rules[0].mode, RuleMode::Tunnel);
-    assert_eq!(session.rules[1].paths[0].as_str(), "/repos/dstoc/cladding");
-    assert_eq!(session.rules[1].inject[0].format, InjectionFormat::Bearer);
+    let crates = session
+        .rules
+        .iter()
+        .find(|rule| rule.host == "crates.io")
+        .expect("crates.io rule should exist");
+    assert_eq!(crates.mode, RuleMode::Tunnel);
+    let api = session
+        .rules
+        .iter()
+        .find(|rule| rule.host == "api.github.com")
+        .expect("GitHub API rule should exist");
+    assert_eq!(api.paths[0].as_str(), "/repos/dstoc/cladding");
+    assert_eq!(api.inject[0].format, InjectionFormat::Bearer);
     assert_eq!(
-        session.rules[2].inject[0].username.as_deref(),
+        session
+            .rules
+            .iter()
+            .find(|rule| rule.host == "github.com")
+            .expect("GitHub rule should exist")
+            .inject[0]
+            .username
+            .as_deref(),
         Some("x-access-token")
     );
 }

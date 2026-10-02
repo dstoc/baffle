@@ -347,12 +347,10 @@ mod tests {
 
     #[test]
     fn tunnel_rules_cannot_claim_path_specific_authorization() {
-        let policy = policy(
+        let error = ControlRequest::from_toml(
             "version = 1\noperation = \"create\"\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\nports = [443]\npaths = [\"/allowed\"]\n",
-        );
-        assert_eq!(
-            policy.authorize_connect_authority("example.com:443", &[]),
-            Err(AuthorizationError::Denied)
-        );
+        )
+        .expect_err("tunnel rules cannot carry path restrictions");
+        assert!(error.to_string().contains("cannot use paths or inject"));
     }
 }

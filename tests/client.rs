@@ -140,7 +140,7 @@ async fn typed_reload_uses_a_short_control_connection_and_preserves_the_creator_
     let config_path = config_dir.join("managed.toml");
     fs::write(
         &config_path,
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = false\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n",
+        "version = 2\npersistent = false\n\n[rules.\"example.com\"]\n",
     )
     .expect("administrator policy should be written");
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
@@ -167,7 +167,7 @@ async fn typed_reload_uses_a_short_control_connection_and_preserves_the_creator_
 
     fs::write(
         &config_path,
-        "# policy update\nversion = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"api.example.com\"\nmode = \"tunnel\"\n",
+        "# policy update\nversion = 2\npersistent = true\n\n[rules.\"api.example.com\"]\n",
     )
     .expect("updated policy should be written");
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
@@ -218,11 +218,8 @@ async fn typed_client_creates_from_a_daemon_managed_file_and_holds_the_lease() {
     fs::set_permissions(&nested_dir, fs::Permissions::from_mode(0o700))
         .expect("nested config directory should be private");
     let config_path = nested_dir.join("github.toml");
-    fs::write(
-        &config_path,
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = false\n\n[[rules]]\nhost = \"github.com\"\nmode = \"tunnel\"\n",
-    )
-    .expect("session config should be written");
+    fs::write(&config_path, "version = 2\n\n[rules.\"github.com\"]\n")
+        .expect("session config should be written");
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
         .expect("session config should be private");
 

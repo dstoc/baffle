@@ -146,7 +146,9 @@ paths in them.
 An orchestrator that cannot use Rust can implement the same protocol. Open one
 Unix connection per operation, write one UTF-8 TOML request, then read one JSON
 response. Prefix both payloads with a four-byte unsigned big-endian length.
-For example, create an ephemeral session with:
+This is the control wire format. It is separate from the version 2 session
+files read by `baffle create --config` and daemon file-backed sessions. For
+example, create an ephemeral session with:
 
 ```toml
 version = 1

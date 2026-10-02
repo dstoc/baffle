@@ -126,8 +126,16 @@ On Linux, top-level control commands use `/run/baffle/control.sock` by default.
 On macOS, they use `$HOME/Library/Caches/Baffle/control.sock`. Use
 `--control-socket PATH` to select the path from the daemon configuration:
 
+Create a minimal tunnel session in `github.toml`:
+
+```toml
+version = 2
+
+[rules."github.com"]
+```
+
 ```sh
-# Inline mode: Baffle reads this file on the client and sends its TOML policy.
+# Inline mode: Baffle reads and validates the version 2 session file.
 baffle create --config ./github.toml
 
 # File-only mode: Baffle sends this name; the daemon loads it from its
@@ -169,7 +177,7 @@ it does not send a TLS request. For a complete HTTPS request, use the
 example sets the daemon's session socket directory to `/run/baffle/proxies`.
 On macOS, use a private directory under
 `$HOME/Library/Caches/Baffle`. See
-[`examples/session.toml`](examples/session.toml) for a direct-protocol policy.
+[`examples/session.toml`](examples/session.toml) for a version 2 session file.
 
 Consumers can connect to the assigned Unix data socket directly. The
 [Cladding integration example](docs/cladding-integration.md) uses `socat`

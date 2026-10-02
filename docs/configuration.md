@@ -81,8 +81,8 @@ directory = "/Users/alice/Library/Application Support/Baffle/secrets"
 | `daemon.max_provisioning_requests` | positive integer | `8` | Maximum concurrent session creation requests. Additional requests receive `busy`. Zero is invalid. |
 | `daemon.connection_timeout_ms` | unsigned integer | `5000` | Legacy field from older daemon files. Baffle accepts it for compatibility and does not use it. |
 | `daemon.io_timeout_ms` | positive integer | `30000` | Maximum idle time for CONNECT parsing and proxy tunnel reads, writes, and half-closes. Zero is invalid. |
-| `daemon.create_mode` | `inline` or `file_only` | `inline` | Selects how clients create sessions. The default preserves inline TOML requests. `file_only` accepts only `create_from_file`. |
-| `daemon.session_config_dir` | absolute path | required in `file_only` mode | Directory containing administrator-managed session request TOML files. It is invalid in `inline` mode. The daemon refuses symlinks, unsafe ownership, and group- or other-writable directories and files. |
+| `daemon.create_mode` | `inline` or `file_only` | `inline` | Selects how clients create sessions. `inline` accepts validated version 2 session files from the client. `file_only` accepts daemon-managed version 2 files. |
+| `daemon.session_config_dir` | absolute path | required in `file_only` mode | Directory containing administrator-managed version 2 session TOML files. It is invalid in `inline` mode. The daemon refuses symlinks, unsafe ownership, and group- or other-writable directories and files. |
 | `ca.certificate` | path | required | One current PEM CA certificate with `CA:TRUE` and `keyCertSign`. |
 | `ca.private_key` | path | required | Matching PEM private key. It must be a regular, non-symlink file. Only the owner may access it, and the owner must have read permission. Use mode `0400` or `0600`. |
 | `secrets.directory` | path | required | Private directory containing secret files. It must be a real directory owned by the trusted UID, with mode `0700` or stricter. |
@@ -140,16 +140,16 @@ only session IDs, lifecycle states, persistence types, and socket paths. It
 does not show policy rules or secrets. `stop SESSION_ID` stops only the
 authorized session with that ID.
 
-For a daemon in the default `create_mode = "inline"`, load a local session
-request and send it through the control protocol:
+For a daemon in the default `create_mode = "inline"`, load a local version 2
+session file:
 
 ```sh
 baffle create --config ./github.toml
 ```
 
-The client reads `./github.toml` and validates it as a version 1 `create`
-request before sending the typed policy. The file must be readable by the
-caller. Inline creation is rejected when the daemon uses `file_only` mode.
+The client reads `./github.toml` and validates it before sending the typed
+policy through the control protocol. The file must be readable by the caller.
+Inline creation is rejected when the daemon uses `file_only` mode.
 
 In `file_only` mode, send a nested name for an administrator-managed session
 file:
@@ -174,7 +174,29 @@ command's lease.
 
 ## Session configuration
 
-Every create request uses this shape:
+Session files use schema version 2. They describe one session policy. They do
+not contain a control-protocol `operation` field or a `[session]` table.
+
+This minimal session allows an opaque HTTPS tunnel to `example.com`:
+
+```toml
+version = 2
+
+[rules."example.com"]
+```
+
+The schema version is separate from control protocol version 1. `persistent`
+defaults to `false`. Omit `socket_name` to use a generated session path. A
+named socket path is relative to `daemon.socket_dir` and can include nested
+directories. Baffle rejects absolute paths, empty, `.` or `..` components,
+symlinks, and paths that exceed the Unix socket path limit. It creates missing
+nested directories with mode `0700`, refuses occupied socket names, and
+removes Baffle-created directories when they are empty. At least one hostname
+rule is required. Duplicate hostnames after lowercasing and trailing-dot
+removal are invalid.
+
+Move session settings to the document root and use quoted hostname table keys.
+For example, migrate this version 1 file:
 
 ```toml
 version = 1
@@ -182,41 +204,43 @@ operation = "create"
 
 [session]
 persistent = false
-# Optional, relative to daemon.socket_dir:
-# socket_name = "cladding/github.sock"
 
 [[rules]]
 host = "example.com"
 mode = "tunnel"
-ports = [443]
 ```
 
-`version` must be `1`. `session` is required. `persistent` defaults to
-`false`. Omit `socket_name` to use a generated session path. A named socket
-path is relative to `daemon.socket_dir` and can include nested directories.
-Baffle rejects absolute paths, empty, `.` or `..` components, symlinks, and
-paths that exceed the Unix socket path limit. It creates missing nested
-directories with mode `0700`, refuses occupied socket names, and removes
-Baffle-created directories when they are empty. At least one `[[rules]]` entry
-is required. A create request has one rule per exact host; duplicate normalized
-hosts are invalid.
+To this version 2 file:
+
+```toml
+version = 2
+persistent = false
+
+[rules."example.com"]
+```
+
+Remove `operation`, move `persistent` and `socket_name` to the root, and use
+`[rules."hostname"]` instead of `[[rules]]` with a `host` field. Quote the
+hostname key because TOML treats dots in an unquoted key as nested tables.
+Do not use a top-level hostname table; the `rules` namespace keeps policy
+separate from session settings and future root keys.
+
+| Rule field | Type | Default | Meaning and validation |
+| --- | --- | --- | --- |
+| hostname table key | string | required | Exact ASCII DNS hostname. Baffle lowercases it and removes one final dot. Wildcards and IP literals are rejected. |
+| `mode` | string | inferred | `tunnel` or `intercept`. With no `paths` or `inject`, Baffle uses `tunnel`. If either field is present, Baffle uses `intercept`. Explicit `intercept` is valid without either field. Explicit `tunnel` with either field is invalid. |
+| `ports` | array of integers | `[443]` | Non-empty, unique destination ports from 1 through 65535. Non-default ports must be listed explicitly. Port 80 is allowed when configured and may carry TLS. |
+| `paths` | array of strings | `[]` | Exact URL paths or recursive path patterns. Baffle checks paths on each request inside intercepted TLS. Paths require interception. |
+| `inject` | array of tables | `[]` | Daemon-managed HTTP header injections. Credential injection requires interception. |
+
+Mode inference fails closed. A rule with path restrictions or managed
+credentials cannot become an opaque tunnel when `mode` is omitted. A configured
+TLS service on port 80 can use either mode when the rule's other checks permit
+it. Port alone does not identify the protocol.
 
 The Rust client can request a name with
 `SessionConfig::new().socket_name("cladding/github.sock")`. The response keeps
 the existing `socket` field; clients should connect to that returned path.
-
-| Rule field | Type | Default | Meaning and validation |
-| --- | --- | --- | --- |
-| `host` | string | required | Exact ASCII DNS hostname. Baffle lowercases it and removes one final dot. Wildcards and IP literals are rejected. |
-| `mode` | string | required | `tunnel` or `intercept`. A tunnel passes authorized CONNECT traffic without TLS decryption. Intercept mode requires TLS inspection for CONNECT. |
-| `ports` | array of integers | `[443]` | Non-empty, unique destination ports from 1 through 65535. Non-default ports must be listed explicitly. Port 80 is allowed when configured and may carry TLS. |
-| `paths` | array of strings | `[]` | Exact URL paths or recursive path patterns. Baffle checks paths on each request inside intercepted TLS. A path-restricted rule cannot tunnel CONNECT. |
-| `inject` | array of tables | `[]` | Daemon-managed HTTP header injections. Only intercept rules can inject credentials. |
-
-`tunnel` rules cannot inject headers. A configured TLS service on port 80 can
-use either mode when the rule's other checks permit it. Port alone does not
-identify the protocol. Paths and credential injection require successful
-interception.
 
 ## Host, port, and path rules
 
@@ -232,19 +256,13 @@ Baffle does not classify DNS answers, filter destination addresses, or pin an
 address. Use deployment DNS policy and default-deny network egress rules when
 the deployment requires address containment.
 
-This HTTPS rule uses the default destination port:
+This HTTPS rule uses the default destination port. `paths` makes Baffle infer
+`intercept` mode:
 
 ```toml
-version = 1
-operation = "create"
+version = 2
 
-[session]
-persistent = false
-
-[[rules]]
-host = "api.example.com"
-mode = "intercept"
-ports = [443]
+[rules."api.example.com"]
 paths = ["/v1/**"]
 ```
 
@@ -252,22 +270,16 @@ An explicitly configured TLS service on port 80 can use interception, path
 checks, and credential injection:
 
 ```toml
-version = 1
-operation = "create"
+version = 2
 
-[session]
-persistent = false
-
-[[rules]]
-host = "api.example.com"
-mode = "intercept"
+[rules."api.example.com"]
 ports = [80]
 paths = ["/v1/**"]
 
-  [[rules.inject]]
-  header = "Authorization"
-  secret = "example-api"
-  format = "bearer"
+[[rules."api.example.com".inject]]
+header = "Authorization"
+secret = "example-api"
+format = "bearer"
 ```
 
 This rule does not authorize plaintext HTTP. The client must send HTTPS through
@@ -314,19 +326,18 @@ A rule can add daemon-managed headers after an intercepted HTTPS request
 passes its authority, port, and path checks:
 
 ```toml
-[[rules]]
-host = "api.example.com"
-mode = "intercept"
-ports = [443]
+version = 2
+
+[rules."api.example.com"]
 paths = ["/v1/**"]
 
-  [[rules.inject]]
-  header = "Authorization"
-  secret = "example-api"
-  format = "bearer"
+[[rules."api.example.com".inject]]
+header = "Authorization"
+secret = "example-api"
+format = "bearer"
 ```
 
-Each `[[rules.inject]]` table has these fields:
+Each `[[rules."hostname".inject]]` table has these fields:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -360,14 +371,9 @@ address returned by DNS. Apply any required restriction through deployment
 DNS and network egress policy:
 
 ```toml
-version = 1
-operation = "create"
+version = 2
 
-[session]
-
-[[rules]]
-host = "internal.example"
-mode = "tunnel"
+[rules."internal.example"]
 ports = [8443]
 ```
 

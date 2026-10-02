@@ -1,4 +1,7 @@
-use std::{collections::HashSet, net::IpAddr};
+use std::{
+    collections::{BTreeMap, HashSet},
+    net::IpAddr,
+};
 
 use serde::Deserialize;
 use url::Host;
@@ -97,14 +100,21 @@ pub struct HeaderInjection {
 }
 pub(super) fn validate_rules(raw_rules: Vec<RawHostRule>) -> Result<Vec<HostRule>, ConfigError> {
     if raw_rules.is_empty() {
-        return Err(ConfigError::new("create requires at least one rule"));
+        return Err(ConfigError::new("at least one rule is required"));
     }
 
     let mut hosts = HashSet::new();
     let mut rules = Vec::with_capacity(raw_rules.len());
     for (index, raw) in raw_rules.into_iter().enumerate() {
         let context = format!("rules[{index}]");
-        let host = validate_hostname(&raw.host)
+        let RawHostRule {
+            host: raw_host,
+            mode: raw_mode,
+            ports,
+            paths: raw_paths,
+            inject: raw_inject,
+        } = raw;
+        let host = validate_hostname(&raw_host)
             .map_err(|message| ConfigError::new(format!("{context}.host {message}")))?;
         if !hosts.insert(host.clone()) {
             return Err(ConfigError::new(format!(
@@ -112,32 +122,40 @@ pub(super) fn validate_rules(raw_rules: Vec<RawHostRule>) -> Result<Vec<HostRule
             )));
         }
 
-        if raw.ports.is_empty() {
+        if ports.is_empty() {
             return Err(ConfigError::new(format!(
                 "{context}.ports must not be empty"
             )));
         }
-        let mut ports = HashSet::new();
-        for port in &raw.ports {
+        let mut unique_ports = HashSet::new();
+        for port in &ports {
             if *port == 0 {
                 return Err(ConfigError::new(format!(
                     "{context}.ports entries must be between 1 and 65535"
                 )));
             }
-            if !ports.insert(*port) {
+            if !unique_ports.insert(*port) {
                 return Err(ConfigError::new(format!(
                     "{context}.ports contains a duplicate"
                 )));
             }
         }
 
-        if raw.mode == RuleMode::Tunnel && !raw.inject.is_empty() {
+        let has_intercept_features = raw_paths.is_some() || raw_inject.is_some();
+        let mode = raw_mode.unwrap_or(if has_intercept_features {
+            RuleMode::Intercept
+        } else {
+            RuleMode::Tunnel
+        });
+        if mode == RuleMode::Tunnel && has_intercept_features {
             return Err(ConfigError::new(format!(
-                "{context} tunnel rules cannot inject headers"
+                "{context} tunnel rules cannot use paths or inject headers"
             )));
         }
-        let mut paths = Vec::with_capacity(raw.paths.len());
-        for (path_index, raw_path) in raw.paths.into_iter().enumerate() {
+        let raw_paths = raw_paths.unwrap_or_default();
+        let raw_inject = raw_inject.unwrap_or_default();
+        let mut paths = Vec::with_capacity(raw_paths.len());
+        for (path_index, raw_path) in raw_paths.into_iter().enumerate() {
             let path = validate_path(&raw_path.0).map_err(|message| {
                 ConfigError::new(format!("{context}.paths[{path_index}] {message}"))
             })?;
@@ -152,9 +170,9 @@ pub(super) fn validate_rules(raw_rules: Vec<RawHostRule>) -> Result<Vec<HostRule
             paths.push(path);
         }
 
-        let mut inject = Vec::with_capacity(raw.inject.len());
+        let mut inject = Vec::with_capacity(raw_inject.len());
         let mut headers = HashSet::new();
-        for (inject_index, raw_injection) in raw.inject.into_iter().enumerate() {
+        for (inject_index, raw_injection) in raw_inject.into_iter().enumerate() {
             let injection_context = format!("{context}.inject[{inject_index}]");
             let header = validate_header(&raw_injection.header).map_err(|message| {
                 ConfigError::new(format!("{injection_context}.header {message}"))
@@ -197,14 +215,31 @@ pub(super) fn validate_rules(raw_rules: Vec<RawHostRule>) -> Result<Vec<HostRule
 
         rules.push(HostRule {
             host,
-            mode: raw.mode,
-            ports: raw.ports,
+            mode,
+            ports,
             paths,
             inject,
         });
     }
 
     Ok(rules)
+}
+
+pub(super) fn validate_named_rules(
+    raw_rules: BTreeMap<String, RawNamedRule>,
+) -> Result<Vec<HostRule>, ConfigError> {
+    validate_rules(
+        raw_rules
+            .into_iter()
+            .map(|(host, raw)| RawHostRule {
+                host,
+                mode: raw.mode,
+                ports: raw.ports,
+                paths: raw.paths,
+                inject: raw.inject,
+            })
+            .collect(),
+    )
 }
 
 fn validate_hostname(input: &str) -> Result<String, &'static str> {
@@ -447,13 +482,27 @@ fn validate_basic_username(input: &str) -> Result<(), &'static str> {
 #[serde(deny_unknown_fields)]
 pub(super) struct RawHostRule {
     host: String,
-    mode: RuleMode,
+    #[serde(default)]
+    mode: Option<RuleMode>,
     #[serde(default = "default_ports")]
     ports: Vec<u16>,
     #[serde(default)]
-    paths: Vec<RawPathRule>,
+    paths: Option<Vec<RawPathRule>>,
     #[serde(default)]
-    inject: Vec<RawHeaderInjection>,
+    inject: Option<Vec<RawHeaderInjection>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RawNamedRule {
+    #[serde(default)]
+    mode: Option<RuleMode>,
+    #[serde(default = "default_ports")]
+    ports: Vec<u16>,
+    #[serde(default)]
+    paths: Option<Vec<RawPathRule>>,
+    #[serde(default)]
+    inject: Option<Vec<RawHeaderInjection>>,
 }
 
 #[derive(Deserialize)]

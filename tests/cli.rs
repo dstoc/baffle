@@ -253,9 +253,7 @@ fn inline_config(directory: &Path, persistent: bool) -> PathBuf {
     let path = directory.join("inline.toml");
     fs::write(
         &path,
-        format!(
-            "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n"
-        ),
+        format!("version = 2\npersistent = {persistent}\n\n[rules.\"example.com\"]\n"),
     )
     .expect("inline session config should be written");
     path
@@ -391,7 +389,7 @@ fn inline_create_forwards_named_socket_and_prints_daemon_assigned_path() {
     let config = directory.path().join("inline.toml");
     fs::write(
         &config,
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\nsocket_name = \"cladding/github.sock\"\n\n[[rules]]\nhost = \"github.com\"\nmode = \"tunnel\"\n",
+        "version = 2\npersistent = true\nsocket_name = \"cladding/github.sock\"\n\n[rules.\"github.com\"]\n",
     )
     .expect("inline session config should be written");
     let output = Command::new(env!("CARGO_BIN_EXE_baffle"))
@@ -421,7 +419,7 @@ fn file_only_create_uses_nested_server_file_and_rejects_inline_config() {
     fs::create_dir(&nested_dir).expect("nested session directory should be created");
     fs::write(
         nested_dir.join("github.toml"),
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"github.com\"\nmode = \"tunnel\"\n",
+        "version = 2\npersistent = true\n\n[rules.\"github.com\"]\n",
     )
     .expect("daemon session file should be written");
     let local_config = inline_config(daemon._directory.path(), false);
@@ -480,11 +478,7 @@ fn reload_cli_reports_per_session_results_and_fails_when_any_all_result_fails() 
     let daemon = TestDaemon::start(true);
     let first_config = daemon.session_config_dir.join("first.toml");
     let second_config = daemon.session_config_dir.join("second.toml");
-    let policy = |host: &str| {
-        format!(
-            "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n"
-        )
-    };
+    let policy = |host: &str| format!("version = 2\npersistent = true\n\n[rules.{host:?}]\n");
     fs::write(&first_config, policy("first.example")).expect("first policy should be written");
     fs::write(&second_config, policy("second.example")).expect("second policy should be written");
 

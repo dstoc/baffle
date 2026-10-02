@@ -6,7 +6,6 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    config::ControlRequest,
     proxy_runtime::{ProxyRuntime, RuntimeId},
     secrets::SecretStore,
 };
@@ -138,9 +137,9 @@ impl SessionManager {
                 return SessionReloadResult::failed(id, current_socket, "configuration_invalid");
             }
         };
-        let mut candidate = match ControlRequest::from_toml(&text) {
-            Ok(ControlRequest::Create { session, .. }) => session,
-            _ => {
+        let mut candidate = match crate::config::SessionFile::from_toml(&text) {
+            Ok(session) => session,
+            Err(_) => {
                 return SessionReloadResult::failed(id, current_socket, "configuration_invalid");
             }
         };

@@ -1,11 +1,4 @@
-version = 1
-operation = "create"
-
-[session]
-persistent = false
+version = 2
 socket_name = "cladding/github.sock"
 
-[[rules]]
-host = "github.com"
-mode = "tunnel"
-ports = [443]
+[rules."github.com"]

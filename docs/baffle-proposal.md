@@ -103,7 +103,7 @@ The per-session policy authorizes the exact CONNECT host and port. A tunnel rule
 
 ## 5. Configuration
 
-Baffle has two separate TOML configuration surfaces: a **daemon configuration**, read at startup and accessible only to trusted operators, and a **session configuration**, transmitted over the control socket by an authorized local client. No secret values appear in either.
+Baffle has three separate configuration surfaces: a **daemon configuration**, read at startup and accessible only to trusted operators; a **version 2 session file**, read by the local client or daemon; and a **version 1 control protocol request**, which carries operations and validated policy over the control socket. No secret values appear in them.
 
 ### 5.1 Example daemon configuration
 
@@ -136,42 +136,29 @@ Runtime directories, ownership and permissions must be controlled by the daemon 
 ### 5.2 Example session configuration
 
 ```toml
-operation = "create"
-version = 1
+version = 2
 
-[session]
-persistent = false
+[rules."crates.io"]
 
-[[rules]]
-host = "crates.io"
-mode = "tunnel"
-ports = [443]
-
-[[rules]]
-host = "api.github.com"
-mode = "intercept"
-ports = [443]
+[rules."api.github.com"]
 paths = [
   "/repos/dstoc/cladding",
   "/repos/dstoc/cladding/**",
 ]
 
-  [[rules.inject]]
-  header = "Authorization"
-  secret = "github-api"
-  format = "bearer"
+[[rules."api.github.com".inject]]
+header = "Authorization"
+secret = "github-api"
+format = "bearer"
 
-[[rules]]
-host = "github.com"
-mode = "intercept"
-ports = [443]
+[rules."github.com"]
 paths = ["/dstoc/cladding.git/**"]
 
-  [[rules.inject]]
-  header = "Authorization"
-  secret = "github-git"
-  format = "basic_password"
-  username = "x-access-token"
+[[rules."github.com".inject]]
+header = "Authorization"
+secret = "github-git"
+format = "basic_password"
+username = "x-access-token"
 ```
 
 In this example, `crates.io` is permitted as an opaque HTTPS tunnel; the GitHub hosts must be intercepted, and only matching paths can be forwarded. The GitHub API token and Git-over-HTTPS token are independent secrets. This example is illustrative: the exact Git operation paths used by a consumer should be tested, including ref discovery, fetch and push.
@@ -181,13 +168,14 @@ In this example, `crates.io` is permitted as an opaque HTTPS tunnel; the GitHub 
 - No rule matches: deny. Hosts match exactly by default; any later wildcard support must be explicit (`*.example.com`), segment-aware and forbidden for credential injection unless separately authorized. Normalize DNS names, ports and case before matching.
 - Each rule specifies permitted destination ports; if omitted, the rule uses HTTPS port 443. A CONNECT authority must include an explicit port, including `:443` for the default HTTPS port. Port 80 is not reserved: any configured port may carry TLS if the destination service supports it. Reject plaintext HTTP based on its request form or scheme, regardless of port. A non-default TLS port must be listed explicitly. A port number does not prove that an opaque tunnel carries TLS.
 - The current session schema rejects `private_addresses`. Operators must remove that field and apply any intended address restrictions through deployment DNS and network egress policy.
-- `mode = "tunnel"` permits an opaque CONNECT tunnel without decryption. It cannot carry path or injection rules. It does not prove that the tunneled bytes are TLS or let Baffle verify the upstream certificate. The client must verify the certificate.
+- If `mode` is omitted, a rule without paths or injections uses `tunnel`; a rule with either uses `intercept`. An explicit `mode = "tunnel"` cannot include paths or injections.
+- `mode = "tunnel"` permits an opaque CONNECT tunnel without decryption. It does not prove that the tunneled bytes are TLS or let Baffle verify the upstream certificate. The client must verify the certificate.
 - `mode = "intercept"` requires HTTPS MITM. A rule with path checks or credential injection requires successful interception. If interception fails or the payload is unsupported, close the connection. Do not fall back to a tunnel.
 - A malformed or fragmented ClientHello, unsupported post-CONNECT data, or failed TLS handshake must close the connection when inspection is required. A client must not cause opaque fallback by splitting ClientHello data. Such a fallback would bypass path restrictions and the credential-injection boundary.
 - Baffle authorizes the configured hostname and port. It does not filter DNS answers or pin destination IPs. DNS rebinding and access to private, loopback, link-local, metadata, or other sensitive addresses are deployment risks. Apply DNS controls and default-deny network egress rules outside Baffle when the threat model requires address containment.
 - An exact path matches only itself. `/x/**` matches `/x/` and descendants; `/x` must be separately listed to match the root. No naive string-prefix matching. Path matching is case-sensitive, and query strings are ignored unless a later explicit query constraint is introduced.
 - For restricted paths, reject ambiguous or malformed encodings, encoded path separators and unsafe dot-segment forms rather than relying on a normalization that differs from the origin server's interpretation. Evaluate and forward the same canonical path, while preserving the query string unchanged.
-- Reject overlapping rules with conflicting outcomes unless a documented deterministic precedence can be proven safe. Version 1 can start with one non-overlapping rule per exact host.
+- Reject overlapping rules with conflicting outcomes unless a documented deterministic precedence can be proven safe. Use one non-overlapping rule per exact host.
 - Ordinary forward-proxy requests are not a supported destination path. Accept HTTPS destinations through CONNECT. Require authority-form `host:port` on CONNECT; clients map an `https://` origin with no explicit port to `host:443`. The `http://` scheme in an HTTP proxy URL identifies the client-to-proxy protocol; it does not authorize a plaintext HTTP origin. Reject a client request for `http://` even if it follows a redirect from HTTPS.
 
 ### 5.3 Headers and secrets

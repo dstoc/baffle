@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use baffle_proxy::config::{
-    ControlRequest, DaemonConfig, InjectionFormat, RuleMode, SessionCreateMode,
+    ControlRequest, DaemonConfig, InjectionFormat, RuleMode, SessionCreateMode, SessionFile,
 };
 
 #[test]
@@ -57,32 +57,23 @@ fn file_only_daemon_and_nested_session_examples_parse() {
         daemon.daemon.session_config_dir,
         Some(PathBuf::from("/etc/baffle/sessions"))
     );
-    assert!(matches!(
-        ControlRequest::from_toml(include_str!("../examples/sessions/cladding/github.toml")),
-        Ok(ControlRequest::Create { .. })
-    ));
+    assert!(
+        SessionFile::from_toml(include_str!("../examples/sessions/cladding/github.toml")).is_ok()
+    );
 }
 
 #[test]
 fn session_configuration_examples_parse() {
-    let ControlRequest::Create { session, .. } =
-        ControlRequest::from_toml(include_str!("../examples/session.toml"))
-            .expect("session example should parse")
-    else {
-        panic!("session example should create a session");
-    };
+    let session = SessionFile::from_toml(include_str!("../examples/session.toml"))
+        .expect("session example should parse");
     assert!(!session.persistent);
     assert_eq!(session.rules.len(), 1);
     assert_eq!(session.rules[0].host, "example.com");
     assert_eq!(session.rules[0].mode, RuleMode::Tunnel);
     assert_eq!(session.rules[0].ports, [443]);
 
-    let ControlRequest::Create { session, .. } =
-        ControlRequest::from_toml(include_str!("../examples/session-credentials.toml"))
-            .expect("credential example should parse")
-    else {
-        panic!("credential example should create a session");
-    };
+    let session = SessionFile::from_toml(include_str!("../examples/session-credentials.toml"))
+        .expect("credential example should parse");
     let injection = &session.rules[0].inject[0];
     assert_eq!(session.rules[0].mode, RuleMode::Intercept);
     assert_eq!(session.rules[0].paths[0].as_str(), "/v1/**");
@@ -90,12 +81,8 @@ fn session_configuration_examples_parse() {
     assert_eq!(injection.secret.as_str(), "example-api");
     assert_eq!(injection.format, InjectionFormat::Bearer);
 
-    let ControlRequest::Create { session, .. } =
-        ControlRequest::from_toml(include_str!("../examples/session-port-80-tls.toml"))
-            .expect("port-80 TLS example should parse")
-    else {
-        panic!("port-80 example should create a session");
-    };
+    let session = SessionFile::from_toml(include_str!("../examples/session-port-80-tls.toml"))
+        .expect("port-80 TLS example should parse");
     assert_eq!(session.rules[0].mode, RuleMode::Intercept);
     assert_eq!(session.rules[0].ports, [80]);
     assert_eq!(session.rules[0].paths[0].as_str(), "/v1/**");

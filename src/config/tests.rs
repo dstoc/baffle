@@ -1,6 +1,7 @@
 mod daemon;
 mod policy;
 mod protocol;
+mod session_file;
 
 const DAEMON_EXAMPLE: &str = r#"
 [daemon]
@@ -20,39 +21,26 @@ directory = "/var/lib/baffle/secrets"
 "#;
 
 const SESSION_EXAMPLE: &str = r#"
-version = 1
-operation = "create"
+version = 2
 
-[session]
-persistent = false
+[rules."crates.io"]
 
-[[rules]]
-host = "crates.io"
-mode = "tunnel"
-ports = [443]
-
-[[rules]]
-host = "api.github.com"
-mode = "intercept"
-ports = [443]
+[rules."api.github.com"]
 paths = ["/repos/dstoc/cladding", "/repos/dstoc/cladding/**"]
 
-  [[rules.inject]]
-  header = "Authorization"
-  secret = "github-api"
-  format = "bearer"
+[[rules."api.github.com".inject]]
+header = "Authorization"
+secret = "github-api"
+format = "bearer"
 
-[[rules]]
-host = "github.com"
-mode = "intercept"
-ports = [443]
+[rules."github.com"]
 paths = ["/dstoc/cladding.git/**"]
 
-  [[rules.inject]]
-  header = "Authorization"
-  secret = "github-git"
-  format = "basic_password"
-  username = "x-access-token"
+[[rules."github.com".inject]]
+header = "Authorization"
+secret = "github-git"
+format = "basic_password"
+username = "x-access-token"
 "#;
 
 const MINIMAL_CREATE: &str = r#"
