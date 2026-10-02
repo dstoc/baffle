@@ -193,7 +193,9 @@ baffle stop "$SESSION_ID" --control-socket "$BAFFLE_DIR/control.sock"
 - Path restrictions and managed credentials require HTTPS interception.
   Interception fails closed if Baffle cannot inspect the connection. Baffle
   adds managed credentials only after it verifies upstream TLS identity and
-  the request policy.
+  the request policy. Baffle forwards upstream responses without filtering
+  injected credential values. Only allowlist sites that you trust with those
+  credentials, because a site can return them in a response.
 - Baffle authorizes exact configured hostnames and ports. It does not filter
   DNS answers or destination IP addresses; apply DNS and network egress
   controls when your deployment needs address restrictions.
