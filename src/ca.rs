@@ -385,12 +385,14 @@ fn file_identity(path: &Path) -> Result<FileIdentity> {
 fn file_has_identity(path: &Path, identity: FileIdentity) -> Result<bool> {
     use std::os::unix::fs::MetadataExt;
 
-    let metadata = match fs::metadata(path) {
+    let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
     };
-    Ok(metadata.dev() == identity.device && metadata.ino() == identity.inode)
+    Ok(metadata.file_type().is_file()
+        && metadata.dev() == identity.device
+        && metadata.ino() == identity.inode)
 }
 
 #[cfg(not(unix))]
@@ -804,6 +806,51 @@ mod tests {
             fs::read(&unrelated).expect("unrelated file should remain"),
             b"keep me"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_keeps_a_replacement_symlink_and_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let config = ca_config(directory.path());
+        let unrelated = directory.path().join("operator-file.txt");
+        fs::write(&unrelated, b"keep me").expect("unrelated file should be written");
+
+        let mut temporary_paths = Vec::new();
+        let temporary_key = write_temporary_file(
+            &config.private_key,
+            b"generated key",
+            0o600,
+            "private key",
+            &mut temporary_paths,
+        )
+        .expect("staged key should be written");
+        let mut linked_targets = Vec::new();
+        install_without_overwrite(
+            &temporary_key,
+            &config.private_key,
+            "CA private key",
+            &mut linked_targets,
+        )
+        .expect("staged key should install");
+
+        fs::remove_file(&config.private_key).expect("installed key should be removed");
+        symlink(&unrelated, &config.private_key).expect("replacement symlink should be created");
+
+        assert!(remove_linked_targets(&linked_targets).is_empty());
+        assert!(
+            fs::symlink_metadata(&config.private_key)
+                .expect("replacement symlink should remain")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read(&unrelated).expect("unrelated target should remain"),
+            b"keep me"
+        );
+        assert!(remove_paths(&temporary_paths).is_empty());
     }
 
     #[cfg(unix)]
