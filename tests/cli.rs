@@ -126,6 +126,23 @@ struct AttachedCreate {
 
 impl AttachedCreate {
     fn start(daemon: &TestDaemon, config: &Path) -> Self {
+        Self::start_inner(daemon, config, None).0
+    }
+
+    fn start_and_signal_on_readiness(
+        daemon: &TestDaemon,
+        config: &Path,
+        signal: &str,
+    ) -> (Self, ExitStatus) {
+        let (create, status) = Self::start_inner(daemon, config, Some(signal));
+        (create, status.expect("readiness signal should be sent"))
+    }
+
+    fn start_inner(
+        daemon: &TestDaemon,
+        config: &Path,
+        readiness_signal: Option<&str>,
+    ) -> (Self, Option<ExitStatus>) {
         let mut child = daemon
             .cli()
             .arg("create")
@@ -142,6 +159,15 @@ impl AttachedCreate {
         stdout
             .read_line(&mut created)
             .expect("create status should be printed");
+        let status = readiness_signal.map(|signal| {
+            let sent = Command::new("kill")
+                .arg(format!("-{signal}"))
+                .arg(child.id().to_string())
+                .status()
+                .expect("kill command should be available");
+            assert!(sent.success(), "could not send {signal}");
+            wait_for_exit(&mut child)
+        });
         stdout
             .read_line(&mut socket)
             .expect("data socket should be printed");
@@ -156,19 +182,24 @@ impl AttachedCreate {
                 .expect("create output should label its data socket")
                 .trim(),
         );
-        assert!(
-            child
-                .try_wait()
-                .expect("create status should be readable")
-                .is_none(),
-            "leased create must stay attached"
-        );
-        Self {
-            child,
-            _stdout: stdout,
-            id,
-            socket_path,
+        if readiness_signal.is_none() {
+            assert!(
+                child
+                    .try_wait()
+                    .expect("create status should be readable")
+                    .is_none(),
+                "leased create must stay attached"
+            );
         }
+        (
+            Self {
+                child,
+                _stdout: stdout,
+                id,
+                socket_path,
+            },
+            status,
+        )
     }
 
     fn signal_and_wait(&mut self, signal: &str) -> ExitStatus {
@@ -389,9 +420,8 @@ fn inline_create_cli_exit_releases_only_its_own_lease() {
     let daemon = TestDaemon::start(false);
     let config = inline_config(daemon._directory.path(), false);
     let mut first = AttachedCreate::start(&daemon, &config);
-    let mut second = AttachedCreate::start(&daemon, &config);
-
-    let second_status = second.signal_and_wait("INT");
+    let (second, second_status) =
+        AttachedCreate::start_and_signal_on_readiness(&daemon, &config, "INT");
     assert!(
         second_status.success(),
         "second CLI failed: {second_status}"

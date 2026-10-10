@@ -147,9 +147,15 @@ pub async fn create(control_socket: PathBuf, args: CreateArgs) -> Result<()> {
         unreachable!("clap requires one create source")
     };
 
+    let shutdown_signals = if session.is_persistent() {
+        None
+    } else {
+        Some(ShutdownSignals::register()?)
+    };
+
     report_created_session(&session)?;
-    if !session.is_persistent() {
-        wait_for_shutdown_signal().await?;
+    if let Some(shutdown_signals) = shutdown_signals {
+        shutdown_signals.wait().await?;
     }
     Ok(())
 }
@@ -355,22 +361,49 @@ fn client_error(
     }
 }
 
-async fn wait_for_shutdown_signal() -> Result<()> {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .context("could not register SIGTERM handler")?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => result.context("could not wait for Ctrl+C")?,
-            _ = terminate.recv() => {},
-        }
+#[cfg(unix)]
+struct ShutdownSignals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl ShutdownSignals {
+    fn register() -> Result<Self> {
+        let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .context("could not register SIGINT handler")?;
+        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("could not register SIGTERM handler")?;
+        Ok(Self {
+            interrupt,
+            terminate,
+        })
     }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c()
-        .await
-        .context("could not wait for Ctrl+C")?;
-    Ok(())
+
+    async fn wait(mut self) -> Result<()> {
+        tokio::select! {
+            _ = self.interrupt.recv() => {},
+            _ = self.terminate.recv() => {},
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+struct ShutdownSignals(tokio::signal::windows::CtrlC);
+
+#[cfg(windows)]
+impl ShutdownSignals {
+    fn register() -> Result<Self> {
+        Ok(Self(
+            tokio::signal::windows::ctrl_c().context("could not register Ctrl+C handler")?,
+        ))
+    }
+
+    async fn wait(mut self) -> Result<()> {
+        self.0.recv().await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
