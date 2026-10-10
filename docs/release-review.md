@@ -1,6 +1,6 @@
 # Release review record
 
-Reviewed on 2026-09-28 against the repository and current GitHub Actions
+Reviewed on 2026-10-10 against the repository and current GitHub Actions
 workflows.
 
 ## Package and CI
@@ -14,7 +14,8 @@ workflows.
   the reusable binary workflow after exact-SHA validation. That workflow also
   retains manual dispatch and human tag-push recovery paths, and accepts only a
   matching, published Release Please tag. It builds `x86_64-unknown-linux-gnu`
-  on Linux x86-64 and `aarch64-apple-darwin` on native Apple Silicon macOS.
+  on Linux x86-64, `aarch64-unknown-linux-gnu` on native Linux ARM64, and
+  `aarch64-apple-darwin` on native Apple Silicon macOS.
   Before packaging, it requires a non-empty top-level `LICENSE` file, Cargo
   license metadata, matching version, and matching executable architecture.
   It includes `LICENSE` in the release archive. The root `LICENSE` applies the
@@ -23,17 +24,21 @@ workflows.
   dependency graph for each release target to collect each package's license
   and notice files. The archive includes that target-specific bundle at
   `share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt`; the release workflow
-  checks that both target archives contain representative dependency notices.
-  It aggregates both target archives and publishes one `SHA256SUMS` file. The
-  script uses
+  checks that all three target archives contain representative dependency
+  notices. It aggregates the three target archives and publishes one
+  `SHA256SUMS` file. The Linux ARM64 packager reads the executable's ELF
+  version requirements, records its highest required glibc symbol version in
+  `share/doc/baffle/GLIBC-ABI.txt`, and the archive verifier checks that record
+  against the binary. This is the runtime baseline for that release asset; the
+  Linux ARM64 executable is dynamically linked. The notice generator uses
   pinned upstream license files when a Cargo crate archive omits them. It
   checks the crate's VCS revision and each bundled file's SHA-256 hash.
   Third-party dependencies retain their own license terms. The archive also
   includes the CDLA-Permissive-2.0 agreement for the Mozilla root certificate
   data from `webpki-root-certs`.
-- The package targets are Linux x86-64 with the GNU C library and Apple
-  Silicon macOS. Other Linux architectures, Intel macOS, and static linking
-  are not included in this release job.
+- The package targets are Linux x86-64 and ARM64 with the GNU C library and
+  Apple Silicon macOS. Other Linux architectures, Intel macOS, and static
+  linking are not included in this release job.
 
 ## Dependency and runtime review
 

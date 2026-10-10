@@ -26,6 +26,12 @@ case "$target" in
       exit 1
     fi
     ;;
+  aarch64-unknown-linux-gnu)
+    if [[ "$(uname -s)" != Linux || "$(uname -m)" != aarch64 ]]; then
+      echo "Target $target must be built on Linux ARM64." >&2
+      exit 1
+    fi
+    ;;
   aarch64-apple-darwin)
     if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
       echo "Target $target must be built on Apple Silicon macOS." >&2
@@ -66,6 +72,14 @@ case "$target" in
       exit 1
     fi
     ;;
+  aarch64-unknown-linux-gnu)
+    if [[ "$file_description" != *"ELF 64-bit"* || "$file_description" != *"ARM aarch64"* ]]; then
+      echo "Built executable does not have the expected Linux AArch64 architecture: $file_description" >&2
+      exit 1
+    fi
+    glibc_maximum="$("$tool_root/scripts/glibc-symbol-requirements.sh" "$binary")"
+    echo "Linux AArch64 executable dynamically links to glibc; highest required symbol version: $glibc_maximum."
+    ;;
   aarch64-apple-darwin)
     if [[ "$file_description" != *"Mach-O 64-bit"* || "$file_description" != *"arm64"* ]] || \
        ! lipo -archs "$binary" | tr ' ' '\n' | grep -Fxq arm64; then
@@ -86,6 +100,10 @@ python3 "$tool_root/scripts/generate-third-party-notices.py" \
   --source-dir "$repo_root" \
   --target "$target" \
   --output "$stage/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt"
+if [[ "$target" == aarch64-unknown-linux-gnu ]]; then
+  printf 'Executable: baffle\nLinkage: dynamically linked to glibc\nMinimum required glibc symbol version: %s\n' \
+    "$glibc_maximum" > "$stage/share/doc/baffle/GLIBC-ABI.txt"
+fi
 install -m 0644 licenses/webpki-root-certs-CDLA-Permissive-2.0.txt \
   "$stage/share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt"
 cp -R docs "$stage/share/doc/baffle/docs"

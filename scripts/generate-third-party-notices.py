@@ -8,7 +8,11 @@ import subprocess
 from pathlib import Path
 
 
-SUPPORTED_TARGETS = {"x86_64-unknown-linux-gnu", "aarch64-apple-darwin"}
+SUPPORTED_TARGETS = {
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+}
 LEGAL_FILE_PREFIXES = (
     "license",
     "licence",

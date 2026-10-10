@@ -344,6 +344,7 @@ def validate_existing_state(github: GitHubApi, tag: str, sha: str) -> tuple[str 
 def required_release_assets(tag: str) -> set[str]:
     return {
         f"baffle-proxy-{tag}-x86_64-unknown-linux-gnu.tar.gz",
+        f"baffle-proxy-{tag}-aarch64-unknown-linux-gnu.tar.gz",
         f"baffle-proxy-{tag}-aarch64-apple-darwin.tar.gz",
         "SHA256SUMS",
     }

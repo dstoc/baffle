@@ -8,7 +8,7 @@ socket can reach only the exact hosts and ports in the session policy.
 
 Baffle can tunnel HTTPS without inspecting it, or intercept HTTPS to check
 request paths and add daemon-managed credentials. It is currently verified on
-Linux x86-64 and macOS Apple Silicon.
+Linux x86-64, Linux ARM64, and macOS Apple Silicon.
 
 Sessions default to exact host and port rules. A session can also permit
 opaque HTTPS tunnels to DNS hostnames absent from its rules, on port 443 only.
@@ -21,8 +21,9 @@ Each [GitHub release](https://github.com/dstoc/baffle/releases/latest)
 provides these assets:
 
 - Linux x86-64: `baffle-proxy-v<version>-x86_64-unknown-linux-gnu.tar.gz`
+- Linux ARM64: `baffle-proxy-v<version>-aarch64-unknown-linux-gnu.tar.gz`
 - macOS Apple Silicon: `baffle-proxy-v<version>-aarch64-apple-darwin.tar.gz`
-- Both platforms: `SHA256SUMS`
+- All target archives: `SHA256SUMS`
 
 Set `VERSION` to the version shown on the latest release page. The examples
 below download the archive and `SHA256SUMS`, then verify the archive before
@@ -39,6 +40,15 @@ printf '%s\n' "$CHECKSUM" | sha256sum -c -
 tar -xzf "$ARCHIVE"
 sudo install -m 0755 baffle /usr/local/bin/baffle
 baffle --help
+```
+
+On Linux ARM64, use `aarch64-unknown-linux-gnu` in the archive name and run
+the same `sha256sum` check before extracting it. Read the measured glibc
+minimum from the archive with:
+
+```sh
+tar -xOf "baffle-proxy-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz" \
+  ./share/doc/baffle/GLIBC-ABI.txt
 ```
 
 On macOS Apple Silicon, use the `aarch64-apple-darwin` archive and verify it
@@ -59,7 +69,13 @@ export PATH="$HOME/.local/bin:$PATH"
 baffle --help
 ```
 
-The Linux archive targets GNU/Linux and links to the system GNU C library.
+The Linux archives use dynamic GNU C Library linking. The Linux ARM64 archive
+includes `share/doc/baffle/GLIBC-ABI.txt`. It records the highest glibc symbol
+version required by that build's executable. Treat that measured version as
+the minimum glibc runtime for the archive. The packager obtains it from the
+ELF version requirements; it does not infer a baseline from the Rust target
+name.
+
 Source builds require Rust 1.96 or newer, CMake, Clang, and libclang. See the
 [release guide](docs/releasing.md) for platform build dependencies.
 

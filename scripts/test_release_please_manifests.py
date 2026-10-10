@@ -130,7 +130,7 @@ class ReleasePleaseManifestTests(unittest.TestCase):
             "crates.io publication must not wait for binary packaging",
         )
 
-    def test_reusable_binary_workflow_builds_only_the_two_native_targets(self):
+    def test_reusable_binary_workflow_builds_three_native_targets(self):
         workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("workflow_call:", workflow)
         self.assertIn("tag:\n        description: Exact Release Please tag to package\n        required: true", workflow)
@@ -138,7 +138,16 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn('if [[ -n "$INPUT_TAG" ]]', workflow)
         self.assertIn("x86_64-unknown-linux-gnu", workflow)
+        self.assertIn("aarch64-unknown-linux-gnu", workflow)
         self.assertIn("aarch64-apple-darwin", workflow)
+        self.assertIn("runner: ubuntu-24.04-arm", workflow)
+        self.assertIn("three archives and combined checksum", workflow)
+        self.assertIn(
+            'expected=("$linux_x86_64" "$linux_arm64" "$macos_arm64" "SHA256SUMS")',
+            workflow,
+        )
+        self.assertIn('"$name" != "$linux_arm64"', workflow)
+        self.assertIn("already has different '$name'; refusing to overwrite it", workflow)
         self.assertNotIn("x86_64-apple-darwin", workflow)
         self.assertNotIn("macos-13", workflow)
         self.assertIn("EXPECTED_SHA: ${{ inputs.release_sha }}", workflow)
@@ -166,14 +175,16 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         self.assertIn("MACOS_RESULT: ${{ needs.macos-unix-integration.result }}", workflow)
         self.assertIn("PACKAGES_RESULT: ${{ needs.verify-release-packages.result }}", workflow)
 
-    def test_ci_builds_and_verifies_both_native_release_archives(self):
+    def test_ci_builds_and_verifies_three_native_release_archives(self):
         workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
         verifier = (REPO_ROOT / "scripts/verify-release-archives.sh").read_text()
 
         self.assertIn("release-packages:", workflow)
         self.assertIn("runner: ubuntu-24.04", workflow)
+        self.assertIn("runner: ubuntu-24.04-arm", workflow)
         self.assertIn("runner: macos-15", workflow)
         self.assertIn("x86_64-unknown-linux-gnu", workflow)
+        self.assertIn("aarch64-unknown-linux-gnu", workflow)
         self.assertIn("aarch64-apple-darwin", workflow)
         self.assertNotIn("x86_64-apple-darwin", workflow)
         self.assertIn("verify-release-packages:", workflow)
@@ -191,6 +202,8 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         ):
             self.assertIn(required_path, verifier)
         self.assertIn("ELF 64-bit", verifier)
+        self.assertIn("ARM aarch64", verifier)
+        self.assertIn("GLIBC-ABI.txt", verifier)
         self.assertIn("Mach-O 64-bit", verifier)
         self.assertIn("sha256sum --check SHA256SUMS", verifier)
 

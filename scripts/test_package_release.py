@@ -62,6 +62,18 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertIn("must be built on Apple Silicon macOS", result.stderr)
         self.assertFalse(output_dir_exists)
 
+    def test_rejects_linux_arm64_build_on_x86_64_host(self) -> None:
+        if not sys.platform.startswith("linux"):
+            self.skipTest("this assertion checks Linux runner target matching")
+
+        result, output_dir_exists = self.run_packager(
+            "v0.2.0", "aarch64-unknown-linux-gnu"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be built on Linux ARM64", result.stderr)
+        self.assertFalse(output_dir_exists)
+
 
 if __name__ == "__main__":
     unittest.main()

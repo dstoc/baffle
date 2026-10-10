@@ -130,6 +130,17 @@ class FakeRegistry:
 
 
 class RecoverPendingReleaseTests(unittest.TestCase):
+    def test_release_asset_gate_requires_all_three_archives_and_checksums(self):
+        self.assertEqual(
+            recover_pending_release.required_release_assets(TAG),
+            {
+                f"baffle-proxy-{TAG}-x86_64-unknown-linux-gnu.tar.gz",
+                f"baffle-proxy-{TAG}-aarch64-unknown-linux-gnu.tar.gz",
+                f"baffle-proxy-{TAG}-aarch64-apple-darwin.tar.gz",
+                "SHA256SUMS",
+            },
+        )
+
     def test_github_api_creates_tag_ref_and_release_without_target_commitish(self):
         requests = []
 
