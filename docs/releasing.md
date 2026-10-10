@@ -31,7 +31,7 @@ open or update a release pull request and to write `CHANGELOG.md`.
 - Merge the release pull request only after the generated-candidate checks
   below succeed. The merge creates the `vX.Y.Z` tag and GitHub Release. The
   same Release Please workflow run validates the exact release commit, runs
-  the required Linux and native Apple Silicon checks, builds both binary
+  the required Linux and native Apple Silicon checks, builds all three binary
   archives, and publishes them with one combined `SHA256SUMS` file. The
   independent crates.io job publishes `baffle-client` followed by
   `baffle-proxy`; binary publication does not wait for crates.io.
@@ -147,9 +147,15 @@ A publication which already succeeded is reported as such on a rerun.
 The `Format, lint, and test` required check remains in place. It validates
 regular pull requests and is not replaced by the publishing job. It includes
 the privileged Linux namespace fixture and native Apple Silicon macOS daemon
-integration. The binary workflow builds only the Linux x86-64 GNU and Apple
-Silicon macOS targets. The release workflow does not create an x86-64 macOS
-binary.
+integration. The binary workflow builds Linux x86-64 GNU, Linux ARM64 GNU, and
+Apple Silicon macOS targets. The Linux ARM64 archive is built on a native
+Ubuntu 24.04 ARM64 runner. Its packaging step inspects the executable's ELF
+version requirements with `readelf` and writes the highest required
+`GLIBC_X.Y` symbol version to `share/doc/baffle/GLIBC-ABI.txt`. The archive
+verifier checks that this record matches the binary and that the executable is
+dynamically linked to glibc. This measured version is the runtime baseline for
+that release asset; do not infer a glibc 2.17 minimum from the Rust target
+triple. The release workflow does not create an x86-64 macOS binary.
 
 To test the workflow without creating a release, run the `scripts` Python unit
 tests and the package checks above. The publication tests use a fake registry
@@ -256,7 +262,7 @@ runs caused by `GITHUB_TOKEN`.
 
 To verify native packaging without creating a GitHub release, run the script
 on the matching target OS and architecture. This creates only a local archive
-under `dist/`; checksum aggregation runs after both target jobs finish:
+under `dist/`; checksum aggregation runs after all three target jobs finish:
 
 ```sh
 version=$(cargo metadata --locked --no-deps --format-version 1 \
@@ -265,7 +271,9 @@ version=$(cargo metadata --locked --no-deps --format-version 1 \
 tar -tzf "dist/baffle-proxy-v${version}-x86_64-unknown-linux-gnu.tar.gz"
 ```
 
-On Apple Silicon macOS, use `aarch64-apple-darwin` instead. Each run checks the
-host architecture, Cargo version, MIT license, executable architecture, and
-archive contents. It does not simulate a GitHub tag, combine two archives, or
+On Linux ARM64, use `aarch64-unknown-linux-gnu`; the package output reports the
+highest required glibc symbol version and includes it in `GLIBC-ABI.txt`. On
+Apple Silicon macOS, use `aarch64-apple-darwin`. Each run checks the host
+architecture, Cargo version, MIT license, executable architecture, and archive
+contents. It does not simulate a GitHub tag, combine the three archives, or
 upload assets.

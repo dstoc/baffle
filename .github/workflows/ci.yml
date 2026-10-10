@@ -233,6 +233,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             runner: macos-15
     steps:
@@ -247,12 +249,19 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           case "$TARGET:$(uname -s):$(uname -m)" in
-            x86_64-unknown-linux-gnu:Linux:x86_64|aarch64-apple-darwin:Darwin:arm64) ;;
+            x86_64-unknown-linux-gnu:Linux:x86_64|aarch64-unknown-linux-gnu:Linux:aarch64|aarch64-apple-darwin:Darwin:arm64) ;;
             *) echo "Runner architecture does not match $TARGET: $(uname -s) $(uname -m)" >&2; exit 1 ;;
           esac
+          if [[ "$TARGET" == aarch64-unknown-linux-gnu ]]; then
+            . /etc/os-release
+            if [[ "$ID" != ubuntu || "$VERSION_ID" != 24.04 ]]; then
+              echo "Linux ARM64 release builds require Ubuntu 24.04; found $ID $VERSION_ID." >&2
+              exit 1
+            fi
+          fi
 
       - name: Install Linux native build tools
-        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        if: ${{ contains(matrix.target, 'unknown-linux-gnu') }}
         run: sudo apt-get update && sudo apt-get install --yes build-essential cmake libclang-dev
 
       - name: Install Apple Silicon native build tools
@@ -291,7 +300,7 @@ jobs:
           retention-days: 1
 
   verify-release-packages:
-    name: Verify both release archives and combined checksums
+    name: Verify three release archives and combined checksums
     needs: release-packages
     runs-on: ubuntu-24.04
     steps:
@@ -300,14 +309,14 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
 
-      - name: Download both target archives
+      - name: Download all target archives
         uses: actions/download-artifact@v4
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
 
-      - name: Verify architecture, legal files, and combined checksums
+      - name: Verify three architectures, legal files, ABI, and combined checksums
         run: |
           version="$(cargo metadata --locked --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "baffle-proxy") | .version')"

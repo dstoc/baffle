@@ -122,6 +122,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             runner: macos-15
     runs-on: ${{ matrix.runner }}
@@ -144,12 +146,19 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           case "$TARGET:$(uname -s):$(uname -m)" in
-            x86_64-unknown-linux-gnu:Linux:x86_64|aarch64-apple-darwin:Darwin:arm64) ;;
+            x86_64-unknown-linux-gnu:Linux:x86_64|aarch64-unknown-linux-gnu:Linux:aarch64|aarch64-apple-darwin:Darwin:arm64) ;;
             *) echo "Runner architecture does not match $TARGET: $(uname -s) $(uname -m)" >&2; exit 1 ;;
           esac
+          if [[ "$TARGET" == aarch64-unknown-linux-gnu ]]; then
+            . /etc/os-release
+            if [[ "$ID" != ubuntu || "$VERSION_ID" != 24.04 ]]; then
+              echo "Linux ARM64 release builds require Ubuntu 24.04; found $ID $VERSION_ID." >&2
+              exit 1
+            fi
+          fi
 
       - name: Install Linux native build tools
-        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        if: ${{ contains(matrix.target, 'unknown-linux-gnu') }}
         run: sudo apt-get update && sudo apt-get install --yes build-essential cmake libclang-dev
 
       - name: Install Apple Silicon native build tools
@@ -188,7 +197,7 @@ jobs:
     needs: [verify-release, build-targets]
     runs-on: ubuntu-24.04
     steps:
-      - name: Download both target archives
+      - name: Download all target archives
         uses: actions/download-artifact@v4
         with:
           pattern: binary-*
@@ -213,12 +222,13 @@ jobs:
           RELEASE_TAG: ${{ needs.verify-release.outputs.tag }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          linux="baffle-proxy-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz"
-          macos="baffle-proxy-${RELEASE_TAG}-aarch64-apple-darwin.tar.gz"
-          expected=("$linux" "$macos" "SHA256SUMS")
+          linux_x86_64="baffle-proxy-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+          linux_arm64="baffle-proxy-${RELEASE_TAG}-aarch64-unknown-linux-gnu.tar.gz"
+          macos_arm64="baffle-proxy-${RELEASE_TAG}-aarch64-apple-darwin.tar.gz"
+          expected=("$linux_x86_64" "$linux_arm64" "$macos_arm64" "SHA256SUMS")
           existing_assets="$(gh release view "$RELEASE_TAG" --repo "$REPOSITORY" --json assets --jq '.assets[].name')"
           for name in $existing_assets; do
-            if [[ "$name" == "baffle-proxy-${RELEASE_TAG}-"*.tar.gz && "$name" != "$linux" && "$name" != "$macos" ]]; then
+            if [[ "$name" == "baffle-proxy-${RELEASE_TAG}-"*.tar.gz && "$name" != "$linux_x86_64" && "$name" != "$linux_arm64" && "$name" != "$macos_arm64" ]]; then
               echo "Release '$RELEASE_TAG' contains an unexpected binary archive '$name'; refusing to publish an incomplete target set." >&2
               exit 1
             fi
@@ -240,7 +250,7 @@ jobs:
           done
 
           if (( ${#missing[@]} == 0 )); then
-            echo "Release '$RELEASE_TAG' already has the identical two archives and combined checksum; nothing to upload."
+            echo "Release '$RELEASE_TAG' already has the identical three archives and combined checksum; nothing to upload."
           else
             echo "Uploading only missing, verified release assets: ${missing[*]}"
             gh release upload "$RELEASE_TAG" "${missing[@]}" --repo "$REPOSITORY"
