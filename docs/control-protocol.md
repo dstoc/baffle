@@ -38,7 +38,13 @@ the kernel peer PID available separately. Baffle authorizes by UID only on both
 platforms. The UID must equal `daemon.trusted_operator_uid`. Run the daemon as
 that UID. The control socket's parent and the session socket directory must be
 owned by that UID with mode `0700` or stricter. Baffle sets the control socket
-and each session data socket to mode `0600`.
+to mode `0600` and requests mode `0600` for each session data socket. On Linux,
+Baffle accepts a data socket only when it is still the socket Baffle created,
+is owned by the trusted UID, grants owner write access, and grants no write
+access to group or other users. The effective data-socket mode can differ from
+`0600` when the filesystem rewrites or cannot apply the requested mode. The
+control socket and administrative resources retain their strict permission
+checks.
 
 The UID is the protocol's client identity. Baffle does not authenticate a
 process name or executable. The trusted UID is authorized to create sessions

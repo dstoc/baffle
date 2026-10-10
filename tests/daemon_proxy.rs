@@ -70,7 +70,17 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
             .expect("control socket should have metadata")
             .uid()
     );
-    assert_eq!(ephemeral_metadata.permissions().mode() & 0o777, 0o600);
+    let data_socket_mode = ephemeral_metadata.permissions().mode() & 0o777;
+    assert_ne!(
+        data_socket_mode & 0o200,
+        0,
+        "socket owner must be able to connect"
+    );
+    assert_eq!(
+        data_socket_mode & 0o022,
+        0,
+        "group and other users must not be able to write"
+    );
 
     let mut first_tunnel = connect_tunnel(
         &ephemeral_socket,

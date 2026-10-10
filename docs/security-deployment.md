@@ -116,20 +116,25 @@ Baffle creates missing directories with mode `0700`; existing directories
 must have the trusted UID as owner and must not grant group or other access.
 
 Keep the control socket available only to the trusted orchestrator. Baffle
-sets it and each per-session data socket to mode `0600`. Do not make sockets
-group- or world-writable. Do not mount the control socket or the entire
-session socket directory into an untrusted sandbox.
+sets the control socket to mode `0600` and requests mode `0600` for each
+per-session data socket. On Linux, Baffle checks that each data socket is the
+socket it created, is owned by the trusted UID, grants write access to its
+owner, and does not grant write access to group or other users. A filesystem
+can retain another safe mode, such as `0755`. Do not make data sockets
+group- or world-writable. Keep the control socket and socket directory
+private. Do not mount either into an untrusted sandbox.
 
-Expose only the data socket assigned to one workload. Keep the directory path
-private and pass the individual socket to a trusted proxy bridge or into a
-controlled mount namespace. A socket mode of `0600` allows only the owning
-UID. If the workload uses a different UID, run a trusted broker under the
-owner UID or configure a deliberate UID mapping; do not weaken socket
-permissions to make access work. Do not give the workload access to the
-control socket, CA private key, or secret directory.
+Expose only the data socket assigned to one workload. Treat its path as a
+capability to use that session's policy. Keep the socket directory private and
+pass only the individual socket to the intended client or workload, through a
+trusted proxy bridge or a controlled mount namespace. Retain mount-namespace
+or equivalent deployment isolation. If the workload uses a different UID, run
+a trusted broker under the owner UID or configure a deliberate UID mapping; do
+not weaken socket permissions to make access work. Do not give the workload
+access to the control socket, CA private key, or secret directory.
 
-The assigned data socket permits all requests in that session's policy. Treat
-its path as a capability. Remove it from the workload when its lease ends.
+The assigned data socket permits all requests in that session's policy.
+Remove it from the workload when its lease ends.
 For ephemeral sessions, the trusted client must keep the control lease open
 while the workload runs and close it on normal completion, cancellation, or
 failure. Persistent sessions require an explicit `stop` operation.

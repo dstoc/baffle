@@ -59,10 +59,11 @@ from source. A prebuilt release binary does not need them at runtime.
 The CI namespace job builds the default Rama daemon and runs
 `scripts/test-network-namespace-isolation.py` as root. The fixture creates
 daemon and client network namespaces joined by a veth pair. It provisions a
-named nested Unix socket, checks mode `0600` and denies an untrusted UID. The
-isolated authorized client uses that socket to reach an allowed HTTPS upstream.
-A route canary proves that the client can reach the daemon namespace. The
-checker confirms that the Baffle process created no TCP listening port.
+named nested Unix socket, checks that its owner can write and group or other
+users cannot, and denies an untrusted UID. The isolated authorized client uses
+that socket to reach an allowed HTTPS upstream. A route canary proves that the
+client can reach the daemon namespace. The checker confirms that the Baffle
+process created no TCP listening port.
 
 The negative cases remain active. The checker rejects two processes in the same
 namespace and a listener bound to `0.0.0.0`. The fixture cleans up processes and

@@ -18,8 +18,12 @@ socket, and owns the session lease for the workload's lifetime.
    completion, cancellation, or failure.
 4. Expose only that session's data socket to the assigned workload. A named
    nested socket path is available when a stable name helps orchestration.
-   Preserve mode `0600`; do not expose the control socket or the full socket
-   directory.
+   Baffle requests mode `0600`. On Linux, it validates the socket owner and
+   rejects group- or other-writable modes, but a filesystem can retain another
+   safe mode. Treat the socket path as a capability to use that session's
+   policy. Expose it only to its intended client or workload; do not expose the
+   control socket or the full socket directory. Retain mount-namespace or
+   equivalent deployment isolation.
 5. Apply network and process restrictions required by the deployment threat
    model. Baffle does not create a sandbox or prevent direct egress. See the
    [security and deployment guide](security-deployment.md).

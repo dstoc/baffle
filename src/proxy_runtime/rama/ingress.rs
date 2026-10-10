@@ -165,19 +165,14 @@ impl UnixSocketGuard {
             inode: identity.st_ino as u64,
             _created_directories: created_directories,
         };
-        fs::set_permissions(&bind_path, fs::Permissions::from_mode(0o600))?;
-        let current = stat_at(guard.parent.as_raw_fd(), &guard.name)?;
-        if !current
-            .as_ref()
-            .is_some_and(|metadata| guard.matches(metadata))
-            || current
-                .as_ref()
-                .is_some_and(|metadata| metadata.st_mode & 0o777 != 0o600)
-        {
-            return Err(io::Error::other(
-                "bound Unix socket identity or permissions changed",
-            ));
-        }
+        configure_bound_socket_permissions(
+            guard.device,
+            guard.inode,
+            // ControlServer validates its socket owner against the configured trusted UID.
+            unsafe { libc::geteuid() },
+            || fs::set_permissions(&bind_path, fs::Permissions::from_mode(0o600)),
+            || stat_at(guard.parent.as_raw_fd(), &guard.name),
+        )?;
         Ok((listener, guard))
     }
 
@@ -209,6 +204,55 @@ impl UnixSocketGuard {
             ),
         }
     }
+}
+
+fn configure_bound_socket_permissions<S, I>(
+    expected_device: libc::dev_t,
+    expected_inode: u64,
+    expected_uid: u32,
+    set_permissions: S,
+    inspect: I,
+) -> io::Result<()>
+where
+    S: FnOnce() -> io::Result<()>,
+    I: FnOnce() -> io::Result<Option<libc::stat>>,
+{
+    // Some Linux filesystems cannot apply the requested mode to Unix sockets.
+    // The metadata check below decides whether the effective result is safe.
+    let _ = set_permissions();
+    let metadata = inspect()?.ok_or_else(|| io::Error::other("bound Unix socket disappeared"))?;
+    validate_bound_socket_metadata(expected_device, expected_inode, expected_uid, &metadata)
+}
+
+fn validate_bound_socket_metadata(
+    expected_device: libc::dev_t,
+    expected_inode: u64,
+    expected_uid: u32,
+    metadata: &libc::stat,
+) -> io::Result<()> {
+    let same_socket = metadata.st_mode & libc::S_IFMT == libc::S_IFSOCK
+        && metadata.st_dev == expected_device
+        && metadata.st_ino == expected_inode;
+    if !same_socket || metadata.st_uid != expected_uid {
+        return Err(io::Error::other(
+            "bound Unix socket identity or owner changed",
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    let safe_permissions = {
+        metadata.st_mode & libc::S_IWUSR != 0
+            && metadata.st_mode & (libc::S_IWGRP | libc::S_IWOTH) == 0
+    };
+    #[cfg(not(target_os = "linux"))]
+    let safe_permissions = metadata.st_mode & 0o777 == 0o600;
+
+    if !safe_permissions {
+        return Err(io::Error::other(
+            "bound Unix socket has unsafe effective permissions",
+        ));
+    }
+    Ok(())
 }
 
 impl Drop for UnixSocketGuard {
@@ -467,5 +511,128 @@ struct ConnectionGuard(Arc<Metrics>);
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.0.connection_stopped();
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    const DEVICE: libc::dev_t = 17;
+    const INODE: u64 = 23;
+    const OWNER: u32 = 42;
+
+    fn socket_metadata(
+        mode: libc::mode_t,
+        uid: u32,
+        device: libc::dev_t,
+        inode: u64,
+    ) -> libc::stat {
+        let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+        metadata.st_mode = libc::S_IFSOCK | mode;
+        metadata.st_uid = uid;
+        metadata.st_dev = device;
+        metadata.st_ino = inode as _;
+        metadata
+    }
+
+    fn configure(
+        mode: libc::mode_t,
+        set_permissions: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
+        let metadata = socket_metadata(mode, OWNER, DEVICE, INODE);
+        configure_bound_socket_permissions(DEVICE, INODE, OWNER, set_permissions, || {
+            Ok(Some(metadata))
+        })
+    }
+
+    #[test]
+    fn mode_0600_is_accepted() {
+        configure(0o600, || Ok(())).expect("private socket mode should be accepted");
+    }
+
+    #[test]
+    fn unsupported_chmod_is_tolerated_when_metadata_is_safe() {
+        let chmod_attempted = std::cell::Cell::new(false);
+        let mode = if cfg!(target_os = "linux") {
+            0o755
+        } else {
+            0o600
+        };
+        configure(mode, || {
+            chmod_attempted.set(true);
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "filesystem does not support chmod on sockets",
+            ))
+        })
+        .expect("safe metadata should be accepted after chmod fails");
+        assert!(chmod_attempted.get(), "Baffle must still request mode 0600");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn safe_non_0600_linux_mode_is_accepted() {
+        configure(0o755, || Ok(())).expect("0755 does not grant group or other write access");
+    }
+
+    #[test]
+    fn group_and_world_writable_modes_are_rejected() {
+        for mode in [0o620, 0o602] {
+            assert!(
+                configure(mode, || Ok(())).is_err(),
+                "mode {mode:o} must not be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_owner_is_rejected() {
+        let metadata = socket_metadata(0o600, OWNER + 1, DEVICE, INODE);
+        let result = configure_bound_socket_permissions(
+            DEVICE,
+            INODE,
+            OWNER,
+            || Ok(()),
+            || Ok(Some(metadata)),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn replaced_socket_identity_is_rejected() {
+        let metadata = socket_metadata(0o600, OWNER, DEVICE, INODE + 1);
+        let result = configure_bound_socket_permissions(
+            DEVICE,
+            INODE,
+            OWNER,
+            || Ok(()),
+            || Ok(Some(metadata)),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn metadata_inspection_failure_is_rejected() {
+        let result = configure_bound_socket_permissions(
+            DEVICE,
+            INODE,
+            OWNER,
+            || Ok(()),
+            || {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "stat denied",
+                ))
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_socket_metadata_is_rejected() {
+        let result =
+            configure_bound_socket_permissions(DEVICE, INODE, OWNER, || Ok(()), || Ok(None));
+        assert!(result.is_err());
     }
 }

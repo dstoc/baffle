@@ -531,8 +531,13 @@ def main() -> None:
         if not proxy_socket.exists():
             fail(f"Baffle reported a missing session socket: {proxy_socket}")
         socket_metadata = proxy_socket.stat()
-        if socket_metadata.st_uid != os.geteuid() or socket_metadata.st_mode & 0o777 != 0o600:
-            fail("Baffle data socket does not have the configured owner and mode 0600")
+        socket_mode = socket_metadata.st_mode & 0o777
+        if (
+            socket_metadata.st_uid != os.geteuid()
+            or socket_mode & 0o200 == 0
+            or socket_mode & 0o022 != 0
+        ):
+            fail("Baffle data socket does not have the trusted owner and safe write permissions")
         parent_metadata = proxy_socket.parent.stat()
         if parent_metadata.st_uid != os.geteuid() or parent_metadata.st_mode & 0o777 != 0o700:
             fail("Baffle nested socket directory does not have owner-only mode 0700")
@@ -546,7 +551,7 @@ def main() -> None:
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as untrusted:
                     untrusted.connect(str(proxy_socket))
-                fail("an untrusted UID connected to a mode-0600 session socket")
+                fail("an untrusted UID connected to the session data socket")
             except OSError as error:
                 if error.errno != errno.EACCES:
                     fail(f"unexpected untrusted Unix-socket error: {error!r}")
@@ -554,7 +559,7 @@ def main() -> None:
             os.seteuid(trusted_uid)
             for path, mode in directory_modes:
                 path.chmod(mode)
-        print("PASS: mode-0600 Unix socket denies an untrusted UID with traversable parents")
+        print("PASS: Unix socket denies an untrusted UID with traversable parents")
         daemon_pid = daemon.pid
 
         listeners = daemon_tcp_listeners(daemon_pid)

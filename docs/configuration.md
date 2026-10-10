@@ -135,9 +135,17 @@ existing persistent-session behavior.
 
 The daemon creates missing control and socket directories with mode `0700`.
 Existing target directories must have the required owner and permissions.
-It creates the control socket and each session socket with mode `0600`.
-See the [security guide](security-deployment.md) for ownership and sandbox
-access requirements.
+The control socket has mode `0600`. Baffle requests mode `0600` for each
+session socket. On Linux, it accepts the socket only when the path still names
+the socket Baffle created, the trusted operator UID owns it, the owner has
+write access, and group and other users do not have write access. A filesystem
+can retain a different safe mode, such as `0755`. Other Unix platforms require
+mode `0600`.
+
+A session socket path grants access to that session's policy. Expose each
+socket only to its intended client or workload. Keep the socket directory and
+control socket private. See the [security guide](security-deployment.md) for
+ownership and sandbox access requirements.
 
 ## Command-line control
 
