@@ -28,6 +28,75 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, TlsConnector, rustls};
 
 #[tokio::test]
+async fn established_tunnel_stays_open_while_one_direction_is_idle() {
+    const IO_TIMEOUT_MS: u64 = 100;
+    const PAYLOAD: &[u8] = b"client-to-upstream";
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("upstream should bind");
+    let port = listener
+        .local_addr()
+        .expect("upstream address should be available")
+        .port();
+    let expected_len = PAYLOAD.len() * 3;
+    let (received_tx, received_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let upstream_task = tokio::spawn(async move {
+        let (mut upstream, _) = listener
+            .accept()
+            .await
+            .expect("proxy should connect to upstream");
+        let mut received = vec![0; expected_len];
+        upstream
+            .read_exact(&mut received)
+            .await
+            .expect("upstream should receive all client traffic");
+        let _ = received_tx.send(received);
+        let _ = shutdown_rx.await;
+    });
+
+    let daemon = DaemonProcess::start_with_io_timeout_ms(1, IO_TIMEOUT_MS);
+    let (_, created) = daemon.request(&tunnel_session(true, port));
+    assert_eq!(
+        created["ok"], true,
+        "tunnel session creation failed: {created:?}"
+    );
+    let proxy_socket = socket_from(&created);
+    let mut client = connect_tunnel(&proxy_socket, &format!("localhost:{port}")).await;
+
+    for _ in 0..3 {
+        client
+            .write_all(PAYLOAD)
+            .await
+            .expect("established tunnel should accept client traffic");
+        sleep(Duration::from_millis(IO_TIMEOUT_MS / 2 + 10)).await;
+    }
+
+    let received = timeout(Duration::from_secs(2), received_rx)
+        .await
+        .expect("upstream should receive traffic sent over more than io_timeout_ms")
+        .expect("upstream result should be available");
+    assert_eq!(received, PAYLOAD.repeat(3));
+
+    let mut response = [0; 1];
+    assert!(
+        timeout(Duration::from_millis(30), client.read(&mut response))
+            .await
+            .is_err(),
+        "an idle upstream-to-client direction must not close the tunnel"
+    );
+
+    shutdown_tx
+        .send(())
+        .expect("upstream task should remain open until cleanup");
+    timeout(Duration::from_secs(1), upstream_task)
+        .await
+        .expect("upstream task should shut down")
+        .expect("upstream task should complete cleanly");
+}
+
+#[tokio::test]
 async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases() {
     let mut first_upstream = spawn_echo_origin().await;
     let mut second_upstream = spawn_echo_origin().await;

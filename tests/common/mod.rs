@@ -46,7 +46,11 @@ impl DaemonProcess {
         allowed_secrets: &[&str],
         upstream_ca: Option<&Path>,
     ) -> Self {
-        Self::start_with_options(max_sessions, allowed_secrets, upstream_ca, false)
+        Self::start_with_options(max_sessions, allowed_secrets, upstream_ca, false, None)
+    }
+
+    pub fn start_with_io_timeout_ms(max_sessions: usize, io_timeout_ms: u64) -> Self {
+        Self::start_with_options(max_sessions, &[], None, false, Some(io_timeout_ms))
     }
 
     pub fn start_file_only_with_upstream_ca(
@@ -54,7 +58,7 @@ impl DaemonProcess {
         allowed_secrets: &[&str],
         upstream_ca: Option<&Path>,
     ) -> Self {
-        Self::start_with_options(max_sessions, allowed_secrets, upstream_ca, true)
+        Self::start_with_options(max_sessions, allowed_secrets, upstream_ca, true, None)
     }
 
     fn start_with_options(
@@ -62,6 +66,7 @@ impl DaemonProcess {
         allowed_secrets: &[&str],
         upstream_ca: Option<&Path>,
         file_only: bool,
+        io_timeout_ms: Option<u64>,
     ) -> Self {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let control_socket = directory.path().join("run/control.sock");
@@ -97,8 +102,11 @@ impl DaemonProcess {
                 )
             })
             .unwrap_or_default();
+        let io_timeout_config = io_timeout_ms
+            .map(|timeout_ms| format!("io_timeout_ms = {timeout_ms}\n"))
+            .unwrap_or_default();
         let config = format!(
-            "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\nmax_sessions = {max_sessions}\n{file_config}\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"{}\"\nallowed = [{allowed}]\n",
+            "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\nmax_sessions = {max_sessions}\n{io_timeout_config}{file_config}\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"{}\"\nallowed = [{allowed}]\n",
             control_socket.display(),
             socket_dir.display(),
             certificate_path.display(),
