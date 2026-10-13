@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1](https://github.com/dstoc/baffle/compare/v1.1.0...v1.1.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* **cli:** register shutdown signals before readiness output ([#65](https://github.com/dstoc/baffle/issues/65)) ([e14b7ee](https://github.com/dstoc/baffle/commit/e14b7ee20f50320920d2832eccd0a8e7d9d9c0a3))
+* **proxy:** keep established tunnels open ([#68](https://github.com/dstoc/baffle/issues/68)) ([d713979](https://github.com/dstoc/baffle/commit/d7139796a1233356c0f95e5398dd9d5581ae2ccc))
+
 ## [1.1.0](https://github.com/dstoc/baffle/compare/v1.0.0...v1.1.0) (2026-10-10)
 
 
