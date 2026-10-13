@@ -118,17 +118,13 @@ where
         .await
         .map_err(|error| ProxyRuntimeError::Run(error.to_string()))?;
     let mut upstream = upstream;
-    copy_bidirectional_with_timeout(&mut client, &mut upstream, io_timeout)
+    copy_bidirectional(&mut client, &mut upstream)
         .await
         .map(|_| ())
         .map_err(|error| ProxyRuntimeError::Run(error.to_string()))
 }
 
-async fn copy_bidirectional_with_timeout<A, B>(
-    left: &mut A,
-    right: &mut B,
-    io_timeout: Duration,
-) -> io::Result<(u64, u64)>
+async fn copy_bidirectional<A, B>(left: &mut A, right: &mut B) -> io::Result<(u64, u64)>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
@@ -136,16 +132,12 @@ where
     let (left_reader, left_writer) = tokio::io::split(left);
     let (right_reader, right_writer) = tokio::io::split(right);
     tokio::try_join!(
-        copy_with_timeout(left_reader, right_writer, io_timeout),
-        copy_with_timeout(right_reader, left_writer, io_timeout)
+        copy_until_eof(left_reader, right_writer),
+        copy_until_eof(right_reader, left_writer)
     )
 }
 
-async fn copy_with_timeout<R, W>(
-    mut reader: R,
-    mut writer: W,
-    io_timeout: Duration,
-) -> io::Result<u64>
+async fn copy_until_eof<R, W>(mut reader: R, mut writer: W) -> io::Result<u64>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -153,20 +145,12 @@ where
     let mut buffer = [0; 8 * 1024];
     let mut copied = 0_u64;
     loop {
-        let read = tokio::time::timeout(io_timeout, reader.read(&mut buffer))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "proxy read timed out"))??;
+        let read = reader.read(&mut buffer).await?;
         if read == 0 {
-            tokio::time::timeout(io_timeout, writer.shutdown())
-                .await
-                .map_err(|_| {
-                    io::Error::new(io::ErrorKind::TimedOut, "proxy write shutdown timed out")
-                })??;
+            writer.shutdown().await?;
             return Ok(copied);
         }
-        tokio::time::timeout(io_timeout, writer.write_all(&buffer[..read]))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "proxy write timed out"))??;
+        writer.write_all(&buffer[..read]).await?;
         copied = copied.saturating_add(read as u64);
     }
 }
