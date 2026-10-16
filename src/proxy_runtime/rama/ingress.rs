@@ -166,7 +166,7 @@ impl UnixSocketGuard {
             parent,
             name,
             device: identity.st_dev,
-            inode: identity.st_ino as u64,
+            inode: identity.st_ino,
             _created_directories: created_directories,
         };
         fs::set_permissions(&bind_path, fs::Permissions::from_mode(0o600))?;
