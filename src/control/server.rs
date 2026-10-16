@@ -147,6 +147,18 @@ impl ControlServer {
         // would let a third process lock a different inode.
         let _startup_lock = StartupLock::acquire(control_socket, trusted_uid)?;
 
+        let session_configs = match config.daemon.create_mode {
+            SessionCreateMode::Inline => None,
+            SessionCreateMode::FileOnly => Some(SessionConfigStore::open(
+                config
+                    .daemon
+                    .session_config_dir
+                    .as_deref()
+                    .context("file-only mode requires a session configuration directory")?,
+                trusted_uid,
+            )?),
+        };
+
         match fs::symlink_metadata(control_socket) {
             Ok(metadata) if metadata.file_type().is_socket() => {
                 if !remove_stale_socket(control_socket, trusted_uid)? {
@@ -185,27 +197,9 @@ impl ControlServer {
             bail!("bound control socket has unexpected owner or permissions");
         }
 
-        info!(
-            path = %control_socket.display(),
-            trusted_operator_uid = trusted_uid,
-            "control socket listening"
-        );
-
         let (runtime_event_sender, runtime_events) = tokio::sync::mpsc::unbounded_channel();
         let metrics = Arc::new(Metrics::default());
-        let session_configs = match config.daemon.create_mode {
-            SessionCreateMode::Inline => None,
-            SessionCreateMode::FileOnly => Some(SessionConfigStore::open(
-                config
-                    .daemon
-                    .session_config_dir
-                    .as_deref()
-                    .context("file-only mode requires a session configuration directory")?,
-                trusted_uid,
-            )?),
-        };
-
-        Ok(Self {
+        let server = Self {
             listener: Some(listener),
             socket_guard: Some(socket_guard),
             state: Arc::new(ControlState {
@@ -232,7 +226,15 @@ impl ControlServer {
             session_cleanups: JoinSet::new(),
             runtime_events,
             metrics,
-        })
+        };
+
+        info!(
+            path = %control_socket.display(),
+            trusted_operator_uid = trusted_uid,
+            "control socket listening"
+        );
+
+        Ok(server)
     }
 
     pub async fn run(&mut self) -> Result<()> {

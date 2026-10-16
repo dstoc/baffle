@@ -260,3 +260,129 @@ directory = "{secrets}"
         "daemon must reject missing CA files"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn daemon_validates_file_only_store_before_binding_control_socket() {
+    use std::{
+        fs,
+        os::unix::{
+            fs::{MetadataExt, PermissionsExt},
+            net::UnixStream,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
+
+    let directory = tempfile::tempdir().expect("temporary config directory should be created");
+    let config_path = directory.path().join("daemon.toml");
+    let certificate_path = directory.path().join("ca.pem");
+    let private_key_path = directory.path().join("ca-key.pem");
+    let control_socket = directory.path().join("run/control.sock");
+    let socket_dir = directory.path().join("proxies");
+    let daemon_log = directory.path().join("daemon.log");
+    let session_root = directory.path().join("sessions");
+    fs::create_dir(&session_root).expect("session root should be created");
+    let mut session_config_dir = session_root;
+    for _ in 0..200 {
+        session_config_dir.push("s");
+        fs::create_dir(&session_config_dir).expect("nested session directory should be created");
+    }
+    fs::set_permissions(&session_config_dir, fs::Permissions::from_mode(0o720))
+        .expect("final session directory should have unsafe permissions");
+
+    let trusted_uid = fs::metadata(directory.path())
+        .expect("temporary directory should have metadata")
+        .uid();
+    let config = format!(
+        r#"
+[daemon]
+control_socket = "{control_socket}"
+socket_dir = "{socket_dir}"
+trusted_operator_uid = {trusted_uid}
+create_mode = "file_only"
+session_config_dir = "{session_config_dir}"
+
+[ca]
+certificate = "{certificate}"
+private_key = "{private_key}"
+
+[secrets]
+directory = "{secrets}"
+"#,
+        control_socket = control_socket.display(),
+        socket_dir = socket_dir.display(),
+        session_config_dir = session_config_dir.display(),
+        certificate = certificate_path.display(),
+        private_key = private_key_path.display(),
+        secrets = directory.path().join("secrets").display(),
+    );
+    fs::write(&config_path, config).expect("temporary config should be written");
+
+    let initialize = std::process::Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("ca")
+        .arg("init")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("CA init command should run");
+    assert!(
+        initialize.status.success(),
+        "CA init should succeed: {}",
+        String::from_utf8_lossy(&initialize.stderr)
+    );
+
+    let daemon_log_file = fs::File::create(&daemon_log).expect("daemon log should be created");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("daemon")
+        .arg("--config")
+        .arg(&config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(daemon_log_file))
+        .spawn()
+        .expect("daemon process should start");
+
+    let startup_deadline = Instant::now() + Duration::from_secs(5);
+    let mut connected_during_startup = false;
+    let mut socket_path_existed_during_startup = false;
+    let exit_status = loop {
+        if let Some(status) = child.try_wait().expect("daemon status should be readable") {
+            break status;
+        }
+        socket_path_existed_during_startup |= control_socket.exists();
+        if UnixStream::connect(&control_socket).is_ok() {
+            connected_during_startup = true;
+        }
+        if Instant::now() >= startup_deadline {
+            let _ = child.kill();
+            panic!("daemon did not reject the invalid session directory");
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+
+    let log = fs::read_to_string(&daemon_log).expect("daemon log should be readable");
+    assert!(
+        !exit_status.success(),
+        "daemon should reject unsafe session directory permissions"
+    );
+    assert!(
+        !socket_path_existed_during_startup,
+        "control socket path must not exist during failed startup"
+    );
+    assert!(
+        !connected_during_startup,
+        "a client must not connect during failed startup"
+    );
+    assert!(
+        !log.contains("control socket listening"),
+        "failed startup must not log listener readiness: {log}"
+    );
+    assert!(
+        log.contains("session configuration directory has unsafe ownership or permissions"),
+        "daemon should report the session directory validation error: {log}"
+    );
+    assert!(
+        !control_socket.exists(),
+        "failed startup must not leave a control socket"
+    );
+}
