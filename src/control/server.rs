@@ -479,10 +479,9 @@ fn remove_stale_session_sockets_at(
                 }
                 // SAFETY: openat returned a new descriptor owned by this File.
                 let child = unsafe { File::from_raw_fd(child_fd) };
-                let opened = child
-                    .metadata()
+                let opened = stat_fd(child.as_raw_fd())
                     .with_context(|| format!("could not inspect {}", path.display()))?;
-                if opened.dev() != metadata.st_dev || opened.ino() != metadata.st_ino {
+                if opened.st_dev != metadata.st_dev || opened.st_ino != metadata.st_ino {
                     continue;
                 }
                 on_directory_open(&path);
@@ -580,6 +579,16 @@ fn stat_at(parent_fd: libc::c_int, name: &CString) -> io::Result<Option<libc::st
         Ok(None)
     } else {
         Err(error)
+    }
+}
+
+fn stat_fd(fd: libc::c_int) -> io::Result<libc::stat> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } == 0 {
+        // SAFETY: fstat initialized metadata when it returned success.
+        Ok(unsafe { metadata.assume_init() })
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
