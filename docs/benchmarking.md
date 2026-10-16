@@ -14,7 +14,8 @@ Run the release runtime benchmark, which exercises session startup and stop,
 HTTP/1.1, HTTP/2, and tunnel traffic:
 
 ```sh
-taskset -c 0 env BAFFLE_BENCH_RAW=bench/results/rama-runtime-release.csv \
+taskset -c 0 env RUSTFLAGS='--cfg baffle_benchmark' \
+  BAFFLE_BENCH_RAW=bench/results/rama-runtime-release.csv \
   cargo test --locked --release --lib runtime_benchmark -- \
   --ignored --nocapture --test-threads=1
 ```
@@ -22,7 +23,8 @@ taskset -c 0 env BAFFLE_BENCH_RAW=bench/results/rama-runtime-release.csv \
 Run the HTTP/1.1 characterization:
 
 ```sh
-taskset -c 0 env BAFFLE_BENCH_RAW=bench/results/rama-unix-http1.csv \
+taskset -c 0 env RUSTFLAGS='--cfg baffle_benchmark' \
+  BAFFLE_BENCH_RAW=bench/results/rama-unix-http1.csv \
   cargo test --locked --release --lib runtime_http1_characterization -- \
   --ignored --nocapture --test-threads=1
 ```
@@ -39,7 +41,8 @@ python3 scripts/benchmark_http1.py \
 
 The harness starts the Python origin with the pinned fixture certificate and
 checks the injected `X-Bench-Token` value. The optional no-delay controls apply
-to outbound TCP and the origin; Baffle accepts client traffic on a Unix socket.
+to outbound TCP and the origin. They compile only with the private
+`baffle_benchmark` cfg. Baffle accepts client traffic on a Unix socket.
 
 Run the public-daemon session benchmark:
 

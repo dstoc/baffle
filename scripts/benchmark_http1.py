@@ -85,6 +85,9 @@ def run_case(
     environment["BAFFLE_BENCH_REQUEST_BYTES"] = str(request_body_bytes)
     environment["BAFFLE_BENCH_RESPONSE_BYTES"] = str(response_body_bytes)
     environment.pop("BAFFLE_BENCH_ORIGIN_ADDR", None)
+    environment["RUSTFLAGS"] = (
+        f"{environment.get('RUSTFLAGS', '').strip()} --cfg baffle_benchmark"
+    ).strip()
 
     origin: BenchOrigin | None = None
     if origin_name == "python":
@@ -104,8 +107,6 @@ def run_case(
         environment["BAFFLE_BENCH_ORIGIN_ADDR"] = address
 
     command = ["cargo", "test", "--locked"]
-    if nodelay_mode != "production":
-        command.extend(["--features", "benchmark-tcp-nodelay"])
     command.extend(["--lib"])
     if profile == "release":
         command.append("--release")

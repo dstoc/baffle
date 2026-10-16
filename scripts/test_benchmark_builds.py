@@ -10,6 +10,8 @@ from benchmark_builds import (
     unique_dependency_entries,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 class DependencyEntryTests(unittest.TestCase):
     def test_repeat_node_marker_does_not_count_as_a_second_package(self):
@@ -42,6 +44,32 @@ class NativeVersionTests(unittest.TestCase):
 
         self.assertEqual(versions["clang_driver"], "unavailable")
         self.assertEqual(versions["libclang"], str(library.resolve()))
+
+
+class PackageContentsTests(unittest.TestCase):
+    def test_published_package_excludes_internal_benchmark_sources(self):
+        result = subprocess.run(
+            [
+                "cargo",
+                "package",
+                "--manifest-path",
+                str(ROOT / "Cargo.toml"),
+                "--package",
+                "baffle-proxy",
+                "--list",
+                "--allow-dirty",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        package_files = set(result.stdout.splitlines())
+        self.assertNotIn("bench/runtime.rs", package_files)
+        self.assertNotIn("bench/measure_sessions.rs", package_files)
+        self.assertNotIn("examples/measure_sessions.rs", package_files)
 
 
 if __name__ == "__main__":

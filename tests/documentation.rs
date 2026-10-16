@@ -158,3 +158,18 @@ fn integration_test_discovery_requires_no_explicit_test_manifest_targets() {
         "Cargo.toml should not declare explicit [[test]] targets; integration tests rely on standard Cargo discovery"
     );
 }
+
+#[test]
+fn benchmark_harness_and_measurement_driver_are_development_only() {
+    let manifest = include_str!("../Cargo.toml");
+    let parsed = toml::from_str::<toml::Table>(manifest).expect("Cargo.toml should parse");
+    let features = parsed.get("features").and_then(toml::Value::as_table);
+    assert!(!features.is_some_and(|features| features.contains_key("benchmark-tcp-nodelay")));
+    assert!(!manifest.contains("benchmark-tcp-nodelay"));
+    assert!(!manifest.contains("measure_sessions.rs"));
+
+    let runtime = include_str!("../src/proxy_runtime.rs");
+    assert!(runtime.contains("#[cfg(all(test, baffle_benchmark))]"));
+    assert!(runtime.contains("#[path = \"../bench/runtime.rs\"]"));
+    assert!(!runtime.contains("#[cfg(test)]\nmod benchmark;"));
+}

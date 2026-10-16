@@ -12,25 +12,19 @@ pub(crate) use rama::ProxyRuntimeOptions;
 pub(crate) use rama::SocketDirectoryRegistry;
 pub(crate) use test_trust::TestUpstreamTrust;
 
-#[cfg(any(test, feature = "benchmark-tcp-nodelay"))]
+#[cfg(baffle_benchmark)]
 pub(crate) fn benchmark_tcp_nodelay_mode() -> String {
-    #[cfg(feature = "benchmark-tcp-nodelay")]
-    {
-        std::env::var("BAFFLE_BENCH_TCP_NODELAY").unwrap_or_else(|_| "production".to_owned())
-    }
-    #[cfg(not(feature = "benchmark-tcp-nodelay"))]
-    {
-        "production".to_owned()
-    }
+    std::env::var("BAFFLE_BENCH_TCP_NODELAY").unwrap_or_else(|_| "production".to_owned())
 }
 
-#[cfg(any(test, feature = "benchmark-tcp-nodelay"))]
+#[cfg(baffle_benchmark)]
 pub(crate) fn benchmark_tcp_nodelay_enabled(socket_leg: &str) -> bool {
     let mode = benchmark_tcp_nodelay_mode();
     mode == socket_leg || mode == "all"
 }
 
-#[cfg(test)]
+#[cfg(all(test, baffle_benchmark))]
+#[path = "../bench/runtime.rs"]
 mod benchmark;
 
 use std::{fmt, io};

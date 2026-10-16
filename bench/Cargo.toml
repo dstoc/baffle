@@ -1,0 +1,17 @@
+[package]
+name = "baffle-bench-tools"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "measure_sessions"
+path = "measure_sessions.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+baffle-proxy = { path = "..", version = "1.1.1" }
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "time"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(baffle_integration_test)', 'cfg(baffle_benchmark)'] }

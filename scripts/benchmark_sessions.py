@@ -130,15 +130,16 @@ def main() -> None:
             json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         build = [
-            "cargo", "build", "--locked",
-            "--bin", "baffle", "--example", "measure_sessions",
+            "cargo", "build", "--locked", "--manifest-path",
+            str(ROOT / "bench" / "Cargo.toml"),
         ]
         if args.profile == "release":
             build.append("--release")
+        build.extend(["--bin", "measure_sessions"])
         run(build)
         profile_dir = "release" if args.profile == "release" else "debug"
         daemon_bin = ROOT / "target" / profile_dir / "baffle"
-        measure_bin = ROOT / "target" / profile_dir / "examples" / "measure_sessions"
+        measure_bin = ROOT / "target" / profile_dir / "measure_sessions"
         config = daemon_config(root / "benchmark", cert, key, os.getuid())
         log_path = args.output_dir / "daemon.log"
         raw_path = args.output_dir / "sessions.csv"
