@@ -994,6 +994,17 @@ fn daemon_reclaims_stale_control_and_session_sockets_after_crash() {
             .as_str()
             .expect("persistent session should return its socket path"),
     );
+    let (_nested_creator, nested_created) = create_named_session(
+        &daemon.socket,
+        true,
+        "nested-crash.example.test",
+        "cladding/github.sock",
+    );
+    let stale_nested_path = PathBuf::from(
+        nested_created["result"]["socket"]
+            .as_str()
+            .expect("nested persistent session should return its socket path"),
+    );
     let competing_start = Command::new(env!("CARGO_BIN_EXE_baffle"))
         .arg("daemon")
         .arg("--config")
@@ -1023,6 +1034,10 @@ fn daemon_reclaims_stale_control_and_session_sockets_after_crash() {
     assert!(
         stale_proxy_path.exists(),
         "SIGKILL should leave the session socket"
+    );
+    assert!(
+        stale_nested_path.exists(),
+        "SIGKILL should leave the nested session socket"
     );
 
     let config_path = daemon._directory.path().join("daemon.toml");
@@ -1058,17 +1073,33 @@ fn daemon_reclaims_stale_control_and_session_sockets_after_crash() {
         !stale_proxy_path.exists(),
         "restart should remove the stale session socket"
     );
-    assert_eq!(
-        fs::read_dir(&daemon.socket_dir)
-            .expect("session socket directory should remain available")
-            .count(),
-        0,
-        "restart should leave no stale session socket entries"
+    assert!(
+        !stale_nested_path.exists(),
+        "restart should remove the stale nested session socket"
     );
+    let remaining_entries = fs::read_dir(&daemon.socket_dir)
+        .expect("session socket directory should remain available")
+        .collect::<std::io::Result<Vec<_>>>()
+        .expect("session socket entries should be readable");
+    assert_eq!(remaining_entries.len(), 1);
+    assert_eq!(remaining_entries[0].file_name(), "cladding");
     assert_eq!(
         request(&daemon.socket, "version = 1\noperation = \"list\"\n")["ok"],
         true
     );
+
+    let (_recreated_creator, recreated) = create_named_session(
+        &daemon.socket,
+        true,
+        "nested-recreated.example.test",
+        "cladding/github.sock",
+    );
+    assert_eq!(recreated["ok"], true, "the nested path should be reusable");
+    assert_eq!(
+        PathBuf::from(recreated["result"]["socket"].as_str().unwrap()),
+        stale_nested_path
+    );
+    assert!(stale_nested_path.exists());
 }
 
 #[test]
@@ -1287,6 +1318,25 @@ fn create_session(control_socket: &PathBuf, persistent: bool, host: &str) -> (Un
         .expect("client timeout should be set");
     let body = format!(
         "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n"
+    );
+    write_frame(&mut control, body.as_bytes());
+    let response = read_response(&mut control);
+    assert_eq!(response["ok"], true);
+    (control, response)
+}
+
+fn create_named_session(
+    control_socket: &PathBuf,
+    persistent: bool,
+    host: &str,
+    socket_name: &str,
+) -> (UnixStream, Value) {
+    let mut control = UnixStream::connect(control_socket).expect("client should connect");
+    control
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("client timeout should be set");
+    let body = format!(
+        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\nsocket_name = {socket_name:?}\n\n[[rules]]\nhost = {host:?}\nmode = \"tunnel\"\n"
     );
     write_frame(&mut control, body.as_bytes());
     let response = read_response(&mut control);

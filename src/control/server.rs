@@ -457,14 +457,19 @@ fn remove_stale_session_sockets(directory: &Path, expected_uid: u32) -> Result<(
     })? {
         let entry = entry.context("could not inspect session socket directory entry")?;
         let path = entry.path();
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
+        // DirEntry::file_type does not follow symlinks. Recurse only into real
+        // directories so a symlink in the socket tree cannot expose paths
+        // outside the configured directory.
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => {
                 return Err(error).with_context(|| format!("could not inspect {}", path.display()));
             }
         };
-        if metadata.file_type().is_socket() {
+        if file_type.is_dir() {
+            remove_stale_session_sockets(&path, expected_uid)?;
+        } else if file_type.is_socket() {
             remove_stale_socket(&path, expected_uid)?;
         }
     }

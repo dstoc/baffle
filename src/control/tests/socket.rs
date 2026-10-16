@@ -1,5 +1,6 @@
-use super::{StartupLock, remove_stale_socket};
+use super::{StartupLock, remove_stale_session_sockets, remove_stale_socket};
 use std::{
+    fs,
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
         net::{UnixListener, UnixStream},
@@ -8,6 +9,109 @@ use std::{
     thread,
     time::Duration,
 };
+
+#[test]
+fn recursively_removes_stale_owned_sockets_without_following_symlinks() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+        .expect("socket directory should be private");
+    let uid = fs::metadata(directory.path())
+        .expect("socket directory metadata should be readable")
+        .uid();
+
+    let top_level = directory.path().join("top.sock");
+    drop(UnixListener::bind(&top_level).expect("top-level stale socket should bind"));
+
+    let nested = directory.path().join("cladding");
+    fs::create_dir(&nested).expect("nested socket directory should be created");
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700))
+        .expect("nested socket directory should be private");
+    let nested_socket = nested.join("github.sock");
+    drop(UnixListener::bind(&nested_socket).expect("nested stale socket should bind"));
+
+    let replaced_socket = nested.join("replaced.sock");
+    drop(UnixListener::bind(&replaced_socket).expect("replaceable socket should bind"));
+    fs::remove_file(&replaced_socket).expect("old socket should be replaced");
+    fs::write(&replaced_socket, "replacement")
+        .expect("replacement file should be written at the socket path");
+
+    let active_socket = nested.join("active.sock");
+    let active_listener = UnixListener::bind(&active_socket).expect("active socket should bind");
+
+    let unrelated_file = nested.join("notes.txt");
+    fs::write(&unrelated_file, "keep").expect("unrelated file should be written");
+    let unrelated_directory = nested.join("cache");
+    fs::create_dir(&unrelated_directory).expect("unrelated directory should be created");
+
+    let outside = tempfile::tempdir().expect("outside directory should be created");
+    fs::set_permissions(outside.path(), fs::Permissions::from_mode(0o700))
+        .expect("outside directory should be private");
+    let outside_socket = outside.path().join("outside.sock");
+    drop(UnixListener::bind(&outside_socket).expect("outside stale socket should bind"));
+    let directory_symlink = directory.path().join("linked");
+    std::os::unix::fs::symlink(outside.path(), &directory_symlink)
+        .expect("directory symlink should be created");
+
+    remove_stale_session_sockets(directory.path(), uid)
+        .expect("startup cleanup should scan nested directories");
+
+    assert!(
+        !top_level.exists(),
+        "top-level stale socket should be removed"
+    );
+    assert!(
+        !nested_socket.exists(),
+        "nested stale socket should be removed"
+    );
+    assert_eq!(
+        fs::read(&replaced_socket).expect("replacement path should remain readable"),
+        b"replacement",
+        "a replaced socket path should be preserved"
+    );
+    assert!(active_socket.exists(), "active socket should be preserved");
+    assert!(UnixStream::connect(&active_socket).is_ok());
+    assert!(
+        unrelated_file.exists(),
+        "unrelated file should be preserved"
+    );
+    assert!(
+        unrelated_directory.is_dir(),
+        "unrelated directory should be preserved"
+    );
+    assert!(
+        directory_symlink
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        outside_socket.exists(),
+        "cleanup must not follow a directory symlink"
+    );
+
+    drop(active_listener);
+}
+
+#[test]
+fn preserves_session_sockets_owned_by_another_uid() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+        .expect("socket directory should be private");
+    let uid = fs::metadata(directory.path())
+        .expect("socket directory metadata should be readable")
+        .uid();
+    let socket = directory.path().join("foreign.sock");
+    drop(UnixListener::bind(&socket).expect("foreign socket should bind"));
+
+    remove_stale_session_sockets(directory.path(), uid ^ 1)
+        .expect("cleanup should skip sockets with a different owner");
+
+    assert!(
+        socket.exists(),
+        "a socket owned by another UID should remain"
+    );
+}
 
 #[test]
 fn serializes_stale_socket_cleanup_through_listener_bind() {
