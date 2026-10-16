@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.2](https://github.com/dstoc/baffle/compare/v1.1.1...v1.1.2) (2026-10-16)
+
+
+### Bug Fixes
+
+* **control:** clean stale nested session sockets ([#70](https://github.com/dstoc/baffle/issues/70)) ([27d0b36](https://github.com/dstoc/baffle/commit/27d0b360ae46bb9083c1b99d812158384bde9799))
+* **control:** validate session store before binding ([#69](https://github.com/dstoc/baffle/issues/69)) ([1a31844](https://github.com/dstoc/baffle/commit/1a31844ba9b186d632da8da32178638dca3a0469))
+* **paths:** support traversable directory ancestors ([#72](https://github.com/dstoc/baffle/issues/72)) ([52ad4a1](https://github.com/dstoc/baffle/commit/52ad4a11993e213d66366de7559318ffe4d38871))
+* **proxy:** buffer CONNECT headers and reject extra tokens ([#74](https://github.com/dstoc/baffle/issues/74)) ([fc7e87a](https://github.com/dstoc/baffle/commit/fc7e87adc0089a37c3fec1856a65424f3cfb9e64))
+* **proxy:** release zero-lease directory records ([#71](https://github.com/dstoc/baffle/issues/71)) ([a08310e](https://github.com/dstoc/baffle/commit/a08310ee9cca412ceae0f85053cccd4eeabfe25f))
+* **proxy:** reuse intercepted TLS leaf certificates ([#85](https://github.com/dstoc/baffle/issues/85)) ([c77d0c7](https://github.com/dstoc/baffle/commit/c77d0c79369388547ddf6e199f68d78ad081e417))
+
 ## [1.1.1](https://github.com/dstoc/baffle/compare/v1.1.0...v1.1.1) (2026-10-13)
 
 
