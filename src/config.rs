@@ -11,21 +11,20 @@ use serde::de::DeserializeOwned;
 mod daemon;
 mod policy;
 mod protocol;
-mod session;
 mod session_file;
 #[cfg(test)]
 mod tests;
 
+pub use baffle_client::PROTOCOL_VERSION;
+pub(crate) use baffle_client::SESSION_CONFIG_INVALID_MESSAGE as SESSION_FILE_INVALID_MESSAGE;
+pub use baffle_client::{
+    HeaderInjection, HostRule, InjectionFormat, RuleMode, SessionConfig, UnmatchedHostPolicy,
+};
+pub use baffle_client::{MAX_SESSION_CONFIG_COMPONENT_BYTES, MAX_SESSION_CONFIG_NAME_BYTES};
 pub use daemon::{CaConfig, DaemonConfig, DaemonSettings, SecretStoreConfig, SessionCreateMode};
 pub(crate) use policy::canonicalize_request_path;
-pub use policy::{HeaderInjection, HostRule, InjectionFormat, PathRule, RuleMode, SecretRef};
 pub use protocol::ControlRequest;
-pub use session::{SessionConfig, UnmatchedHostPolicy};
 pub use session_file::SessionFile;
-pub(crate) const MAX_SESSION_CONFIG_NAME_BYTES: usize = 1_024;
-pub(crate) const SESSION_FILE_INVALID_MESSAGE: &str =
-    "session configuration file is invalid; use the current schema with version = 2";
-pub const PROTOCOL_VERSION: u16 = 2;
 
 /// A safe configuration error. Error text never contains input values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +49,10 @@ impl ConfigError {
 
     fn unsupported_protocol_version() -> Self {
         Self {
-            message: "unsupported control protocol version; expected version = 2".into(),
+            message: format!(
+                "unsupported control protocol version; expected version = {}",
+                baffle_client::PROTOCOL_VERSION
+            ),
             kind: ConfigErrorKind::UnsupportedProtocolVersion,
         }
     }

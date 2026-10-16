@@ -7,8 +7,6 @@ use std::{
 
 use serde::Deserialize;
 
-use super::policy::RawSecretRef;
-
 const DEFAULT_MAX_SESSIONS: usize = 64;
 const DEFAULT_MAX_CONNECTIONS_PER_SESSION: usize = 128;
 const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 5;
@@ -218,7 +216,7 @@ struct RawCaConfig {
 struct RawSecretStoreConfig {
     directory: PathBuf,
     #[serde(default)]
-    allowed: Vec<RawSecretRef>,
+    allowed: Vec<String>,
 }
 
 fn default_max_sessions() -> usize {

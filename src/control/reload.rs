@@ -339,7 +339,7 @@ fn same_effective_rules(
         let mut rules = rules.to_vec();
         for rule in &mut rules {
             rule.ports.sort_unstable();
-            rule.paths.sort_by_key(|path| path.as_str());
+            rule.paths.sort();
             for injection in &mut rule.inject {
                 injection.header.make_ascii_lowercase();
             }
