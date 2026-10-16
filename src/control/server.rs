@@ -86,14 +86,14 @@ pub struct ControlServer {
     metrics: Arc<Metrics>,
 }
 
-struct ControlState {
-    trusted_operator_uid: u32,
-    create_mode: SessionCreateMode,
-    read_timeout: Duration,
-    secret_store: SecretStore,
-    sessions: SessionManager,
-    provisioning_slots: Arc<Semaphore>,
-    session_configs: Option<SessionConfigStore>,
+pub(super) struct ControlState {
+    pub(super) trusted_operator_uid: u32,
+    pub(super) create_mode: SessionCreateMode,
+    pub(super) read_timeout: Duration,
+    pub(super) secret_store: SecretStore,
+    pub(super) sessions: SessionManager,
+    pub(super) provisioning_slots: Arc<Semaphore>,
+    pub(super) session_configs: Option<SessionConfigStore>,
 }
 
 struct SocketGuard {
@@ -318,12 +318,12 @@ impl ControlServer {
     }
 }
 
-struct StartupLock {
+pub(super) struct StartupLock {
     _file: File,
 }
 
 impl StartupLock {
-    fn acquire(control_socket: &Path, expected_uid: u32) -> Result<Self> {
+    pub(super) fn acquire(control_socket: &Path, expected_uid: u32) -> Result<Self> {
         let lock_name = format!(
             "{}.lock",
             control_socket
@@ -403,7 +403,7 @@ fn ensure_private_directory(path: &Path, expected_uid: u32) -> Result<()> {
 /// Remove a disconnected Unix socket without deleting an active listener or a
 /// path that changed while it was being checked. Returns true only when this
 /// call removed a stale socket.
-fn remove_stale_socket(path: &Path, expected_uid: u32) -> Result<bool> {
+pub(super) fn remove_stale_socket(path: &Path, expected_uid: u32) -> Result<bool> {
     let parent_path = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -419,7 +419,7 @@ fn remove_stale_socket(path: &Path, expected_uid: u32) -> Result<bool> {
     remove_stale_socket_at(&parent, &name, path, expected_uid)
 }
 
-fn remove_stale_session_sockets(directory: &Path, expected_uid: u32) -> Result<()> {
+pub(super) fn remove_stale_session_sockets(directory: &Path, expected_uid: u32) -> Result<()> {
     let directory_fd = open_socket_directory(directory).with_context(|| {
         format!(
             "could not open session socket directory {}",
@@ -429,14 +429,14 @@ fn remove_stale_session_sockets(directory: &Path, expected_uid: u32) -> Result<(
     remove_stale_session_sockets_at(&directory_fd, directory, expected_uid, &mut |_| {})
 }
 
-fn open_socket_directory(path: &Path) -> io::Result<File> {
+pub(super) fn open_socket_directory(path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(path)
 }
 
-fn remove_stale_session_sockets_at(
+pub(super) fn remove_stale_session_sockets_at(
     directory: &File,
     display_path: &Path,
     expected_uid: u32,
@@ -516,14 +516,14 @@ fn remove_stale_socket_at(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SocketProbeResult {
+pub(super) enum SocketProbeResult {
     Active,
     Stale,
     #[cfg(any(target_os = "macos", test))]
     Changed,
 }
 
-fn remove_stale_socket_at_with_probe(
+pub(super) fn remove_stale_socket_at_with_probe(
     parent: &File,
     name: &CString,
     display_path: &Path,
@@ -625,7 +625,7 @@ fn probe_socket_path(path: &Path) -> io::Result<SocketProbeResult> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn probe_socket_via_resolved_path(
+pub(super) fn probe_socket_via_resolved_path(
     parent_fd: libc::c_int,
     name: &CString,
     metadata: &libc::stat,
@@ -817,7 +817,7 @@ fn pinned_socket_path(parent_fd: libc::c_int, name: &CString) -> io::Result<std:
 }
 
 #[cfg(target_os = "macos")]
-fn pinned_directory_path(parent_fd: libc::c_int) -> io::Result<PathBuf> {
+pub(super) fn pinned_directory_path(parent_fd: libc::c_int) -> io::Result<PathBuf> {
     // Darwin's /dev/fd directory alias does not provide a reliable pathname
     // for connect(2) to a socket below an opened directory. Resolve the current
     // pathname of the pinned directory instead. Callers must check that this
@@ -833,11 +833,11 @@ fn pinned_directory_path(parent_fd: libc::c_int) -> io::Result<PathBuf> {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-fn pinned_directory_path(parent_fd: libc::c_int) -> io::Result<PathBuf> {
+pub(super) fn pinned_directory_path(parent_fd: libc::c_int) -> io::Result<PathBuf> {
     fs::read_link(format!("/proc/self/fd/{parent_fd}"))
 }
 
-async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
+pub(super) async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
     match stream.peer_cred() {
         Ok(credentials) if credentials.uid() == state.trusted_operator_uid => {}
         _ => {
@@ -1081,11 +1081,3 @@ async fn write_value(stream: &mut UnixStream, value: Value) -> io::Result<()> {
     stream.write_all(&bytes).await?;
     stream.flush().await
 }
-
-#[cfg(test)]
-#[path = "tests/server.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "tests/socket.rs"]
-mod socket_tests;

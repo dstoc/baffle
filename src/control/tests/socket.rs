@@ -1,4 +1,8 @@
-use super::{StartupLock, remove_stale_session_sockets, remove_stale_socket};
+use crate::control::server::{
+    StartupLock, open_socket_directory, pinned_directory_path, probe_socket_via_resolved_path,
+    remove_stale_session_sockets, remove_stale_session_sockets_at, remove_stale_socket,
+    remove_stale_socket_at_with_probe,
+};
 use std::{
     ffi::CString,
     fs,
@@ -114,26 +118,18 @@ fn preserves_active_socket_when_directory_moves_after_liveness_path_resolution()
     let socket = nested.join("active.sock");
     let listener = UnixListener::bind(&socket).expect("active socket should bind");
     let moved = directory.path().join("moved");
-    let parent =
-        super::open_socket_directory(&nested).expect("nested socket directory should open");
+    let parent = open_socket_directory(&nested).expect("nested socket directory should open");
     let name = CString::new("active.sock").expect("socket name should not contain a null byte");
 
-    let removed = super::remove_stale_socket_at_with_probe(
+    let removed = remove_stale_socket_at_with_probe(
         &parent,
         &name,
         &socket,
         uid,
         |parent_fd, name, metadata| {
-            super::probe_socket_via_resolved_path(
-                parent_fd,
-                name,
-                metadata,
-                super::pinned_directory_path,
-                || {
-                    fs::rename(&nested, &moved)
-                        .expect("directory should move after path resolution");
-                },
-            )
+            probe_socket_via_resolved_path(parent_fd, name, metadata, pinned_directory_path, || {
+                fs::rename(&nested, &moved).expect("directory should move after path resolution");
+            })
         },
     )
     .expect("cleanup should preserve a socket when its path moves");
@@ -168,10 +164,10 @@ fn preserves_outside_sockets_when_nested_directory_is_replaced_after_open() {
     drop(UnixListener::bind(&outside_socket).expect("outside stale socket should bind"));
 
     let detached = directory.path().join("detached");
-    let root = super::open_socket_directory(directory.path())
-        .expect("session socket directory should open");
+    let root =
+        open_socket_directory(directory.path()).expect("session socket directory should open");
     let mut replaced = false;
-    super::remove_stale_session_sockets_at(&root, directory.path(), uid, &mut |path| {
+    remove_stale_session_sockets_at(&root, directory.path(), uid, &mut |path| {
         if path == nested && !replaced {
             fs::rename(path, &detached).expect("opened nested directory should be detached");
             std::os::unix::fs::symlink(outside.path(), path)

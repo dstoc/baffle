@@ -14,7 +14,8 @@ use crate::{
     ca::ManagedCa,
     config::{DaemonSettings, SessionConfig},
     proxy_runtime::{
-        ProxyRuntime, ProxyRuntimeError, ProxyRuntimeEvent, RuntimeId, TestUpstreamTrust,
+        ProxyRuntime, ProxyRuntimeError, ProxyRuntimeEvent, RuntimeId, SocketDirectoryRegistry,
+        TestUpstreamTrust,
     },
     secrets::ResolvedSecrets,
     telemetry::Metrics,
@@ -31,6 +32,7 @@ pub(super) struct SessionManager {
     pub(super) test_upstream_trust: TestUpstreamTrust,
     pub(super) runtime_events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
     pub(super) registry: Arc<Mutex<SessionRegistry>>,
+    pub(super) socket_directories: Arc<SocketDirectoryRegistry>,
     pub(super) metrics: Arc<Metrics>,
 }
 
@@ -62,6 +64,7 @@ impl SessionManager {
                 sessions: HashMap::new(),
                 provisioning: HashSet::new(),
             })),
+            socket_directories: Arc::new(SocketDirectoryRegistry::default()),
             metrics,
         }
     }
@@ -111,6 +114,7 @@ impl SessionManager {
             Arc::clone(&self.metrics),
             self.test_upstream_trust.clone(),
             self.runtime_events.clone(),
+            Arc::clone(&self.socket_directories),
             Arc::clone(&listener_gate),
             1,
         )
@@ -403,7 +407,3 @@ fn new_session_id() -> io::Result<String> {
     }
     Ok(id)
 }
-
-#[cfg(test)]
-#[path = "tests/session.rs"]
-mod tests;
