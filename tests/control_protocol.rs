@@ -9,7 +9,7 @@ use std::{
         fs::{MetadataExt, PermissionsExt, symlink},
         net::UnixStream,
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Barrier,
@@ -1438,7 +1438,7 @@ fn intercept_policy_with_secret(host: &str, persistent: bool) -> String {
     )
 }
 
-fn reload_session(control_socket: &PathBuf, session_id: &str) -> Value {
+fn reload_session(control_socket: &Path, session_id: &str) -> Value {
     request(
         control_socket,
         &format!("version = 2\noperation = \"reload\"\nsession_id = {session_id:?}\n"),
@@ -1520,14 +1520,14 @@ fn write_session_policy_contents(daemon: &DaemonProcess, name: &str, contents: &
         .expect("session config should be private");
 }
 
-fn list_sessions(control_socket: &PathBuf) -> Vec<Value> {
+fn list_sessions(control_socket: &Path) -> Vec<Value> {
     request(control_socket, "version = 2\noperation = \"list\"\n")["result"]["sessions"]
         .as_array()
         .expect("list should return a session array")
         .clone()
 }
 
-fn wait_for_session_count(control_socket: &PathBuf, expected: usize) {
+fn wait_for_session_count(control_socket: &Path, expected: usize) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if list_sessions(control_socket).len() == expected {

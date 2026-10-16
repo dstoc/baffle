@@ -172,16 +172,17 @@ impl DaemonProcess {
                 let socket_metadata = fs::symlink_metadata(&daemon.control_socket)
                     .expect("control socket should have metadata");
                 assert_eq!(socket_metadata.uid(), trusted_uid);
-                assert_eq!(socket_metadata.permissions().mode() & 0o777, 0o600);
-                assert_eq!(
-                    fs::metadata(daemon.control_socket.parent().unwrap())
-                        .expect("control directory should have metadata")
-                        .permissions()
-                        .mode()
-                        & 0o777,
-                    0o700
-                );
-                return daemon;
+                if socket_metadata.permissions().mode() & 0o777 == 0o600 {
+                    assert_eq!(
+                        fs::metadata(daemon.control_socket.parent().unwrap())
+                            .expect("control directory should have metadata")
+                            .permissions()
+                            .mode()
+                            & 0o777,
+                        0o700
+                    );
+                    return daemon;
+                }
             }
             if let Some(status) = daemon
                 .child
@@ -194,7 +195,7 @@ impl DaemonProcess {
             }
             assert!(
                 Instant::now() < deadline,
-                "daemon should bind its control socket"
+                "daemon should bind and secure its control socket"
             );
             thread::sleep(Duration::from_millis(10));
         }
