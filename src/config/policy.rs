@@ -1,12 +1,9 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    net::IpAddr,
-};
+use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
-use url::Host;
 
 use super::ConfigError;
+use crate::dns::normalize_dns_name;
 
 /// The supported per-host action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -111,7 +108,7 @@ pub(super) fn validate_named_rules(
             paths: raw_paths,
             inject: raw_inject,
         } = raw;
-        let host = validate_hostname(&raw_host)
+        let host = normalize_dns_name(&raw_host)
             .map_err(|message| ConfigError::new(format!("{context}.host {message}")))?;
         if !hosts.insert(host.clone()) {
             return Err(ConfigError::new(format!(
@@ -220,41 +217,6 @@ pub(super) fn validate_named_rules(
     }
 
     Ok(rules)
-}
-
-fn validate_hostname(input: &str) -> Result<String, &'static str> {
-    if input.is_empty() || input.contains('*') {
-        return Err("must be an exact DNS hostname");
-    }
-    let host = input.to_ascii_lowercase();
-    let host = host.strip_suffix('.').unwrap_or(&host);
-    if host.is_empty() || host.len() > 253 || host.parse::<IpAddr>().is_ok() || !host.is_ascii() {
-        return Err("must be an exact DNS hostname, not an IP address or wildcard");
-    }
-
-    for label in host.split('.') {
-        if label.is_empty()
-            || label.len() > 63
-            || label.starts_with('-')
-            || label.ends_with('-')
-            || !label
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return Err("contains an invalid DNS label");
-        }
-    }
-
-    // Match the URL host parser used for HTTP destinations. It recognizes
-    // non-canonical IPv4 forms such as 127.1, octal components, and a single
-    // integer. Parsing is local and does not perform DNS resolution.
-    match Host::parse(host) {
-        Ok(Host::Domain(domain)) => Ok(domain),
-        Ok(Host::Ipv4(_) | Host::Ipv6(_)) => {
-            Err("must be an exact DNS hostname, not an IP address or wildcard")
-        }
-        Err(_) => Err("must be a valid exact DNS hostname"),
-    }
 }
 
 fn validate_path(input: &str) -> Result<PathRule, &'static str> {
