@@ -661,7 +661,18 @@ fn pinned_socket_path(parent_fd: libc::c_int, name: &CString) -> io::Result<std:
 
 #[cfg(target_os = "macos")]
 fn pinned_socket_path(parent_fd: libc::c_int, name: &CString) -> io::Result<std::path::PathBuf> {
-    let mut path = std::path::PathBuf::from(format!("/dev/fd/{parent_fd}"));
+    // Darwin's /dev/fd directory alias does not provide a reliable pathname
+    // for connect(2) to a socket below an opened directory. Resolve the current
+    // pathname of the pinned directory instead. Socket metadata checks and
+    // removal remain relative to the pinned descriptor, so a renamed or
+    // replaced path cannot redirect cleanup to a different socket.
+    let mut parent_path = vec![0 as libc::c_char; libc::PATH_MAX as usize];
+    if unsafe { libc::fcntl(parent_fd, libc::F_GETPATH, parent_path.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: F_GETPATH writes a NUL-terminated pathname on success.
+    let parent_path = unsafe { CStr::from_ptr(parent_path.as_ptr()) };
+    let mut path = std::path::PathBuf::from(OsStr::from_bytes(parent_path.to_bytes()));
     path.push(OsStr::from_bytes(name.as_bytes()));
     Ok(path)
 }
