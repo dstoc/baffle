@@ -233,6 +233,27 @@ pub(super) async fn start_origin(
     Ok((address, task, accepted_rx))
 }
 
+pub(super) async fn start_tls_origin_connections(
+    config: rustls::ServerConfig,
+    connection_count: usize,
+) -> Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>), TestError> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let task = tokio::spawn(async move {
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        for _ in 0..connection_count {
+            let (stream, _) = listener.accept().await.expect("origin should accept");
+            let mut tls = acceptor
+                .accept(stream)
+                .await
+                .expect("origin TLS should complete");
+            let mut byte = [0; 1];
+            let _ = tls.read(&mut byte).await;
+        }
+    });
+    Ok((address, task))
+}
+
 pub(super) async fn open_tls_client(
     proxy: &Path,
     authority: &str,

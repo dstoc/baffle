@@ -187,6 +187,7 @@ impl ProxyRuntime {
         });
         let (generation_sender, generation_receiver) = watch::channel(Arc::clone(&generation));
         let generations = Arc::new(Mutex::new(vec![Arc::downgrade(&generation)]));
+        let tls_relay = tls::new_cached_relay(&ca);
         let cancellation = CancellationToken::new();
         let retirement = CancellationToken::new();
         let retired = Arc::new(AtomicBool::new(false));
@@ -195,7 +196,7 @@ impl ProxyRuntime {
             Arc::clone(&socket_guard),
             ingress::ProxySettings {
                 generations: generation_receiver,
-                ca,
+                tls_relay,
                 permits: Arc::clone(&permits),
                 cancellation: cancellation.clone(),
                 retirement: retirement.clone(),

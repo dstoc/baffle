@@ -24,19 +24,18 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ca::ManagedCa,
     platform::{directory_open_flags, normalize_system_path},
     telemetry::Metrics,
 };
 
-use super::{ProxyGeneration, ProxyRuntimeError, connect};
+use super::{ProxyGeneration, ProxyRuntimeError, connect, tls};
 
 const UNIX_SOCKET_PATH_BYTES: usize =
     std::mem::size_of::<libc::sockaddr_un>() - std::mem::offset_of!(libc::sockaddr_un, sun_path);
 
 pub(super) struct ProxySettings {
     pub(super) generations: watch::Receiver<Arc<ProxyGeneration>>,
-    pub(super) ca: Arc<ManagedCa>,
+    pub(super) tls_relay: Arc<tls::CachedRelay>,
     pub(super) permits: Arc<Semaphore>,
     pub(super) cancellation: CancellationToken,
     pub(super) retirement: CancellationToken,
@@ -53,7 +52,7 @@ pub(super) async fn run_proxy(
 ) -> Result<(), ProxyRuntimeError> {
     let ProxySettings {
         generations,
-        ca,
+        tls_relay,
         permits,
         cancellation,
         retirement,
@@ -84,7 +83,7 @@ pub(super) async fn run_proxy(
                     Ok(permit) => permit,
                     Err(_) => continue,
                 };
-                let ca = Arc::clone(&ca);
+                let tls_relay = Arc::clone(&tls_relay);
                 let metrics = Arc::clone(&metrics);
                 connections.spawn(async move {
                     let _permit = permit;
@@ -94,7 +93,7 @@ pub(super) async fn run_proxy(
                         stream,
                         Arc::clone(&generation.policy),
                         Arc::clone(&generation.secrets),
-                        ca,
+                        tls_relay,
                         metrics,
                         io_timeout,
                     ).await {
