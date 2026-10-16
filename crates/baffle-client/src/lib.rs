@@ -26,6 +26,37 @@ const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SESSION_CONFIG_NAME_BYTES: usize = 1_024;
 
+/// Return the default control socket path for the current platform.
+///
+/// macOS uses `HOME/Library/Caches/Baffle/control.sock`, falling back to
+/// `/tmp/baffle-<euid>/Library/Caches/Baffle/control.sock` when `HOME` is unset.
+/// Other platforms use `/run/baffle/control.sock`.
+pub fn default_control_socket() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: geteuid has no preconditions and does not access memory.
+        let uid = unsafe { libc::geteuid() };
+        macos_default_control_socket(std::env::var_os("HOME"), uid)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        linux_default_control_socket()
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_default_control_socket(home: Option<std::ffi::OsString>, uid: u32) -> PathBuf {
+    let base = home
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/tmp/baffle-{uid}")));
+    base.join("Library/Caches/Baffle/control.sock")
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn linux_default_control_socket() -> PathBuf {
+    PathBuf::from("/run/baffle/control.sock")
+}
+
 /// A client that opens one control connection for each operation.
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -736,8 +767,33 @@ fn validate_session_config_name(name: &str) -> Result<(), ClientError> {
 mod tests {
     use super::{
         ClientError, CreateFromFileRequest, CreateRequest, HostRule, InjectionFormat,
-        SessionConfig, UnmatchedHostPolicy, map_remote_error, validate_session_config_name,
+        SessionConfig, UnmatchedHostPolicy, linux_default_control_socket,
+        macos_default_control_socket, map_remote_error, validate_session_config_name,
     };
+
+    #[test]
+    fn uses_the_linux_control_socket_path() {
+        assert_eq!(
+            linux_default_control_socket(),
+            std::path::PathBuf::from("/run/baffle/control.sock")
+        );
+    }
+
+    #[test]
+    fn uses_home_for_the_macos_control_socket_path() {
+        assert_eq!(
+            macos_default_control_socket(Some("/Users/alice".into()), 501),
+            std::path::PathBuf::from("/Users/alice/Library/Caches/Baffle/control.sock")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_uid_scoped_tmp_when_macos_home_is_unset() {
+        assert_eq!(
+            macos_default_control_socket(None, 501),
+            std::path::PathBuf::from("/tmp/baffle-501/Library/Caches/Baffle/control.sock")
+        );
+    }
 
     #[test]
     fn serializes_create_requests_with_the_current_session_schema() {

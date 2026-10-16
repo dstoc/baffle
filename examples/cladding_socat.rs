@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use baffle_proxy::client::{Client, HostRule, SessionConfig};
+use baffle_proxy::client::{Client, HostRule, SessionConfig, default_control_socket};
 
 struct SocatBridge(Child);
 
@@ -57,22 +57,4 @@ async fn main() -> Result<()> {
     drop(_bridge);
     session.close();
     Ok(())
-}
-
-fn default_control_socket() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                // SAFETY: geteuid has no preconditions and does not access memory.
-                let uid = unsafe { libc::geteuid() };
-                PathBuf::from(format!("/tmp/baffle-{uid}"))
-            })
-            .join("Library/Caches/Baffle/control.sock")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        PathBuf::from("/run/baffle/control.sock")
-    }
 }
