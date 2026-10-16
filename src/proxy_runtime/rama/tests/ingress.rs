@@ -198,18 +198,21 @@ async fn startup_rejects_an_existing_socket_path_without_replacing_it() -> Resul
     let socket_path = directory.path().join("occupied.sock");
     fs::write(&socket_path, b"owned by another process")?;
     let (events, _receiver) = mpsc::unbounded_channel();
-    let result = ProxyRuntime::start_with_metrics(
-        RuntimeId::new("rama-startup-conflict"),
-        tunnel_session(443),
-        Arc::new(ResolvedSecrets::default()),
+    let result = ProxyRuntime::start_with_options(ProxyRuntimeOptions {
+        runtime_id: RuntimeId::new("rama-startup-conflict"),
+        session: tunnel_session(443),
+        secrets: Arc::new(ResolvedSecrets::default()),
         ca,
-        socket_path.clone(),
-        4,
-        Duration::from_secs(1),
-        Arc::new(crate::telemetry::Metrics::default()),
-        crate::proxy_runtime::TestUpstreamTrust::default(),
+        socket_path: socket_path.clone(),
+        connection_permits: Arc::new(tokio::sync::Semaphore::new(4)),
+        io_timeout: Duration::from_secs(1),
+        metrics: Arc::new(crate::telemetry::Metrics::default()),
+        test_upstream_trust: crate::proxy_runtime::TestUpstreamTrust::default(),
         events,
-    )
+        socket_directories: Arc::new(SocketDirectoryRegistry::default()),
+        listener_gate: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        listener_generation: 1,
+    })
     .await;
     assert!(
         result.is_err(),

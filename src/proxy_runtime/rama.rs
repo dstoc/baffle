@@ -46,6 +46,23 @@ struct ProxyGeneration {
     secrets: Arc<ResolvedSecrets>,
 }
 
+/// Named inputs for a runtime that shares session-owned lifecycle state.
+pub(crate) struct ProxyRuntimeOptions {
+    pub(crate) runtime_id: RuntimeId,
+    pub(crate) session: SessionConfig,
+    pub(crate) secrets: Arc<ResolvedSecrets>,
+    pub(crate) ca: Arc<ManagedCa>,
+    pub(crate) socket_path: PathBuf,
+    pub(crate) connection_permits: Arc<Semaphore>,
+    pub(crate) io_timeout: Duration,
+    pub(crate) metrics: Arc<Metrics>,
+    pub(crate) test_upstream_trust: TestUpstreamTrust,
+    pub(crate) events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
+    pub(crate) socket_directories: Arc<ingress::SocketDirectoryRegistry>,
+    pub(crate) listener_gate: Arc<AtomicU64>,
+    pub(crate) listener_generation: u64,
+}
+
 impl ProxyRuntime {
     /// Bind and start one runtime from a validated session configuration.
     ///
@@ -59,138 +76,42 @@ impl ProxyRuntime {
         max_connections: usize,
         events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
     ) -> Result<Self, ProxyRuntimeError> {
-        Self::start_with_metrics(
+        Self::start_with_options(ProxyRuntimeOptions {
             runtime_id,
             session,
-            Arc::new(ResolvedSecrets::default()),
+            secrets: Arc::new(ResolvedSecrets::default()),
             ca,
             socket_path,
-            max_connections,
-            Duration::from_secs(30),
-            Arc::new(Metrics::default()),
-            TestUpstreamTrust::default(),
+            connection_permits: Arc::new(Semaphore::new(max_connections)),
+            io_timeout: Duration::from_secs(30),
+            metrics: Arc::new(Metrics::default()),
+            test_upstream_trust: TestUpstreamTrust::default(),
             events,
-        )
+            socket_directories: Arc::new(ingress::SocketDirectoryRegistry::default()),
+            listener_gate: Arc::new(AtomicU64::new(1)),
+            listener_generation: 1,
+        })
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn start_with_metrics(
-        runtime_id: RuntimeId,
-        session: SessionConfig,
-        secrets: Arc<ResolvedSecrets>,
-        ca: Arc<ManagedCa>,
-        socket_path: PathBuf,
-        max_connections: usize,
-        io_timeout: Duration,
-        metrics: Arc<Metrics>,
-        test_upstream_trust: TestUpstreamTrust,
-        events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
+    pub(crate) async fn start_with_options(
+        options: ProxyRuntimeOptions,
     ) -> Result<Self, ProxyRuntimeError> {
-        let permits = Arc::new(Semaphore::new(max_connections));
-        let listener_gate = Arc::new(AtomicU64::new(1));
-        Self::start_inner(
+        let ProxyRuntimeOptions {
             runtime_id,
             session,
             secrets,
             ca,
             socket_path,
-            Arc::new(ingress::SocketDirectoryRegistry::default()),
-            permits,
+            connection_permits: permits,
             io_timeout,
             metrics,
             test_upstream_trust,
             events,
-            listener_gate,
-            1,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn start_session_with_metrics(
-        runtime_id: RuntimeId,
-        session: SessionConfig,
-        secrets: Arc<ResolvedSecrets>,
-        ca: Arc<ManagedCa>,
-        socket_path: PathBuf,
-        max_connections: usize,
-        io_timeout: Duration,
-        metrics: Arc<Metrics>,
-        test_upstream_trust: TestUpstreamTrust,
-        events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
-        socket_directories: Arc<ingress::SocketDirectoryRegistry>,
-        listener_gate: Arc<AtomicU64>,
-        listener_generation: u64,
-    ) -> Result<Self, ProxyRuntimeError> {
-        Self::start_inner(
-            runtime_id,
-            session,
-            secrets,
-            ca,
-            socket_path,
             socket_directories,
-            Arc::new(Semaphore::new(max_connections)),
-            io_timeout,
-            metrics,
-            test_upstream_trust,
-            events,
             listener_gate,
             listener_generation,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn start_replacement_with_metrics(
-        runtime_id: RuntimeId,
-        session: SessionConfig,
-        secrets: Arc<ResolvedSecrets>,
-        ca: Arc<ManagedCa>,
-        socket_path: PathBuf,
-        permits: Arc<Semaphore>,
-        io_timeout: Duration,
-        metrics: Arc<Metrics>,
-        test_upstream_trust: TestUpstreamTrust,
-        events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
-        socket_directories: Arc<ingress::SocketDirectoryRegistry>,
-        listener_gate: Arc<AtomicU64>,
-        listener_generation: u64,
-    ) -> Result<Self, ProxyRuntimeError> {
-        Self::start_inner(
-            runtime_id,
-            session,
-            secrets,
-            ca,
-            socket_path,
-            socket_directories,
-            permits,
-            io_timeout,
-            metrics,
-            test_upstream_trust,
-            events,
-            listener_gate,
-            listener_generation,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn start_inner(
-        runtime_id: RuntimeId,
-        session: SessionConfig,
-        secrets: Arc<ResolvedSecrets>,
-        ca: Arc<ManagedCa>,
-        socket_path: PathBuf,
-        socket_directories: Arc<ingress::SocketDirectoryRegistry>,
-        permits: Arc<Semaphore>,
-        io_timeout: Duration,
-        metrics: Arc<Metrics>,
-        test_upstream_trust: TestUpstreamTrust,
-        events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
-        listener_gate: Arc<AtomicU64>,
-        listener_generation: u64,
-    ) -> Result<Self, ProxyRuntimeError> {
+        } = options;
         let (unix_listener, socket_guard) =
             ingress::bind_unix_listener(&socket_path, socket_directories)
                 .map_err(ProxyRuntimeError::BindSocket)?;
