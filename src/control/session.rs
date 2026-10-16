@@ -410,7 +410,3 @@ fn new_session_id() -> io::Result<String> {
     }
     Ok(id)
 }
-
-#[cfg(test)]
-#[path = "tests/session.rs"]
-mod tests;

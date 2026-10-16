@@ -5,8 +5,8 @@ use std::{
 
 use crate::{config::ControlRequest, secrets::SecretStore};
 
-use super::super::test_support::session_manager;
-use super::SessionError;
+use super::support::session_manager;
+use crate::control::session::SessionError;
 
 #[tokio::test]
 async fn concurrent_provisioning_reservations_enforce_the_session_limit() {
@@ -53,7 +53,7 @@ async fn concurrent_provisioning_reservations_enforce_the_session_limit() {
                 None,
             )
             .await,
-        Err(super::SessionError::AtCapacity)
+        Err(SessionError::AtCapacity)
     ));
     assert!(manager.stop(&created.id).await);
 }

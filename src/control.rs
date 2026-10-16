@@ -6,6 +6,6 @@ mod server;
 mod session;
 
 #[cfg(test)]
-mod test_support;
+mod tests;
 
 pub use server::ControlServer;
