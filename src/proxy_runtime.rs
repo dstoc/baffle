@@ -8,6 +8,7 @@ mod rama;
 mod test_trust;
 
 pub use rama::ProxyRuntime;
+pub(crate) use rama::ProxyRuntimeOptions;
 pub(crate) use rama::SocketDirectoryRegistry;
 pub(crate) use test_trust::TestUpstreamTrust;
 

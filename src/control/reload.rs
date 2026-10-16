@@ -6,7 +6,7 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    proxy_runtime::{ProxyRuntime, RuntimeId},
+    proxy_runtime::{ProxyRuntime, ProxyRuntimeOptions, RuntimeId},
     secrets::SecretStore,
 };
 
@@ -225,21 +225,21 @@ impl SessionManager {
         if !can_retire {
             return SessionReloadResult::failed(id, current_socket, "generation_limit");
         }
-        let replacement = match ProxyRuntime::start_replacement_with_metrics(
-            RuntimeId::new(id.to_owned()),
-            candidate.clone(),
-            Arc::clone(&candidate_secrets),
-            Arc::clone(&self.ca),
-            target_path.clone(),
-            permits,
-            self.io_timeout,
-            Arc::clone(&self.metrics),
-            self.test_upstream_trust.clone(),
-            self.runtime_events.clone(),
-            Arc::clone(&self.socket_directories),
-            Arc::clone(&listener_gate),
-            next_listener_generation,
-        )
+        let replacement = match ProxyRuntime::start_with_options(ProxyRuntimeOptions {
+            runtime_id: RuntimeId::new(id.to_owned()),
+            session: candidate.clone(),
+            secrets: Arc::clone(&candidate_secrets),
+            ca: Arc::clone(&self.ca),
+            socket_path: target_path.clone(),
+            connection_permits: permits,
+            io_timeout: self.io_timeout,
+            metrics: Arc::clone(&self.metrics),
+            test_upstream_trust: self.test_upstream_trust.clone(),
+            events: self.runtime_events.clone(),
+            socket_directories: Arc::clone(&self.socket_directories),
+            listener_gate: Arc::clone(&listener_gate),
+            listener_generation: next_listener_generation,
+        })
         .await
         {
             Ok(runtime) => runtime,

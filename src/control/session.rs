@@ -8,14 +8,17 @@ use std::{
 };
 
 use serde::Serialize;
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::{
+    sync::{Mutex, Semaphore},
+    task::JoinSet,
+};
 
 use crate::{
     ca::ManagedCa,
     config::{DaemonSettings, SessionConfig},
     proxy_runtime::{
-        ProxyRuntime, ProxyRuntimeError, ProxyRuntimeEvent, RuntimeId, SocketDirectoryRegistry,
-        TestUpstreamTrust,
+        ProxyRuntime, ProxyRuntimeError, ProxyRuntimeEvent, ProxyRuntimeOptions, RuntimeId,
+        SocketDirectoryRegistry, TestUpstreamTrust,
     },
     secrets::ResolvedSecrets,
     telemetry::Metrics,
@@ -103,21 +106,21 @@ impl SessionManager {
             }
         };
         let listener_gate = Arc::new(AtomicU64::new(1));
-        let runtime = match ProxyRuntime::start_session_with_metrics(
-            RuntimeId::new(id.clone()),
-            session.clone(),
-            Arc::clone(&secrets),
-            Arc::clone(&self.ca),
+        let runtime = match ProxyRuntime::start_with_options(ProxyRuntimeOptions {
+            runtime_id: RuntimeId::new(id.clone()),
+            session: session.clone(),
+            secrets: Arc::clone(&secrets),
+            ca: Arc::clone(&self.ca),
             socket_path,
-            self.max_connections_per_session,
-            self.io_timeout,
-            Arc::clone(&self.metrics),
-            self.test_upstream_trust.clone(),
-            self.runtime_events.clone(),
-            Arc::clone(&self.socket_directories),
-            Arc::clone(&listener_gate),
-            1,
-        )
+            connection_permits: Arc::new(Semaphore::new(self.max_connections_per_session)),
+            io_timeout: self.io_timeout,
+            metrics: Arc::clone(&self.metrics),
+            test_upstream_trust: self.test_upstream_trust.clone(),
+            events: self.runtime_events.clone(),
+            socket_directories: Arc::clone(&self.socket_directories),
+            listener_gate: Arc::clone(&listener_gate),
+            listener_generation: 1,
+        })
         .await
         {
             Ok(runtime) => runtime,

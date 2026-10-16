@@ -131,21 +131,24 @@ pub(super) async fn start_runtime_limited(
     timeout: Duration,
 ) -> Result<(ProxyRuntime, mpsc::UnboundedReceiver<ProxyRuntimeEvent>), TestError> {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let runtime = ProxyRuntime::start_with_metrics(
-        RuntimeId::new(name),
+    let runtime = ProxyRuntime::start_with_options(ProxyRuntimeOptions {
+        runtime_id: RuntimeId::new(name),
         session,
-        Arc::new(ResolvedSecrets::from_values([(
+        secrets: Arc::new(ResolvedSecrets::from_values([(
             "proxy-token".to_owned(),
             "test-credential".to_owned(),
         )])),
         ca,
-        directory.join(format!("{name}.sock")),
-        max_connections,
-        timeout,
-        Arc::new(crate::telemetry::Metrics::default()),
-        TestUpstreamTrust::from_der(upstream_root().2),
-        events_tx,
-    )
+        socket_path: directory.join(format!("{name}.sock")),
+        connection_permits: Arc::new(tokio::sync::Semaphore::new(max_connections)),
+        io_timeout: timeout,
+        metrics: Arc::new(crate::telemetry::Metrics::default()),
+        test_upstream_trust: TestUpstreamTrust::from_der(upstream_root().2),
+        events: events_tx,
+        socket_directories: Arc::new(SocketDirectoryRegistry::default()),
+        listener_gate: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        listener_generation: 1,
+    })
     .await?;
     Ok((runtime, events_rx))
 }

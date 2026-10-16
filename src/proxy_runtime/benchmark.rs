@@ -28,8 +28,8 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, TlsConnector, rustls};
 
 use super::{
-    ProxyRuntime, ProxyRuntimeEvent, RuntimeId, TestUpstreamTrust, benchmark_tcp_nodelay_enabled,
-    benchmark_tcp_nodelay_mode,
+    ProxyRuntime, ProxyRuntimeEvent, ProxyRuntimeOptions, RuntimeId, SocketDirectoryRegistry,
+    TestUpstreamTrust, benchmark_tcp_nodelay_enabled, benchmark_tcp_nodelay_mode,
 };
 use crate::{
     ca::ManagedCa,
@@ -896,21 +896,24 @@ async fn start_runtime(
     test_upstream_trust: TestUpstreamTrust,
 ) -> Result<ProxyRuntime, BenchError> {
     let (events, _receiver) = mpsc::unbounded_channel::<ProxyRuntimeEvent>();
-    Ok(ProxyRuntime::start_with_metrics(
-        RuntimeId::new(id),
+    Ok(ProxyRuntime::start_with_options(ProxyRuntimeOptions {
+        runtime_id: RuntimeId::new(id),
         session,
-        Arc::new(ResolvedSecrets::from_values([(
+        secrets: Arc::new(ResolvedSecrets::from_values([(
             "benchmark-token".to_owned(),
             "fixed-benchmark-credential".to_owned(),
         )])),
         ca,
         socket_path,
-        128,
-        Duration::from_secs(30),
-        Arc::new(Metrics::default()),
+        connection_permits: Arc::new(tokio::sync::Semaphore::new(128)),
+        io_timeout: Duration::from_secs(30),
+        metrics: Arc::new(Metrics::default()),
         test_upstream_trust,
         events,
-    )
+        socket_directories: Arc::new(SocketDirectoryRegistry::default()),
+        listener_gate: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        listener_generation: 1,
+    })
     .await?)
 }
 
