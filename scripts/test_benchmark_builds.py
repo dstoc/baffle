@@ -3,12 +3,15 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from benchmark_builds import (
     native_versions,
     unique_dependency_entries,
 )
+from benchmark_sessions import build_binaries
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class DependencyEntryTests(unittest.TestCase):
@@ -42,6 +45,51 @@ class NativeVersionTests(unittest.TestCase):
 
         self.assertEqual(versions["clang_driver"], "unavailable")
         self.assertEqual(versions["libclang"], str(library.resolve()))
+
+
+class SessionBenchmarkBuildTests(unittest.TestCase):
+    def test_builds_daemon_and_measurement_binary_for_selected_profile(self):
+        for profile, profile_args in (("debug", []), ("release", ["--release"])):
+            with self.subTest(profile=profile), patch("benchmark_sessions.run") as run:
+                build_binaries(profile)
+
+            self.assertEqual(
+                run.call_args_list,
+                [
+                    call(["cargo", "build", "--locked", "--bin", "baffle", *profile_args]),
+                    call([
+                        "cargo", "build", "--locked", "--manifest-path",
+                        str(ROOT / "bench" / "Cargo.toml"), "--bin", "measure_sessions",
+                        *profile_args,
+                    ]),
+                ],
+            )
+
+
+class PackageContentsTests(unittest.TestCase):
+    def test_published_package_excludes_internal_benchmark_sources(self):
+        result = subprocess.run(
+            [
+                "cargo",
+                "package",
+                "--manifest-path",
+                str(ROOT / "Cargo.toml"),
+                "--package",
+                "baffle-proxy",
+                "--list",
+                "--allow-dirty",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        package_files = set(result.stdout.splitlines())
+        self.assertNotIn("bench/runtime.rs", package_files)
+        self.assertNotIn("bench/measure_sessions.rs", package_files)
+        self.assertNotIn("examples/measure_sessions.rs", package_files)
 
 
 if __name__ == "__main__":

@@ -21,14 +21,18 @@ def test_binary() -> Path:
         "test",
         "--locked",
         "--release",
-        "--features",
-        "benchmark-tcp-nodelay",
         "--lib",
         "runtime_http1_characterization",
         "--no-run",
         "--message-format=json",
     ]
-    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    environment = os.environ.copy()
+    environment["RUSTFLAGS"] = (
+        f"{environment.get('RUSTFLAGS', '').strip()} --cfg baffle_benchmark"
+    ).strip()
+    result = subprocess.run(
+        command, cwd=ROOT, env=environment, text=True, capture_output=True, check=False
+    )
     if result.returncode:
         raise RuntimeError(f"build failed:\n{result.stdout[-4000:]}\n{result.stderr[-4000:]}")
 
@@ -51,6 +55,9 @@ def run() -> None:
     stem = "issue32-rama-http1-socket"
     summary_output = ROOT / "bench" / "results" / f"{stem}-profile.csv"
     environment = os.environ.copy()
+    environment["RUSTFLAGS"] = (
+        f"{environment.get('RUSTFLAGS', '').strip()} --cfg baffle_benchmark"
+    ).strip()
     environment["BAFFLE_BENCH_TCP_NODELAY"] = "off"
     environment.pop("BAFFLE_BENCH_ORIGIN_ADDR", None)
     environment["BAFFLE_BENCH_CPU"] = str(CPU)

@@ -78,6 +78,15 @@ def stop_daemon(process: subprocess.Popen[bytes]) -> None:
         raise RuntimeError(f"daemon exited with status {process.returncode}")
 
 
+def build_binaries(profile: str) -> None:
+    profile_args = ["--release"] if profile == "release" else []
+    run(["cargo", "build", "--locked", "--bin", "baffle", *profile_args])
+    run([
+        "cargo", "build", "--locked", "--manifest-path",
+        str(ROOT / "bench" / "Cargo.toml"), "--bin", "measure_sessions", *profile_args,
+    ])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=["debug", "release"], default="release")
@@ -129,16 +138,10 @@ def main() -> None:
         (args.output_dir / "sessions-environment.json").write_text(
             json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-        build = [
-            "cargo", "build", "--locked",
-            "--bin", "baffle", "--example", "measure_sessions",
-        ]
-        if args.profile == "release":
-            build.append("--release")
-        run(build)
+        build_binaries(args.profile)
         profile_dir = "release" if args.profile == "release" else "debug"
         daemon_bin = ROOT / "target" / profile_dir / "baffle"
-        measure_bin = ROOT / "target" / profile_dir / "examples" / "measure_sessions"
+        measure_bin = ROOT / "target" / profile_dir / "measure_sessions"
         config = daemon_config(root / "benchmark", cert, key, os.getuid())
         log_path = args.output_dir / "daemon.log"
         raw_path = args.output_dir / "sessions.csv"

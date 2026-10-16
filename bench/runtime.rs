@@ -1,7 +1,8 @@
 //! Opt-in live benchmark for the supported Rama runtime.
 //!
-//! Run with `cargo test --release --lib runtime_benchmark -- --ignored
-//! --nocapture --test-threads=1`. The test uses
+//! Run with `RUSTFLAGS='--cfg baffle_benchmark' cargo test --locked
+//! --release --lib runtime_benchmark -- --ignored --nocapture --test-threads=1`.
+//! The test uses
 //! local TLS origins and records request-level latency rows when
 //! `BAFFLE_BENCH_RAW` names an output file.
 

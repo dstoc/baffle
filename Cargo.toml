@@ -11,15 +11,12 @@ documentation = "https://docs.rs/baffle-proxy"
 include = ["src/**", "tests/**", "examples/**", "docs/**", "README.md", "LICENSE", "!bench/**"]
 
 [workspace]
-members = ["crates/baffle-client"]
+members = ["crates/baffle-client", "bench"]
 default-members = [".", "crates/baffle-client"]
 resolver = "3"
 
-[features]
-benchmark-tcp-nodelay = []
-
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(baffle_integration_test)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(baffle_integration_test)', 'cfg(baffle_benchmark)'] }
 
 [[bin]]
 name = "baffle"
@@ -57,7 +54,3 @@ path = "examples/cladding_socat.rs"
 [[example]]
 name = "client"
 path = "examples/client.rs"
-
-[[example]]
-name = "measure_sessions"
-path = "examples/measure_sessions.rs"

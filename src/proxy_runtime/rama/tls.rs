@@ -42,7 +42,7 @@ use crate::{
     telemetry::Metrics,
 };
 
-#[cfg(feature = "benchmark-tcp-nodelay")]
+#[cfg(baffle_benchmark)]
 use super::super::benchmark_tcp_nodelay_enabled;
 use super::{ProxyRuntimeError, http};
 
@@ -122,7 +122,7 @@ where
             return Ok(());
         }
     };
-    #[cfg(feature = "benchmark-tcp-nodelay")]
+    #[cfg(baffle_benchmark)]
     if benchmark_tcp_nodelay_enabled("proxy-egress") {
         egress
             .set_nodelay(true)
