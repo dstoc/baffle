@@ -84,7 +84,6 @@ where
             uri_authority: uri_authority.as_deref(),
             path: &path,
             host_headers: &host_headers,
-            secure_transport: true,
         };
         let (injections, canonical_path) = match self
             .policy
