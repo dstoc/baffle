@@ -4,8 +4,8 @@ pub(crate) const MAX_SESSION_CONFIG_COMPONENT_BYTES: usize = 255;
 
 use super::{
     ConfigError, MAX_SESSION_CONFIG_NAME_BYTES, PROTOCOL_VERSION, deserialize,
-    policy::{RawHostRule, validate_rules},
-    session::{SessionConfig, UnmatchedHostPolicy, validate_socket_name},
+    session::SessionConfig,
+    session_file::{RawSessionConfig, validate_session_config},
 };
 
 /// A validated control request. `Create` carries a validated policy, not raw TOML.
@@ -38,33 +38,18 @@ pub enum ControlRequest {
 impl ControlRequest {
     /// Parse and validate one TOML control request.
     pub fn from_toml(input: &str) -> Result<Self, ConfigError> {
+        let envelope: RawProtocolVersion = deserialize(input)?;
+        validate_protocol_version(envelope.version)?;
         let raw: RawControlRequest = deserialize(input)?;
         match raw {
-            RawControlRequest::Create {
+            RawControlRequest::Create { version, session } => Ok(Self::Create {
                 version,
-                session,
-                rules,
-            } => {
-                validate_protocol_version(version)?;
-                let rules = validate_rules(rules)?;
-                Ok(Self::Create {
-                    version,
-                    session: SessionConfig {
-                        persistent: session.persistent,
-                        socket_name: session
-                            .socket_name
-                            .map(|name| validate_socket_name(&name))
-                            .transpose()?,
-                        unmatched: session.unmatched,
-                        rules,
-                    },
-                })
-            }
+                session: validate_session_config(session)?,
+            }),
             RawControlRequest::Stop {
                 version,
                 session_id,
             } => {
-                validate_protocol_version(version)?;
                 validate_session_id(&session_id)?;
                 Ok(Self::Stop {
                     version,
@@ -75,29 +60,27 @@ impl ControlRequest {
                 version,
                 session_id,
             } => {
-                validate_protocol_version(version)?;
                 validate_session_id(&session_id)?;
                 Ok(Self::Reload {
                     version,
                     session_id,
                 })
             }
-            RawControlRequest::ReloadAll { version } => {
-                validate_protocol_version(version)?;
-                Ok(Self::ReloadAll { version })
-            }
+            RawControlRequest::ReloadAll { version } => Ok(Self::ReloadAll { version }),
             RawControlRequest::CreateFromFile { version, name } => {
-                validate_protocol_version(version)?;
                 let name = validate_session_config_name(&name)?;
                 Ok(Self::CreateFromFile { version, name })
             }
-            RawControlRequest::List { version } => {
-                validate_protocol_version(version)?;
-                Ok(Self::List { version })
-            }
+            RawControlRequest::List { version } => Ok(Self::List { version }),
         }
     }
 }
+
+#[derive(Deserialize)]
+struct RawProtocolVersion {
+    version: u16,
+}
+
 fn validate_session_config_name(name: &str) -> Result<String, ConfigError> {
     if name.is_empty()
         || name.len() > MAX_SESSION_CONFIG_NAME_BYTES
@@ -145,9 +128,7 @@ fn validate_session_id(id: &str) -> Result<(), ConfigError> {
 enum RawControlRequest {
     Create {
         version: u16,
-        session: RawSessionSettings,
-        #[serde(default)]
-        rules: Vec<RawHostRule>,
+        session: RawSessionConfig,
     },
     Stop {
         version: u16,
@@ -167,15 +148,4 @@ enum RawControlRequest {
     List {
         version: u16,
     },
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawSessionSettings {
-    #[serde(default)]
-    persistent: bool,
-    #[serde(default)]
-    socket_name: Option<String>,
-    #[serde(default)]
-    unmatched: UnmatchedHostPolicy,
 }

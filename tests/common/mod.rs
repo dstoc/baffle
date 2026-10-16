@@ -213,7 +213,7 @@ impl DaemonProcess {
 
     pub fn create_from_file(&self, name: &str) -> (Vec<u8>, Value) {
         self.request(&format!(
-            "version = 1\noperation = \"create_from_file\"\nname = {name:?}\n"
+            "version = 2\noperation = \"create_from_file\"\nname = {name:?}\n"
         ))
     }
 }

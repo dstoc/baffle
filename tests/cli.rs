@@ -475,7 +475,7 @@ fn inline_create_forwards_named_socket_and_prints_daemon_assigned_path() {
         let request = String::from_utf8(request).expect("request should be UTF-8 TOML");
         assert!(request.contains("socket_name = \"cladding/github.sock\""));
 
-        let response = br#"{"version":1,"ok":true,"result":{"id":"named_session","socket":"/run/baffle/proxies/cladding/github.sock","persistent":true}}"#;
+        let response = br#"{"version":2,"ok":true,"result":{"id":"named_session","socket":"/run/baffle/proxies/cladding/github.sock","persistent":true}}"#;
         stream
             .write_all(&(response.len() as u32).to_be_bytes())
             .expect("response frame header should be sent");

@@ -8,7 +8,7 @@ use super::{
     session::{SessionConfig, UnmatchedHostPolicy, validate_socket_name},
 };
 
-const SESSION_FILE_VERSION: i64 = 2;
+const SESSION_CONFIG_VERSION: i64 = 2;
 
 /// Parser for the user-facing session-file format.
 ///
@@ -23,49 +23,53 @@ impl SessionFile {
             ConfigError::new("invalid session configuration TOML syntax or value (values omitted)")
         })?;
 
-        match raw.version {
-            Some(SESSION_FILE_VERSION) => {}
-            Some(_) => {
-                return Err(ConfigError::new(
-                    "unsupported session configuration version; expected version = 2",
-                ));
-            }
-            None => {
-                return Err(ConfigError::new(
-                    "session configuration must declare version = 2",
-                ));
-            }
-        }
+        validate_session_config(raw)
+    }
+}
 
-        if !raw.unsupported_fields.is_empty() {
+pub(super) fn validate_session_config(raw: RawSessionConfig) -> Result<SessionConfig, ConfigError> {
+    match raw.version {
+        Some(SESSION_CONFIG_VERSION) => {}
+        Some(_) => {
+            return Err(ConfigError::new(
+                "unsupported session configuration version; expected version = 2",
+            ));
+        }
+        None => {
+            return Err(ConfigError::new(
+                "session configuration must declare version = 2",
+            ));
+        }
+    }
+
+    if !raw.unsupported_fields.is_empty() {
+        return Err(invalid_session_file());
+    }
+
+    let unmatched = match raw.unmatched.as_deref().unwrap_or("deny") {
+        "deny" => UnmatchedHostPolicy::Deny,
+        "tunnel" => UnmatchedHostPolicy::Tunnel,
+        _ => return Err(ConfigError::new("unmatched must be \"deny\" or \"tunnel\"")),
+    };
+    let rules: BTreeMap<String, RawNamedRule> = match raw.rules {
+        Some(RawRules::Named(rules)) => rules,
+        Some(RawRules::Other(value)) => {
+            let _ = value;
             return Err(invalid_session_file());
         }
+        None => BTreeMap::new(),
+    };
 
-        let unmatched = match raw.unmatched.as_deref().unwrap_or("deny") {
-            "deny" => UnmatchedHostPolicy::Deny,
-            "tunnel" => UnmatchedHostPolicy::Tunnel,
-            _ => return Err(ConfigError::new("unmatched must be \"deny\" or \"tunnel\"")),
-        };
-        let rules: BTreeMap<String, RawNamedRule> = match raw.rules {
-            Some(RawRules::Named(rules)) => rules,
-            Some(RawRules::Other(value)) => {
-                let _ = value;
-                return Err(invalid_session_file());
-            }
-            None => BTreeMap::new(),
-        };
-
-        let rules = validate_named_rules(rules)?;
-        Ok(SessionConfig {
-            persistent: raw.persistent,
-            socket_name: raw
-                .socket_name
-                .map(|name| validate_socket_name(&name))
-                .transpose()?,
-            unmatched,
-            rules,
-        })
-    }
+    let rules = validate_named_rules(rules)?;
+    Ok(SessionConfig {
+        persistent: raw.persistent,
+        socket_name: raw
+            .socket_name
+            .map(|name| validate_socket_name(&name))
+            .transpose()?,
+        unmatched,
+        rules,
+    })
 }
 
 fn invalid_session_file() -> ConfigError {
@@ -73,7 +77,7 @@ fn invalid_session_file() -> ConfigError {
 }
 
 #[derive(Deserialize)]
-struct RawSessionConfig {
+pub(super) struct RawSessionConfig {
     #[serde(default)]
     version: Option<i64>,
     #[serde(default)]

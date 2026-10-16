@@ -18,7 +18,7 @@ async fn concurrent_provisioning_reservations_enforce_the_session_limit() {
         .uid();
     let manager = session_manager(directory.path(), 1);
     let request = ControlRequest::from_toml(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"limit.example.test\"\nmode = \"tunnel\"\n",
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"limit.example.test\"]\nmode = \"tunnel\"",
     )
     .expect("test request should parse");
     let ControlRequest::Create { session, .. } = request else {

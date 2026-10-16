@@ -21,7 +21,7 @@ use tokio_rustls::{TlsConnector, client::TlsStream, rustls::pki_types::ServerNam
 
 pub(crate) fn session_config() -> SessionConfig {
     let request = ControlRequest::from_toml(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"allowed.example\"\nmode = \"tunnel\"\nports = [443]\n",
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"allowed.example\"]\nmode = \"tunnel\"\nports = [443]",
     )
     .expect("test session should be valid");
     let ControlRequest::Create { session, .. } = request else {
@@ -32,7 +32,7 @@ pub(crate) fn session_config() -> SessionConfig {
 
 pub(crate) fn intercept_session_config(port: u16) -> SessionConfig {
     let toml = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"localhost\"]\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]"
     );
     let ControlRequest::Create { session, .. } =
         ControlRequest::from_toml(&toml).expect("intercept session should be valid")
@@ -44,7 +44,7 @@ pub(crate) fn intercept_session_config(port: u16) -> SessionConfig {
 
 pub(crate) fn loopback_session_config(port: u16) -> SessionConfig {
     let toml = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{port}]\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"localhost\"]\nmode = \"tunnel\"\nports = [{port}]"
     );
     let ControlRequest::Create { session, .. } =
         ControlRequest::from_toml(&toml).expect("loopback session should be valid")

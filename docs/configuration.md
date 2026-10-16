@@ -228,7 +228,7 @@ A session can have no explicit rules. With the default or explicit `deny`, it
 denies all CONNECT destinations. With `unmatched = "tunnel"`, it permits
 unmatched DNS hostnames on port 443.
 
-The schema version is separate from control protocol version 1. `persistent`
+The schema version is separate from control protocol version 2. `persistent`
 defaults to `false`. Omit `socket_name` to use a generated session path. A
 named socket path is relative to `daemon.socket_dir` and can include nested
 directories. Baffle rejects absolute paths, empty, `.` or `..` components,

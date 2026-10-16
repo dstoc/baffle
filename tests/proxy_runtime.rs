@@ -89,7 +89,7 @@ async fn outer_forward_http_and_https_requests_are_denied_before_upstream_dialin
         .expect("test upstream should bind");
     let upstream_port = upstream.local_addr().unwrap().port();
     let session_toml = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [80, 443, {upstream_port}]\npaths = [\"/allowed\"]\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"localhost\"]\nmode = \"intercept\"\nports = [80, 443, {upstream_port}]\npaths = [\"/allowed\"]"
     );
     let ControlRequest::Create { session, .. } =
         ControlRequest::from_toml(&session_toml).expect("test session should be valid")
@@ -754,7 +754,7 @@ async fn redirect_responses_pass_through_and_downgrade_requests_are_rejected() {
         .expect("test upstream should bind");
     let upstream_port = upstream.local_addr().unwrap().port();
     let session_toml = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{upstream_port}]\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"localhost\"]\nmode = \"tunnel\"\nports = [{upstream_port}]"
     );
     let ControlRequest::Create { session, .. } =
         ControlRequest::from_toml(&session_toml).expect("test session should be valid")

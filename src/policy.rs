@@ -267,7 +267,7 @@ mod tests {
 
     fn intercept_policy(paths: &str) -> SessionPolicy {
         policy(&format!(
-            "version = 1\noperation = \"create\"\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\nports = [443]\npaths = {paths}\n"
+            "version = 2\noperation = \"create\"\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\nports = [443]\npaths = {paths}"
         ))
     }
 
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn tunnel_rules_cannot_claim_path_specific_authorization() {
         let error = ControlRequest::from_toml(
-            "version = 1\noperation = \"create\"\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\nports = [443]\npaths = [\"/allowed\"]\n",
+            "version = 2\noperation = \"create\"\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"tunnel\"\nports = [443]\npaths = [\"/allowed\"]",
         )
         .expect_err("tunnel rules cannot carry path restrictions");
         assert!(error.to_string().contains("cannot use paths or inject"));

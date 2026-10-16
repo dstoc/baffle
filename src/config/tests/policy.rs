@@ -38,7 +38,7 @@ fn parses_the_proposal_session_example_into_a_validated_policy() {
 #[test]
 fn validates_optional_nested_session_socket_names() {
     let request = ControlRequest::from_toml(
-        "version = 1\noperation = \"create\"\n\n[session]\nsocket_name = \"cladding/github.sock\"\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n",
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\nsocket_name = \"cladding/github.sock\"\n\n[session.rules.\"example.com\"]\nmode = \"tunnel\"",
     )
     .expect("a nested socket name should parse");
     let ControlRequest::Create { session, .. } = request else {
@@ -58,7 +58,7 @@ fn validates_optional_nested_session_socket_names() {
         &"x".repeat(108),
     ] {
         let input = format!(
-            "version = 1\noperation = \"create\"\n\n[session]\nsocket_name = {name:?}\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n"
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\nsocket_name = {name:?}\n\n[session.rules.\"example.com\"]\nmode = \"tunnel\""
         );
         assert!(
             ControlRequest::from_toml(&input).is_err(),
@@ -70,7 +70,7 @@ fn validates_optional_nested_session_socket_names() {
 #[test]
 fn accepts_interception_paths_and_injection_on_configured_port_80() {
     let request = ControlRequest::from_toml(
-        "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\nports = [80]\npaths = [\"/public\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n",
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\nports = [80]\npaths = [\"/public\"]\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"",
     )
     .expect("configured TLS on port 80 should parse");
     let ControlRequest::Create { session, .. } = request else {
@@ -99,7 +99,7 @@ fn defaults_create_persistence_and_destination_port() {
 fn rejects_removed_private_addresses_field() {
     assert!(
         ControlRequest::from_toml(
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"internal.example\"\nmode = \"tunnel\"\nports = [8443]\nprivate_addresses = [\"10.20.30.40\"]\n",
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"internal.example\"]\nmode = \"tunnel\"\nports = [8443]\nprivate_addresses = [\"10.20.30.40\"]",
         )
         .is_err(),
         "removed address exceptions must fail strict schema validation"
@@ -151,11 +151,11 @@ fn rejects_invalid_or_ambiguous_policies_in_a_table() {
         ),
         (
             "injection on tunnel",
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"bearer\"\n".to_string(),
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"tunnel\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"bearer\"".to_string(),
         ),
         (
             "duplicate canonical host",
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"EXAMPLE.com\"\nmode = \"tunnel\"\n\n[[rules]]\nhost = \"example.com.\"\nmode = \"tunnel\"\n".into(),
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"EXAMPLE.com\"]\nmode = \"tunnel\"\n\n[session.rules.\"example.com.\"]\nmode = \"tunnel\"".into(),
         ),
         (
             "overlapping paths",
@@ -183,31 +183,31 @@ fn rejects_invalid_or_ambiguous_policies_in_a_table() {
         ),
         (
             "routing-critical header",
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Host\"\nsecret = \"token\"\nformat = \"raw\"\n".to_string(),
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Host\"\nsecret = \"token\"\nformat = \"raw\"".to_string(),
         ),
         (
             "invalid secret identifier",
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"../credential\"\nformat = \"bearer\"\n".to_string(),
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"../credential\"\nformat = \"bearer\"".to_string(),
         ),
         (
             "absolute secret path",
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"/var/lib/token\"\nformat = \"bearer\"\n".to_string(),
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"/var/lib/token\"\nformat = \"bearer\"".to_string(),
         ),
         (
             "relative secret path",
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"credentials/token\"\nformat = \"bearer\"\n".to_string(),
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"credentials/token\"\nformat = \"bearer\"".to_string(),
         ),
         (
             "embedded credentials",
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"operator:credential\"\nformat = \"bearer\"\n".to_string(),
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"operator:credential\"\nformat = \"bearer\"".to_string(),
         ),
         (
             "basic password without username",
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"basic_password\"\n".to_string(),
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"basic_password\"".to_string(),
         ),
         (
             "literal credential field",
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"bearer\"\nvalue = \"do-not-leak-this\"\n".to_string(),
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"token\"\nformat = \"bearer\"\nvalue = \"do-not-leak-this\"".to_string(),
         ),
     ];
 
@@ -222,25 +222,24 @@ fn rejects_invalid_or_ambiguous_policies_in_a_table() {
 #[test]
 fn rejects_duplicate_injection_headers_without_echoing_secret_values() {
     let input = r#"
-version = 1
+version = 2
 operation = "create"
 
 [session]
+version = 2
 
-[[rules]]
-host = "example.com"
+[session.rules."example.com"]
 mode = "intercept"
 
-[[rules.inject]]
+[[session.rules."example.com".inject]]
 header = "Authorization"
 secret = "secret-value-one"
 format = "bearer"
 
-[[rules.inject]]
+[[session.rules."example.com".inject]]
 header = "authorization"
 secret = "secret-value-two"
-format = "raw"
-"#;
+format = "raw""#;
     let error = ControlRequest::from_toml(input).expect_err("duplicate header should fail");
     assert!(error.to_string().contains("duplicates"));
     assert!(!error.to_string().contains("secret-value"));
@@ -261,7 +260,7 @@ fn rejects_hop_by_hop_and_routing_sensitive_injection_headers() {
         "X-Original-URL",
     ] {
         let input = format!(
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"{header}\"\nsecret = \"token\"\nformat = \"raw\"\n"
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"{header}\"\nsecret = \"token\"\nformat = \"raw\""
         );
         let error =
             ControlRequest::from_toml(&input).expect_err("unsafe header names should be rejected");
@@ -273,7 +272,7 @@ fn rejects_hop_by_hop_and_routing_sensitive_injection_headers() {
 fn validates_all_three_injection_formats() {
     for format in ["raw", "bearer"] {
         let request = ControlRequest::from_toml(&format!(
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"X-Token\"\nsecret = \"api-token\"\nformat = \"{format}\"\n"
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"X-Token\"\nsecret = \"api-token\"\nformat = \"{format}\""
         ))
         .expect("raw and bearer formats should parse");
         let ControlRequest::Create {
@@ -287,7 +286,7 @@ fn validates_all_three_injection_formats() {
     }
 
     let basic = ControlRequest::from_toml(
-        "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"git-token\"\nformat = \"basic_password\"\nusername = \"git\"\n",
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"git-token\"\nformat = \"basic_password\"\nusername = \"git\"",
     )
     .expect("basic_password should parse");
     let ControlRequest::Create { session, .. } = basic else {

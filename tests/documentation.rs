@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use baffle_proxy::config::{
-    ControlRequest, DaemonConfig, InjectionFormat, RuleMode, SessionCreateMode, SessionFile,
+    ControlRequest, DaemonConfig, InjectionFormat, PROTOCOL_VERSION, RuleMode, SessionCreateMode,
+    SessionFile,
 };
 
 #[test]
@@ -91,19 +92,29 @@ fn session_configuration_examples_parse() {
 fn protocol_operation_examples_parse() {
     assert!(matches!(
         ControlRequest::from_toml(include_str!("../examples/protocol/list.toml")),
-        Ok(ControlRequest::List { version: 1 })
+        Ok(ControlRequest::List {
+            version: PROTOCOL_VERSION
+        })
     ));
     assert!(matches!(
         ControlRequest::from_toml(include_str!("../examples/protocol/stop.toml")),
-        Ok(ControlRequest::Stop { version: 1, .. })
+        Ok(ControlRequest::Stop {
+            version: PROTOCOL_VERSION,
+            ..
+        })
     ));
     assert!(matches!(
         ControlRequest::from_toml(include_str!("../examples/protocol/reload.toml")),
-        Ok(ControlRequest::Reload { version: 1, .. })
+        Ok(ControlRequest::Reload {
+            version: PROTOCOL_VERSION,
+            ..
+        })
     ));
     assert!(matches!(
         ControlRequest::from_toml(include_str!("../examples/protocol/reload-all.toml")),
-        Ok(ControlRequest::ReloadAll { version: 1 })
+        Ok(ControlRequest::ReloadAll {
+            version: PROTOCOL_VERSION
+        })
     ));
 }
 
