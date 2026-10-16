@@ -1,5 +1,6 @@
 use super::{StartupLock, remove_stale_session_sockets, remove_stale_socket};
 use std::{
+    ffi::CString,
     fs,
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
@@ -91,6 +92,59 @@ fn recursively_removes_stale_owned_sockets_without_following_symlinks() {
     );
 
     drop(active_listener);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn preserves_active_socket_when_directory_moves_after_liveness_path_resolution() {
+    let directory = tempfile::Builder::new()
+        .prefix("bf66-")
+        .tempdir_in("/tmp")
+        .expect("temporary directory should be created");
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+        .expect("socket directory should be private");
+    let uid = fs::metadata(directory.path())
+        .expect("socket directory metadata should be readable")
+        .uid();
+
+    let nested = directory.path().join("cladding");
+    fs::create_dir(&nested).expect("nested socket directory should be created");
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700))
+        .expect("nested socket directory should be private");
+    let socket = nested.join("active.sock");
+    let listener = UnixListener::bind(&socket).expect("active socket should bind");
+    let moved = directory.path().join("moved");
+    let parent =
+        super::open_socket_directory(&nested).expect("nested socket directory should open");
+    let name = CString::new("active.sock").expect("socket name should not contain a null byte");
+
+    let removed = super::remove_stale_socket_at_with_probe(
+        &parent,
+        &name,
+        &socket,
+        uid,
+        |parent_fd, name, metadata| {
+            super::probe_socket_via_resolved_path(
+                parent_fd,
+                name,
+                metadata,
+                super::pinned_directory_path,
+                || {
+                    fs::rename(&nested, &moved)
+                        .expect("directory should move after path resolution");
+                },
+            )
+        },
+    )
+    .expect("cleanup should preserve a socket when its path moves");
+
+    assert!(!removed, "cleanup must preserve the moved active socket");
+    assert!(moved.join("active.sock").exists());
+    assert!(
+        UnixStream::connect(moved.join("active.sock")).is_ok(),
+        "active listener should remain reachable at its moved path"
+    );
+    drop(listener);
 }
 
 #[test]

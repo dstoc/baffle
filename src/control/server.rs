@@ -502,6 +502,30 @@ fn remove_stale_socket_at(
     display_path: &Path,
     expected_uid: u32,
 ) -> Result<bool> {
+    remove_stale_socket_at_with_probe(
+        parent,
+        name,
+        display_path,
+        expected_uid,
+        probe_pinned_socket,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SocketProbeResult {
+    Active,
+    Stale,
+    #[cfg(any(target_os = "macos", test))]
+    Changed,
+}
+
+fn remove_stale_socket_at_with_probe(
+    parent: &File,
+    name: &CString,
+    display_path: &Path,
+    expected_uid: u32,
+    mut probe: impl FnMut(libc::c_int, &CString, &libc::stat) -> io::Result<SocketProbeResult>,
+) -> Result<bool> {
     let Some(metadata) = stat_at(parent.as_raw_fd(), name)
         .with_context(|| format!("could not inspect {}", display_path.display()))?
     else {
@@ -511,23 +535,16 @@ fn remove_stale_socket_at(
         return Ok(false);
     }
 
-    let socket_path = pinned_socket_path(parent.as_raw_fd(), name).with_context(|| {
+    match probe(parent.as_raw_fd(), name, &metadata).with_context(|| {
         format!(
-            "could not make a pinned path for {}",
+            "could not check whether socket {} is active",
             display_path.display()
         )
-    })?;
-    match StdUnixStream::connect(&socket_path) {
-        Ok(stream) => {
-            drop(stream);
-            Ok(false)
-        }
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-            ) =>
-        {
+    })? {
+        SocketProbeResult::Active => Ok(false),
+        #[cfg(any(target_os = "macos", test))]
+        SocketProbeResult::Changed => Ok(false),
+        SocketProbeResult::Stale => {
             let Some(current) = stat_at(parent.as_raw_fd(), name)
                 .with_context(|| format!("could not recheck {}", display_path.display()))?
             else {
@@ -551,12 +568,148 @@ fn remove_stale_socket_at(
             }
             Ok(true)
         }
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "could not check whether socket {} is active",
-                display_path.display()
-            )
-        }),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn probe_pinned_socket(
+    parent_fd: libc::c_int,
+    name: &CString,
+    _metadata: &libc::stat,
+) -> io::Result<SocketProbeResult> {
+    let socket_path = pinned_socket_path(parent_fd, name)?;
+    probe_socket_path(&socket_path)
+}
+
+#[cfg(target_os = "macos")]
+fn probe_pinned_socket(
+    parent_fd: libc::c_int,
+    name: &CString,
+    metadata: &libc::stat,
+) -> io::Result<SocketProbeResult> {
+    probe_socket_via_resolved_path(parent_fd, name, metadata, pinned_directory_path, || {})
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn probe_pinned_socket(
+    _parent_fd: libc::c_int,
+    _name: &CString,
+    _metadata: &libc::stat,
+) -> io::Result<SocketProbeResult> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "descriptor-relative Unix socket connections are unavailable on this platform",
+    ))
+}
+
+fn probe_socket_path(path: &Path) -> io::Result<SocketProbeResult> {
+    match StdUnixStream::connect(path) {
+        Ok(stream) => {
+            drop(stream);
+            Ok(SocketProbeResult::Active)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) =>
+        {
+            Ok(SocketProbeResult::Stale)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn probe_socket_via_resolved_path(
+    parent_fd: libc::c_int,
+    name: &CString,
+    metadata: &libc::stat,
+    mut resolve_parent_path: impl FnMut(libc::c_int) -> io::Result<PathBuf>,
+    mut after_path_resolution: impl FnMut(),
+) -> io::Result<SocketProbeResult> {
+    let parent_path = resolve_parent_path(parent_fd)?;
+    let socket_path = parent_path.join(OsStr::from_bytes(name.as_bytes()));
+    after_path_resolution();
+
+    match StdUnixStream::connect(&socket_path) {
+        Ok(stream) => {
+            drop(stream);
+            Ok(SocketProbeResult::Active)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) =>
+        {
+            let current_parent_path = match resolve_parent_path(parent_fd) {
+                Ok(path) => path,
+                Err(_) => return Ok(SocketProbeResult::Changed),
+            };
+            if current_parent_path != parent_path
+                || !path_still_names_pinned_socket(parent_fd, name, metadata, &parent_path)?
+            {
+                return Ok(SocketProbeResult::Changed);
+            }
+            Ok(SocketProbeResult::Stale)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn path_still_names_pinned_socket(
+    parent_fd: libc::c_int,
+    name: &CString,
+    expected_socket: &libc::stat,
+    parent_path: &Path,
+) -> io::Result<bool> {
+    let Some(path_parent) = stat_path(parent_path, true)? else {
+        return Ok(false);
+    };
+    let pinned_parent = stat_fd(parent_fd)?;
+    if path_parent.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || path_parent.st_dev != pinned_parent.st_dev
+        || path_parent.st_ino != pinned_parent.st_ino
+    {
+        return Ok(false);
+    }
+
+    let socket_path = parent_path.join(OsStr::from_bytes(name.as_bytes()));
+    let Some(path_socket) = stat_path(&socket_path, false)? else {
+        return Ok(false);
+    };
+    Ok(path_socket.st_mode & libc::S_IFMT == libc::S_IFSOCK
+        && path_socket.st_uid == expected_socket.st_uid
+        && path_socket.st_dev == expected_socket.st_dev
+        && path_socket.st_ino == expected_socket.st_ino)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn stat_path(path: &Path, follow_symlinks: bool) -> io::Result<Option<libc::stat>> {
+    let path_c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a null byte"))?;
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        if follow_symlinks {
+            libc::stat(path_c.as_ptr(), metadata.as_mut_ptr())
+        } else {
+            libc::lstat(path_c.as_ptr(), metadata.as_mut_ptr())
+        }
+    };
+    if result == 0 {
+        // SAFETY: stat or lstat initialized metadata when it returned success.
+        return Ok(Some(unsafe { metadata.assume_init() }));
+    }
+    let error = io::Error::last_os_error();
+    if matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    ) {
+        Ok(None)
+    } else {
+        Err(error)
     }
 }
 
@@ -660,29 +813,24 @@ fn pinned_socket_path(parent_fd: libc::c_int, name: &CString) -> io::Result<std:
 }
 
 #[cfg(target_os = "macos")]
-fn pinned_socket_path(parent_fd: libc::c_int, name: &CString) -> io::Result<std::path::PathBuf> {
+fn pinned_directory_path(parent_fd: libc::c_int) -> io::Result<PathBuf> {
     // Darwin's /dev/fd directory alias does not provide a reliable pathname
     // for connect(2) to a socket below an opened directory. Resolve the current
-    // pathname of the pinned directory instead. Socket metadata checks and
-    // removal remain relative to the pinned descriptor, so a renamed or
-    // replaced path cannot redirect cleanup to a different socket.
+    // pathname of the pinned directory instead. Callers must check that this
+    // pathname still identifies the pinned directory and socket after a failed
+    // liveness probe before they remove the socket.
     let mut parent_path = vec![0 as libc::c_char; libc::PATH_MAX as usize];
     if unsafe { libc::fcntl(parent_fd, libc::F_GETPATH, parent_path.as_mut_ptr()) } == -1 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: F_GETPATH writes a NUL-terminated pathname on success.
     let parent_path = unsafe { CStr::from_ptr(parent_path.as_ptr()) };
-    let mut path = std::path::PathBuf::from(OsStr::from_bytes(parent_path.to_bytes()));
-    path.push(OsStr::from_bytes(name.as_bytes()));
-    Ok(path)
+    Ok(PathBuf::from(OsStr::from_bytes(parent_path.to_bytes())))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn pinned_socket_path(_parent_fd: libc::c_int, _name: &CString) -> io::Result<std::path::PathBuf> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "descriptor-relative Unix socket connections are unavailable on this platform",
-    ))
+#[cfg(all(test, target_os = "linux"))]
+fn pinned_directory_path(parent_fd: libc::c_int) -> io::Result<PathBuf> {
+    fs::read_link(format!("/proc/self/fd/{parent_fd}"))
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
