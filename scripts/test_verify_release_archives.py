@@ -78,10 +78,14 @@ else:
         *,
         arm_glibc_record=False,
         glibc_symbol="GLIBC_2.34",
+        extra_files=None,
     ):
         archive_path = self.dist / filename
         with tarfile.open(archive_path, "w:gz") as archive:
             files = dict(REQUIRED_FILES)
+            for document in (REPO_ROOT / "scripts" / "release-docs.txt").read_text().splitlines():
+                files[f"./share/doc/baffle/docs/{document}"] = f"{document}\n".encode()
+            files.update(extra_files or {})
             files["./baffle"] = executable
             if arm_glibc_record:
                 files["./share/doc/baffle/GLIBC-ABI.txt"] = (
@@ -151,6 +155,24 @@ else:
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Expected exactly 3 release archives", result.stderr)
+
+    def test_rejects_archived_document(self):
+        self.create_archive(
+            TARGET_ARCHIVES[0],
+            b"x86",
+            extra_files={
+                "./share/doc/baffle/docs/archive/runtime-migration.md": b"Historical\n"
+            },
+        )
+        self.create_archive(
+            TARGET_ARCHIVES[1], b"arm", arm_glibc_record=True
+        )
+        self.create_archive(TARGET_ARCHIVES[2], b"mac")
+
+        result = self.run_verifier()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("contains a historical design or benchmark document", result.stderr)
 
     def test_rejects_wrong_arm64_architecture(self):
         self.create_complete_set(arm_executable=b"x86")

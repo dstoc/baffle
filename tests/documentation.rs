@@ -108,3 +108,34 @@ fn protocol_operation_examples_parse() {
         Ok(ControlRequest::ReloadAll { version: 1 })
     ));
 }
+
+#[test]
+fn release_docs_include_current_rama_benchmark_instructions_only() {
+    let released_docs: Vec<_> = include_str!("../scripts/release-docs.txt")
+        .lines()
+        .filter(|path| !path.is_empty())
+        .collect();
+    assert!(released_docs.contains(&"benchmarking.md"));
+    assert!(released_docs.contains(&"architecture.md"));
+    assert!(!released_docs.iter().any(|path| {
+        path.contains("archive")
+            || path.contains("backend-comparison")
+            || path.contains("runtime-migration")
+            || path.contains("baffle-proposal")
+    }));
+    for path in released_docs {
+        assert!(
+            std::path::Path::new("docs").join(path).is_file(),
+            "release documentation file does not exist: {path}"
+        );
+    }
+
+    let guide = include_str!("../docs/benchmarking.md");
+    assert!(guide.contains("runtime_http1_characterization"));
+    assert!(guide.contains("scripts/benchmark_http1.py"));
+    assert!(guide.contains("scripts/benchmark_sessions.py"));
+    assert!(guide.contains("scripts/benchmark_builds.py"));
+    assert!(!guide.to_ascii_lowercase().contains("hudsucker"));
+    assert!(!guide.to_ascii_lowercase().contains("unix-to-tcp bridge"));
+    assert!(include_str!("../scripts/package-release.sh").contains("release-docs.txt"));
+}

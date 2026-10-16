@@ -5,8 +5,9 @@
 > baffle/25 removed destination-IP filtering and its `private_addresses` field.
 > Deployment DNS and network egress controls now own address restrictions.
 > baffle/34 made Rama the sole supported runtime. See the current
-> [architecture](architecture.md), [deployment security](security-deployment.md),
-> [configuration](configuration.md), and [runtime migration note](runtime-migration.md).
+> [architecture](../architecture.md),
+> [deployment security](../security-deployment.md), and
+> [configuration](../configuration.md).
 
 - **Status:** Approved as the original v1 proposal; later decisions and implementation status are documented below and in the current guides.
 - **Project:** New standalone Rust repository, independent of Cladding
@@ -45,8 +46,8 @@ session may request an optional nested `socket_name` relative to the daemon's
 `socket_dir`; omission retains generated names. Baffle creates missing nested
 directories securely and retains inode-checked socket cleanup. A network
 namespace is not required solely to hide an internal proxy listener. See the
-current [architecture](architecture.md), [configuration](configuration.md),
-and [security guide](security-deployment.md); the proposal below remains the
+current [architecture](../architecture.md), [configuration](../configuration.md),
+and [security guide](../security-deployment.md); the proposal below remains the
 historical v1 design and decision record.
 
 ## 1. Summary
@@ -242,9 +243,9 @@ The historical Hudsucker security patch and vendored source are no longer
 shipped. Baffle does not classify DNS answers, filter destination IP addresses,
 or pin destination addresses. An allowed name can resolve to a sensitive
 address even when the certificate is valid for that hostname. See the current
-[security and deployment guide](security-deployment.md) and
-[architecture guide](architecture.md) for this limitation and its deployment
-mitigations. The archived [backend comparison](backend-comparison.md) records
+[security and deployment guide](../security-deployment.md) and
+[architecture guide](../architecture.md) for this limitation and its deployment
+mitigations. The archived [backend comparison](backend-comparison-pre-baffle-34.md) records
 the patch inventory before the vendored source was removed.
 
 ## 9. Security model

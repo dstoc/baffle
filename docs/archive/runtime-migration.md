@@ -1,4 +1,8 @@
-# Runtime migration note
+# Archived runtime migration record
+
+This record documents the completed changes in baffle/34 and baffle/40. It is
+kept for provenance; see the [current architecture guide](../architecture.md)
+for the supported runtime and its interfaces.
 
 baffle/34 made Rama 0.4.0 Baffle's only supported proxy runtime. The change
 removed the Hudsucker adapter, vendored source, Cargo patch, backend feature
@@ -23,6 +27,7 @@ lifecycle behavior. No backend selector is persisted in TOML or exposed through
 the control protocol.
 
 Historical Baffle-authored code and performance comparisons remain in the
-[archived backend comparison](backend-comparison.md) and
-[benchmark report](benchmarking.md). Historical Hudsucker values and commands
-describe the pre-migration source; the current benchmark scripts run Rama only.
+[archived backend comparison](backend-comparison-pre-baffle-34.md) and
+[benchmark report](../../bench/archive/benchmark-report-2026-09-26.md).
+Historical Hudsucker values and commands describe pre-migration source; current
+benchmark procedures are in the [Rama benchmark guide](../benchmarking.md).

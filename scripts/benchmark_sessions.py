@@ -129,7 +129,6 @@ def main() -> None:
         (args.output_dir / "sessions-environment.json").write_text(
             json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-        backend = "rama"
         build = [
             "cargo", "build", "--locked",
             "--bin", "baffle", "--example", "measure_sessions",
@@ -140,9 +139,9 @@ def main() -> None:
         profile_dir = "release" if args.profile == "release" else "debug"
         daemon_bin = ROOT / "target" / profile_dir / "baffle"
         measure_bin = ROOT / "target" / profile_dir / "examples" / "measure_sessions"
-        config = daemon_config(root / "rama", cert, key, os.getuid())
-        log_path = args.output_dir / "rama-daemon.log"
-        raw_path = args.output_dir / "rama-sessions.csv"
+        config = daemon_config(root / "benchmark", cert, key, os.getuid())
+        log_path = args.output_dir / "daemon.log"
+        raw_path = args.output_dir / "sessions.csv"
         log = log_path.open("wb")
         daemon = subprocess.Popen(
             [str(daemon_bin), "daemon", "--config", str(config)],
@@ -151,7 +150,7 @@ def main() -> None:
             stderr=subprocess.STDOUT,
         )
         try:
-            control_socket = root / "rama" / "runtime" / "control.sock"
+            control_socket = root / "benchmark" / "runtime" / "control.sock"
             wait_for_socket(daemon, control_socket, log_path)
             env = os.environ.copy()
             env.update({
