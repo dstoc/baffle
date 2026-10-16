@@ -21,7 +21,6 @@ impl SessionManager {
     pub(super) async fn reload(
         &self,
         id: &str,
-        owner_uid: u32,
         configs: Option<&SessionConfigStore>,
         secret_store: &SecretStore,
     ) -> std::result::Result<SessionReloadResult, ()> {
@@ -30,20 +29,14 @@ impl SessionManager {
             let Some(session) = registry.sessions.get(id) else {
                 return Err(());
             };
-            if session.owner_uid != owner_uid {
-                return Err(());
-            }
             Arc::clone(&session.reload_lock)
         };
         let _serial = reload_lock.lock().await;
-        Ok(self
-            .reload_locked(id, owner_uid, configs, secret_store)
-            .await)
+        Ok(self.reload_locked(id, configs, secret_store).await)
     }
 
     pub(super) async fn reload_all(
         &self,
-        owner_uid: u32,
         configs: Option<&SessionConfigStore>,
         secret_store: &SecretStore,
     ) -> Vec<SessionReloadResult> {
@@ -53,8 +46,7 @@ impl SessionManager {
                 .sessions
                 .values()
                 .filter(|session| {
-                    session.owner_uid == owner_uid
-                        && session.config_source.is_some()
+                    session.config_source.is_some()
                         && session.info.state == SessionLifecycle::Running
                 })
                 .map(|session| (session.info.id.clone(), session.info.socket.clone()))
@@ -64,7 +56,7 @@ impl SessionManager {
         };
         let mut results = Vec::with_capacity(sessions.len());
         for (id, socket) in sessions {
-            match self.reload(&id, owner_uid, configs, secret_store).await {
+            match self.reload(&id, configs, secret_store).await {
                 Ok(result) => results.push(result),
                 Err(()) => results.push(SessionReloadResult::failed(
                     &id,
@@ -79,7 +71,6 @@ impl SessionManager {
     pub(super) async fn reload_locked(
         &self,
         id: &str,
-        owner_uid: u32,
         configs: Option<&SessionConfigStore>,
         secret_store: &SecretStore,
     ) -> SessionReloadResult {
@@ -89,9 +80,6 @@ impl SessionManager {
             let Some(session) = registry.sessions.get_mut(id) else {
                 return SessionReloadResult::failed(id, "".to_owned(), "session_unavailable");
             };
-            if session.owner_uid != owner_uid {
-                return SessionReloadResult::failed(id, "".to_owned(), "session_unavailable");
-            }
             session
                 .retired_runtimes
                 .retain(|runtime| !runtime.is_finished());
@@ -146,7 +134,7 @@ impl SessionManager {
         // Persistence is the lifetime chosen at creation. A file edit cannot
         // turn a leased session into a persistent one or end its lease.
         candidate.persistent = persistent;
-        let candidate_secrets = match secret_store.resolve(owner_uid, &candidate) {
+        let candidate_secrets = match secret_store.resolve(&candidate) {
             Ok(secrets) => Arc::new(secrets),
             Err(_) => {
                 return SessionReloadResult::failed(id, current_socket, "credentials_unavailable");

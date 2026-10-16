@@ -105,32 +105,18 @@ async fn denies_a_peer_whose_uid_differs_from_the_configured_operator() {
         provisioning_slots: Arc::new(Semaphore::new(1)),
         session_configs: None,
     });
+    let handler_state = Arc::clone(&state);
     let task = tokio::spawn(async move {
-        handle_connection(server, state).await;
+        handle_connection(server, handler_state).await;
     });
 
-    let request = b"version = 1\noperation = \"list\"\n";
-    client
-        .write_all(&(request.len() as u32).to_be_bytes())
-        .await
-        .expect("frame header should be written");
-    client
-        .write_all(request)
-        .await
-        .expect("frame payload should be written");
-    let mut header = [0; 4];
-    client
-        .read_exact(&mut header)
-        .await
-        .expect("error response header should be complete");
-    let mut body = vec![0; u32::from_be_bytes(header) as usize];
-    client
-        .read_exact(&mut body)
-        .await
-        .expect("error response body should be complete");
-    let response: Value = serde_json::from_slice(&body).expect("response should be JSON");
+    let (_, response) = read_response(&mut client).await;
     assert_eq!(response["error"]["code"], "unauthorized");
     task.await.expect("connection handler should finish");
+    assert!(
+        state.sessions.list().await.is_empty(),
+        "unauthorized peer should be rejected before reading a request"
+    );
 }
 
 #[tokio::test]
@@ -158,7 +144,7 @@ async fn refuses_unentitled_secret_before_creating_a_session() {
     assert!(!String::from_utf8_lossy(&body).contains("credential-must-not-leak"));
     task.await.expect("control handler should finish");
     assert!(
-        control_state.sessions.list(uid).await.is_empty(),
+        control_state.sessions.list().await.is_empty(),
         "unauthorized references must fail before session creation"
     );
 }
@@ -186,7 +172,7 @@ async fn provisioning_limit_rejects_an_excess_create_request() {
     .await;
     let (_, response) = read_response(&mut client).await;
     assert_eq!(response["error"]["code"], "busy");
-    assert!(control_state.sessions.list(uid).await.is_empty());
+    assert!(control_state.sessions.list().await.is_empty());
     drop(occupied);
     task.await.expect("control handler should finish");
 }
@@ -217,14 +203,12 @@ async fn authorized_create_keeps_secret_private_from_control_responses() {
     let id = response["result"]["id"]
         .as_str()
         .expect("created session should have an id");
-    assert!(state.sessions.list(uid.wrapping_add(1)).await.is_empty());
-    assert!(!state.sessions.stop(id, uid.wrapping_add(1)).await);
+    assert_eq!(state.sessions.list().await.len(), 1);
     let registry = state.sessions.registry.lock().await;
     let created = registry
         .sessions
         .get(id)
         .expect("session should be retained");
-    assert_eq!(created.owner_uid, uid);
     assert_eq!(created.configuration.rules[0].host, "example.com");
     assert_eq!(
         created
@@ -234,4 +218,7 @@ async fn authorized_create_keeps_secret_private_from_control_responses() {
             .as_str(),
         "credential-must-not-leak"
     );
+    drop(registry);
+    assert!(state.sessions.stop(id).await);
+    assert!(state.sessions.list().await.is_empty());
 }

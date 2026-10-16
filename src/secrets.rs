@@ -77,16 +77,11 @@ impl SecretStore {
         }
     }
 
-    /// Authorize every reference before opening any secret file.
+    /// Check each reference against the configured entitlement before opening files.
     pub(crate) fn resolve(
         &self,
-        client_uid: u32,
         session: &SessionConfig,
     ) -> Result<ResolvedSecrets, SecretStoreError> {
-        if client_uid != self.trusted_operator_uid {
-            return Err(SecretStoreError::UnauthorizedClient);
-        }
-
         let requested = session
             .rules
             .iter()
@@ -114,7 +109,6 @@ impl SecretStore {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SecretStoreError {
-    UnauthorizedClient,
     NotEntitled,
     Unavailable,
 }
@@ -243,7 +237,7 @@ mod tests {
         let store = store(directory.path(), &["api-token"]);
 
         let secrets = store
-            .resolve(store_uid(&store), &create_request("api-token"))
+            .resolve(&create_request("api-token"))
             .expect("entitled secret should resolve");
         let value = secrets
             .get("api-token")
@@ -259,27 +253,25 @@ mod tests {
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
             .expect("secret directory should be private");
         let store = store(directory.path(), &["missing", "inaccessible", "private"]);
-        let uid = store_uid(&store);
-
         assert!(matches!(
-            store.resolve(uid, &create_request("missing")),
+            store.resolve(&create_request("missing")),
             Err(SecretStoreError::Unavailable)
         ));
 
         write_secret(directory.path(), "inaccessible", "credential", 0o644);
         assert!(matches!(
-            store.resolve(uid, &create_request("inaccessible")),
+            store.resolve(&create_request("inaccessible")),
             Err(SecretStoreError::Unavailable)
         ));
 
         assert!(matches!(
-            store.resolve(uid, &create_request("not-allowed")),
+            store.resolve(&create_request("not-allowed")),
             Err(SecretStoreError::NotEntitled)
         ));
     }
 
     #[test]
-    fn rejects_symlinked_secret_files_and_untrusted_client_uids() {
+    fn rejects_symlinked_secret_files() {
         let directory = tempfile::tempdir().expect("secret directory should be created");
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
             .expect("secret directory should be private");
@@ -290,21 +282,9 @@ mod tests {
         )
         .expect("secret symlink should be created");
         let store = store(directory.path(), &["token"]);
-        let uid = store_uid(&store);
-
         assert!(matches!(
-            store.resolve(uid, &create_request("token")),
+            store.resolve(&create_request("token")),
             Err(SecretStoreError::Unavailable)
         ));
-        assert!(matches!(
-            store.resolve(uid.wrapping_add(1), &create_request("token")),
-            Err(SecretStoreError::UnauthorizedClient)
-        ));
-    }
-
-    fn store_uid(store: &SecretStore) -> u32 {
-        fs::metadata(&store.directory)
-            .expect("secret directory should have metadata")
-            .uid()
     }
 }
