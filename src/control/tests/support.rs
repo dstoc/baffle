@@ -1,10 +1,5 @@
-use std::{
-    fs,
-    os::unix::fs::{MetadataExt, PermissionsExt},
-    sync::Arc,
-};
+use std::{fs, os::unix::fs::MetadataExt, sync::Arc};
 
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -12,24 +7,13 @@ use crate::{
     config::{CaConfig, DaemonSettings, SessionCreateMode},
     proxy_runtime::TestUpstreamTrust,
     telemetry::Metrics,
+    test_ca::write_test_ca,
 };
 
 use crate::control::session::SessionManager;
 
 pub(super) fn session_manager(directory: &std::path::Path, max_sessions: usize) -> SessionManager {
-    let key_pair = KeyPair::generate().expect("CA key should be generated");
-    let mut parameters = CertificateParams::default();
-    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let certificate = parameters
-        .self_signed(&key_pair)
-        .expect("CA certificate should be generated");
-    let certificate_path = directory.join("control-test-ca.pem");
-    let private_key_path = directory.join("control-test-ca-key.pem");
-    fs::write(&certificate_path, certificate.pem()).expect("CA certificate should be saved");
-    fs::write(&private_key_path, key_pair.serialize_pem()).expect("CA key should be saved");
-    fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o600))
-        .expect("CA key permissions should be restricted");
+    let (certificate_path, private_key_path) = write_test_ca(directory);
     let ca = Arc::new(
         ManagedCa::load(&CaConfig {
             certificate: certificate_path,

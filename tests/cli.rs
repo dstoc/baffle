@@ -3,117 +3,45 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
-    os::unix::{
-        fs::MetadataExt,
-        net::{UnixListener, UnixStream},
-    },
+    os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     process::{Child, ChildStdout, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
-use tempfile::TempDir;
+#[allow(dead_code)]
+mod common;
+use common::DaemonProcess;
 
 struct TestDaemon {
-    child: Child,
-    _directory: TempDir,
-    control_socket: PathBuf,
+    daemon: DaemonProcess,
     session_config_dir: PathBuf,
 }
 
 impl TestDaemon {
     fn start(file_only: bool) -> Self {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let root = directory.path();
-        let (certificate_path, private_key_path) = write_test_ca(root);
-        let control_socket = root.join("run/control.sock");
-        let socket_dir = root.join("proxies");
-        let session_config_dir = root.join("sessions");
-        fs::create_dir_all(&session_config_dir).expect("session config directory should exist");
-        let trusted_uid = fs::metadata(root)
-            .expect("temporary directory should have metadata")
-            .uid();
-        let mut mode = String::new();
-        if file_only {
-            mode = format!(
-                "session_config_dir = \"{}\"\ncreate_mode = \"file_only\"\n",
-                session_config_dir.display()
-            );
-        }
-        let config = format!(
-            "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {}\n{}\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"{}\"\n",
-            control_socket.display(),
-            socket_dir.display(),
-            trusted_uid,
-            mode,
-            certificate_path.display(),
-            private_key_path.display(),
-            root.join("secrets").display(),
-        );
-        let config_path = root.join("daemon.toml");
-        fs::write(&config_path, config).expect("daemon config should be written");
-
-        let child = Command::new(env!("CARGO_BIN_EXE_baffle"))
-            .arg("daemon")
-            .arg("--config")
-            .arg(config_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("daemon process should start");
-
-        let mut daemon = Self {
-            child,
-            _directory: directory,
-            control_socket,
+        let daemon = DaemonProcess::start_for_cli(file_only);
+        let session_config_dir = daemon
+            .session_config_dir
+            .clone()
+            .unwrap_or_else(|| daemon.directory.path().join("sessions"));
+        Self {
+            daemon,
             session_config_dir,
-        };
-        daemon.wait_until_ready();
-        daemon
-    }
-
-    fn wait_until_ready(&mut self) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !self.control_socket.exists() {
-            if let Some(status) = self
-                .child
-                .try_wait()
-                .expect("daemon status should be readable")
-            {
-                panic!("daemon exited before binding its control socket: {status}");
-            }
-            assert!(Instant::now() < deadline, "daemon did not become ready");
-            thread::sleep(Duration::from_millis(10));
         }
     }
 
     fn cli(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_baffle"));
-        command.arg("--control-socket").arg(&self.control_socket);
-        command
+        self.daemon.cli()
     }
 
     fn list(&self) -> String {
-        let output = self
-            .cli()
-            .arg("list")
-            .output()
-            .expect("list command should run");
-        assert!(
-            output.status.success(),
-            "list failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).expect("list output should be UTF-8")
+        self.daemon.list()
     }
-}
 
-impl Drop for TestDaemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+    fn directory(&self) -> &Path {
+        self.daemon.directory.path()
     }
 }
 
@@ -260,26 +188,6 @@ fn wait_for_session_release(
     }
 }
 
-fn write_test_ca(directory: &Path) -> (PathBuf, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let key_pair = KeyPair::generate().expect("CA key should be generated");
-    let mut parameters = CertificateParams::default();
-    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let certificate = parameters
-        .self_signed(&key_pair)
-        .expect("CA certificate should be generated");
-
-    let certificate_path = directory.join("ca.pem");
-    let private_key_path = directory.join("ca-key.pem");
-    fs::write(&certificate_path, certificate.pem()).expect("CA certificate should be saved");
-    fs::write(&private_key_path, key_pair.serialize_pem()).expect("CA key should be saved");
-    fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o600))
-        .expect("CA key permissions should be restricted");
-    (certificate_path, private_key_path)
-}
-
 fn inline_config(directory: &Path, persistent: bool) -> PathBuf {
     let path = directory.join("inline.toml");
     fs::write(
@@ -293,8 +201,8 @@ fn inline_config(directory: &Path, persistent: bool) -> PathBuf {
 #[test]
 fn inline_create_lists_sessions_and_independent_stop_preserves_other_lease() {
     let daemon = TestDaemon::start(false);
-    let config_a = inline_config(daemon._directory.path(), false);
-    let config_b = inline_config(daemon._directory.path(), false);
+    let config_a = inline_config(daemon.directory(), false);
+    let config_b = inline_config(daemon.directory(), false);
 
     let mut first = AttachedCreate::start(&daemon, &config_a);
     let mut second = AttachedCreate::start(&daemon, &config_b);
@@ -355,7 +263,7 @@ fn inline_create_accepts_empty_deny_and_unmatched_tunnel_policies() {
         ("deny", "", &["403"][..]),
         ("tunnel", "unmatched = \"tunnel\"\n", &["200", "502"][..]),
     ] {
-        let path = daemon._directory.path().join(format!("{name}.toml"));
+        let path = daemon.directory().join(format!("{name}.toml"));
         fs::write(&path, format!("version = 2\npersistent = true\n{setting}"))
             .expect("empty session file should be written");
         let created = daemon
@@ -418,7 +326,7 @@ fn inline_create_accepts_empty_deny_and_unmatched_tunnel_policies() {
 #[test]
 fn inline_create_cli_exit_releases_only_its_own_lease() {
     let daemon = TestDaemon::start(false);
-    let config = inline_config(daemon._directory.path(), false);
+    let config = inline_config(daemon.directory(), false);
     let mut first = AttachedCreate::start(&daemon, &config);
     let (second, second_status) =
         AttachedCreate::start_and_signal_on_readiness(&daemon, &config, "INT");
@@ -520,7 +428,7 @@ fn file_only_create_uses_nested_server_file_and_rejects_inline_config() {
         "version = 2\npersistent = true\n\n[rules.\"github.com\"]\n",
     )
     .expect("daemon session file should be written");
-    let local_config = inline_config(daemon._directory.path(), false);
+    let local_config = inline_config(daemon.directory(), false);
 
     let rejected = daemon
         .cli()
@@ -674,7 +582,7 @@ fn cli_reports_unavailable_control_socket_and_sigterm_releases_lease() {
     assert!(String::from_utf8_lossy(&unavailable.stderr).contains("unavailable"));
 
     let daemon = TestDaemon::start(false);
-    let config = inline_config(daemon._directory.path(), false);
+    let config = inline_config(daemon.directory(), false);
     let mut create = AttachedCreate::start(&daemon, &config);
     let status = create.signal_and_wait("TERM");
     assert!(status.success(), "SIGTERM should close the lease: {status}");

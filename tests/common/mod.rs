@@ -13,9 +13,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use serde_json::Value;
 use tempfile::TempDir;
+
+mod test_ca;
+pub(crate) use test_ca::write_test_ca;
 
 pub struct DaemonProcess {
     child: Child,
@@ -59,6 +61,33 @@ impl DaemonProcess {
         upstream_ca: Option<&Path>,
     ) -> Self {
         Self::start_with_options(max_sessions, allowed_secrets, upstream_ca, true, None)
+    }
+
+    #[allow(dead_code)] // Used by the CLI integration target.
+    pub fn start_for_cli(file_only: bool) -> Self {
+        Self::start_with_options(64, &[], None, file_only, None)
+    }
+
+    #[allow(dead_code)] // Used by the CLI integration target.
+    pub fn cli(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_baffle"));
+        command.arg("--control-socket").arg(&self.control_socket);
+        command
+    }
+
+    #[allow(dead_code)] // Used by the CLI integration target.
+    pub fn list(&self) -> String {
+        let output = self
+            .cli()
+            .arg("list")
+            .output()
+            .expect("list command should run");
+        assert!(
+            output.status.success(),
+            "list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("list output should be UTF-8")
     }
 
     fn start_with_options(
@@ -143,16 +172,17 @@ impl DaemonProcess {
                 let socket_metadata = fs::symlink_metadata(&daemon.control_socket)
                     .expect("control socket should have metadata");
                 assert_eq!(socket_metadata.uid(), trusted_uid);
-                assert_eq!(socket_metadata.permissions().mode() & 0o777, 0o600);
-                assert_eq!(
-                    fs::metadata(daemon.control_socket.parent().unwrap())
-                        .expect("control directory should have metadata")
-                        .permissions()
-                        .mode()
-                        & 0o777,
-                    0o700
-                );
-                return daemon;
+                if socket_metadata.permissions().mode() & 0o777 == 0o600 {
+                    assert_eq!(
+                        fs::metadata(daemon.control_socket.parent().unwrap())
+                            .expect("control directory should have metadata")
+                            .permissions()
+                            .mode()
+                            & 0o777,
+                        0o700
+                    );
+                    return daemon;
+                }
             }
             if let Some(status) = daemon
                 .child
@@ -165,7 +195,7 @@ impl DaemonProcess {
             }
             assert!(
                 Instant::now() < deadline,
-                "daemon should bind its control socket"
+                "daemon should bind and secure its control socket"
             );
             thread::sleep(Duration::from_millis(10));
         }
@@ -218,32 +248,38 @@ impl DaemonProcess {
     }
 }
 
-pub fn write_test_ca(directory: &Path) -> (PathBuf, PathBuf) {
-    let key_pair = KeyPair::generate().expect("CA key should be generated");
-    let mut parameters = CertificateParams::default();
-    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let certificate = parameters
-        .self_signed(&key_pair)
-        .expect("CA certificate should be generated");
-    let certificate_path = directory.join("ca.pem");
-    let private_key_path = directory.join("ca-key.pem");
-    fs::write(&certificate_path, certificate.pem()).expect("CA certificate should be saved");
-    fs::write(&private_key_path, key_pair.serialize_pem()).expect("CA key should be saved");
-    fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o600))
-        .expect("CA key permissions should be restricted");
-    (certificate_path, private_key_path)
+pub fn request_on(control: &mut UnixStream, request: &str) -> (Vec<u8>, Value) {
+    write_frame(control, request.as_bytes());
+    read_response_frame(control)
 }
 
-pub fn request_on(control: &mut UnixStream, request: &str) -> (Vec<u8>, Value) {
-    let payload = request.as_bytes();
+#[allow(dead_code)] // Used by the control protocol integration target.
+pub fn request(socket: &Path, request: &str) -> Value {
+    let mut control = UnixStream::connect(socket).expect("client should connect");
+    control
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("client timeout should be set");
+    write_frame(&mut control, request.as_bytes());
+    read_response(&mut control)
+}
+
+pub fn write_frame(control: &mut UnixStream, payload: &[u8]) {
+    control
+        .write_all(&encode_frame(payload))
+        .expect("control frame should be written");
+}
+
+pub fn encode_frame(payload: &[u8]) -> Vec<u8> {
     let length = u32::try_from(payload.len()).expect("control request should fit a frame");
-    control
-        .write_all(&length.to_be_bytes())
-        .expect("control frame header should be written");
-    control
-        .write_all(payload)
-        .expect("control request should be written");
+    [length.to_be_bytes().as_slice(), payload].concat()
+}
+
+#[allow(dead_code)] // Used by the control protocol integration target.
+pub fn read_response(control: &mut UnixStream) -> Value {
+    read_response_frame(control).1
+}
+
+fn read_response_frame(control: &mut UnixStream) -> (Vec<u8>, Value) {
     let mut header = [0; 4];
     control
         .read_exact(&mut header)

@@ -2,35 +2,20 @@
 
 use std::{
     fs,
-    os::unix::fs::{MetadataExt, PermissionsExt},
-    path::PathBuf,
-    process::{Child, Command, Stdio},
-    thread,
+    os::unix::fs::PermissionsExt,
     time::{Duration, Instant},
 };
 
 use baffle_client::{Client, HostRule, ReloadStatus, SessionConfig, SessionState};
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
-use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     time::{sleep, timeout},
 };
 
-struct DaemonProcess {
-    child: Child,
-    _directory: TempDir,
-    control_socket: PathBuf,
-    session_config_dir: Option<PathBuf>,
-}
-
-impl Drop for DaemonProcess {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
+#[allow(dead_code)]
+mod common;
+use common::DaemonProcess;
 
 #[tokio::test]
 async fn client_manages_ephemeral_leases_and_persistent_sessions() {
@@ -301,95 +286,9 @@ async fn wait_for_count(client: &Client, expected: usize) {
 }
 
 fn start_daemon(max_sessions: usize) -> DaemonProcess {
-    start_daemon_with_mode(max_sessions, false)
+    DaemonProcess::start(max_sessions, &[])
 }
 
 fn start_file_only_daemon(max_sessions: usize) -> DaemonProcess {
-    start_daemon_with_mode(max_sessions, true)
-}
-
-fn start_daemon_with_mode(max_sessions: usize, file_only: bool) -> DaemonProcess {
-    let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let control_socket = directory.path().join("run/control.sock");
-    let socket_dir = directory.path().join("proxies");
-    let config_path = directory.path().join("daemon.toml");
-    let session_config_dir = file_only.then(|| directory.path().join("session-configs"));
-    if let Some(session_config_dir) = &session_config_dir {
-        fs::create_dir(session_config_dir).expect("session config directory should be created");
-        fs::set_permissions(session_config_dir, fs::Permissions::from_mode(0o700))
-            .expect("session config directory should be private");
-    }
-    let (certificate_path, private_key_path) = write_test_ca(directory.path());
-    let trusted_uid = fs::metadata(directory.path())
-        .expect("temporary directory should have metadata")
-        .uid();
-    let file_settings = session_config_dir
-        .as_ref()
-        .map(|path| {
-            format!(
-                "create_mode = \"file_only\"\nsession_config_dir = \"{}\"\n",
-                path.display()
-            )
-        })
-        .unwrap_or_default();
-    let config = format!(
-        "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\nmax_sessions = {max_sessions}\n{file_settings}\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"unused-secrets\"\n",
-        control_socket.display(),
-        socket_dir.display(),
-        certificate_path.display(),
-        private_key_path.display(),
-    );
-    fs::write(&config_path, config).expect("daemon config should be written");
-    let child = Command::new(env!("CARGO_BIN_EXE_baffle"))
-        .arg("daemon")
-        .arg("--config")
-        .arg(&config_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
-    let mut daemon = DaemonProcess {
-        child,
-        _directory: directory,
-        control_socket,
-        session_config_dir,
-    };
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if daemon.control_socket.exists() {
-            return daemon;
-        }
-        if let Some(status) = daemon
-            .child
-            .try_wait()
-            .expect("daemon status should be readable")
-        {
-            panic!("daemon exited before binding control socket: {status}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "daemon should bind control socket"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn write_test_ca(directory: &std::path::Path) -> (PathBuf, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let key_pair = KeyPair::generate().expect("CA key should be generated");
-    let mut parameters = CertificateParams::default();
-    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let certificate = parameters
-        .self_signed(&key_pair)
-        .expect("CA certificate should be generated");
-    let certificate_path = directory.join("ca.pem");
-    let private_key_path = directory.join("ca-key.pem");
-    fs::write(&certificate_path, certificate.pem()).expect("CA certificate should be saved");
-    fs::write(&private_key_path, key_pair.serialize_pem()).expect("CA key should be saved");
-    fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o600))
-        .expect("CA key permissions should be restricted");
-    (certificate_path, private_key_path)
+    DaemonProcess::start_file_only_with_upstream_ca(max_sessions, &[], None)
 }
