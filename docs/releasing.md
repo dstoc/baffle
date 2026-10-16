@@ -24,12 +24,13 @@ open or update a release pull request and to write `CHANGELOG.md`.
   when the change is breaking. Use another Conventional Commit type when the
   change should not trigger a release.
 - Review the generated pull request's changelog and Cargo version updates.
-  Release Please calculates one version from the repository root. The
-  candidate synchronization step applies that version to both workspace
-  crates, the root path dependency, the release manifest, and `Cargo.lock`.
+  Release Please calculates one version from its root package. Its Rust
+  updater writes that version to both workspace package manifests, the root
+  path dependency, the release manifest, and `Cargo.lock`.
   Changes under `crates/baffle-client` are part of the same root release.
 - Merge the release pull request only after the generated-candidate checks
-  below succeed. The merge creates the `vX.Y.Z` tag and GitHub Release. The
+  below succeed. Those checks validate the candidate without changing its
+  branch. The merge creates the `vX.Y.Z` tag and GitHub Release. The
   same Release Please workflow run validates the exact release commit, runs
   the required Linux and native Apple Silicon checks, builds all three binary
   archives, and publishes them with one combined `SHA256SUMS` file. The
@@ -67,22 +68,22 @@ and notice files for its bundled dependencies.
 `baffle-proxy` keeps a local path to `baffle-client` and also declares the
 matching registry version. The path supports workspace development. The
 version lets Cargo resolve the client crate after `baffle-proxy` is published.
-Release Please manages one root package and one root version. It does not use
-the `linked-versions` plugin: that plugin cannot identify configured
-components when `include-component-in-tag` is false. The root package uses a
-component-specific release branch, while the tag remains the unprefixed
-`vX.Y.Z` format. This gives Release Please one version and one release entry
-for both crates. The candidate synchronization step writes that version to
-both Cargo package manifests, the root dependency, the root-only
-`.release-please-manifest.json`, and the two local package entries in
-`Cargo.lock`.
+Release Please manages only the root `baffle-proxy` package. Its component
+selects the release pull request branch, while
+`include-component-in-tag = false` keeps the tag in the `vX.Y.Z` format. The
+two Cargo packages share that release version and release entry. The pinned
+Release Please Rust updater updates both Cargo manifests, the root dependency,
+the root-only `.release-please-manifest.json`, and both local package entries
+in `Cargo.lock`.
 
-Review each generated release pull request. Its one root manifest version,
-both `Cargo.toml` package versions, the `baffle-client` dependency version in
-the root manifest, and both local package entries in `Cargo.lock` must match.
-The `Format, lint, and test` required check runs on regular pull requests and
-verifies the Release Please package configuration. The generated release pull
-request is checked separately as described below.
+Review each generated release pull request. Its root manifest version, both
+`Cargo.toml` package versions, the `baffle-client` dependency version in the
+root manifest, and both local package entries in `Cargo.lock` must match. A CI
+fixture runs the pinned Release Please action against patch, minor, and
+breaking changes. The release workflow validates the generated branch with
+Cargo metadata and release regression tests, then dispatches Rust CI for that
+candidate. No synchronization commit is added. The `Format, lint, and test`
+required check also runs on regular pull requests.
 
 Crate names are allocated on a first-come basis. Before the first release,
 confirm that `baffle-client` and `baffle-proxy` are available and that the
@@ -174,14 +175,15 @@ workflow checks out the generated head branch and runs
 Release Please regression tests on that branch. Cargo metadata checks that the
 candidate resolves without changing `Cargo.lock`. The regression tests check
 that both crate versions, the `baffle-client` dependency version, the manifest
-entries, and the lockfile entries stay in sync. Before merging, confirm that
-the `Release Please` workflow run completed both checks successfully for the
-latest candidate commit. Release Please creates the candidate with
-`GITHUB_TOKEN`, so GitHub may not start the normal CI workflow for that pull
-request. When a release is created, the same workflow calls the full Rust CI
-workflow on the release commit and waits for the required `Format, lint, and
-test` check before it starts publishing. Regular pull requests continue to run
-the same required CI check.
+entries, and the lockfile entries stay in sync. The workflow then dispatches
+Rust CI for the exact candidate commit. Before merging, confirm that metadata
+validation and the release regression tests passed, and that the dispatched CI
+check passed for the latest candidate commit. Release Please creates the
+candidate with `GITHUB_TOKEN`, so GitHub may not start the normal CI workflow
+for that pull request. When a release is created, the same workflow calls the
+full Rust CI workflow on the release commit and waits for the required
+`Format, lint, and test` check before it starts publishing. Regular pull
+requests continue to run the same required CI check.
 
 A tag created with `GITHUB_TOKEN` does not trigger another workflow run. The
 same Release Please run calls the reusable binary packaging workflow and the
@@ -191,30 +193,22 @@ run is needed for a new release.
 ## Recover an incomplete release
 
 Use recovery only after you inspect the merged Release Please pull request and
-record its merge SHA, the existing tag and GitHub Release assets, the manifest
-and both Cargo versions at that SHA, and the registry state for both crates.
-The manifest, both crate versions, the local dependency, and the lockfile must
-identify one version. A version in the Release Please pull request must match
-that version. If they do not match, stop and correct the release metadata
-before publication.
+record its merge SHA, the existing tag and GitHub Release assets, the root
+release manifest, both Cargo versions at that SHA, and the registry state for
+both crates. The root manifest, both crate versions, the local dependency,
+and the lockfile must identify one version. The Release Please pull request
+must contain one version summary that matches that version. If they do not
+match, stop and correct the release metadata before publication.
 
 The normal `push` workflow does not run recovery. To backfill a merged release
 that Release Please did not report, open **Release Please** in GitHub Actions,
 choose **Run workflow** on `main`, and set `recover_release` to `true`. The
-workflow verifies the release pull request, exact merge SHA, selected version,
-registry ownership, and existing release state before it writes a tag or
-release. It creates only a missing tag for the verified package version. It
-does not move an existing tag. It reports which crate versions or binary
-assets remain so the normal validation, client-first publication, and binary
-packaging jobs can resume.
-
-For the 2026-10-03 incident, `v0.4.0` points to
-`be6180a9946a5f95188384f2dd4067a4093417fd`, while both Cargo
-packages and the merged release manifest identify `1.0.0`. The existing
-`v0.4.0` Release has no uploaded Baffle assets. The crates.io index contains
-only `0.2.0` and `0.3.0` for both crates. Keep `v0.4.0` unchanged. After this
-configuration fix reaches `main`, the guarded recovery selects `1.0.0` from the
-matching release metadata and can create `v1.0.0` at the same verified SHA.
+workflow verifies the root Release Please package, exact merge SHA, selected
+version, Cargo metadata, registry ownership, and existing release state
+before it writes a tag or release. It creates only a missing tag for the
+verified package version. It does not move an existing tag. It reports which
+crate versions or binary assets remain so the normal validation, client-first
+publication, and binary packaging jobs can resume.
 
 Use **Binary release assets** only to backfill assets on an existing valid
 release. That workflow does not create tags or GitHub Releases and does not
@@ -239,9 +233,9 @@ such as `v0.2.0`, or to retry binary packaging outside the automatic run:
 The CLI equivalent is `gh workflow run release.yml --ref main -f tag=vX.Y.Z`.
 
 The workflow checks out the exact tag, validates the published release and
-merged Release Please PR, builds both native targets, and uploads the two
-archives plus one combined checksum file. It does not create a tag or GitHub
-Release. It uses the current workflow's packaging tools while building and
+merged Release Please PR, builds all three native targets, and uploads the
+three archives plus one combined checksum file. It does not create a tag or
+GitHub Release. It uses the current workflow's packaging tools while building and
 including documentation from the exact release tag, which keeps backfills
 working when an older source tag predates the current packaging scripts. If
 every existing expected asset matches the newly built output, a rerun uploads

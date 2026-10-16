@@ -192,7 +192,7 @@ async function exerciseScenario(scenario) {
   assert.equal(
     generatedPullRequest.version.toString(),
     scenario.version,
-    `${scenario.name}: Release Please selected version before candidate sync`
+    `${scenario.name}: Release Please selected the root release version`
   );
 
   const updatePaths = new Set(generatedPullRequest.updates.map(update => update.path));

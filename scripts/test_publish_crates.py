@@ -294,7 +294,7 @@ class PublishCratesTests(unittest.TestCase):
         self.assertIn("ref: ${{ needs.release-please.outputs.tag_name }}", workflow)
         self.assertIn("group: baffle-crates-io-publish", workflow)
         self.assertIn(
-            "validate-release:\n    needs: [release-please, synchronize-release-candidates]",
+            "validate-release:\n    needs: [release-please, validate-release-candidates]",
             workflow,
         )
         self.assertIn("uses: ./.github/workflows/ci.yml", workflow)
@@ -306,7 +306,7 @@ class PublishCratesTests(unittest.TestCase):
         self.assertIn("needs: [release-please, validate-release]", workflow)
         self.assertIn("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}", workflow)
         self.assertEqual(workflow.count("secrets.CARGO_REGISTRY_TOKEN"), 2)
-        recovery_step = workflow.split("id: recover_release", 1)[1].split("  synchronize-release-candidates:", 1)[0]
+        recovery_step = workflow.split("id: recover_release", 1)[1].split("  validate-release-candidates:", 1)[0]
         self.assertIn("Backfill a merged release after explicit manual request", workflow)
         self.assertIn("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}", recovery_step)
         self.assertNotIn("CARGO_REGISTRY_TOKEN", workflow.split("id: release\n", 1)[1].split("- name: Check out", 1)[0])
@@ -315,7 +315,7 @@ class PublishCratesTests(unittest.TestCase):
             workflow.rindex("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}"),
         )
 
-    def test_post_validation_jobs_tolerate_skipped_candidate_sync_but_require_validation(self):
+    def test_post_validation_jobs_tolerate_skipped_candidate_validation_but_require_release_validation(self):
         workflow = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
 
         def condition_for(job):
@@ -341,7 +341,7 @@ class PublishCratesTests(unittest.TestCase):
 
         validation = condition_for("validate-release")
         self.assertIn("!cancelled()", validation)
-        self.assertIn("needs.synchronize-release-candidates.result == 'skipped'", validation)
+        self.assertIn("needs.validate-release-candidates.result == 'skipped'", validation)
 
 
 if __name__ == "__main__":

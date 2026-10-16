@@ -35,19 +35,16 @@ def pull_request_branches(prs_created, prs_json, pr_json):
 
     if not candidates:
         raise OutputError("prs_created is true but no pull request payload was provided")
+    if len(candidates) != 1:
+        raise OutputError("The single-package Release Please config must produce one pull request")
 
-    branches = []
-    seen = set()
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            raise OutputError("Release Please pull request entries must be JSON objects")
-        branch = candidate.get("headBranchName")
-        if not isinstance(branch, str) or not branch.strip():
-            raise OutputError("Release Please pull request is missing headBranchName")
-        if branch not in seen:
-            branches.append({"headBranchName": branch})
-            seen.add(branch)
-    return branches
+    candidate = candidates[0]
+    if not isinstance(candidate, dict):
+        raise OutputError("Release Please pull request entries must be JSON objects")
+    branch = candidate.get("headBranchName")
+    if not isinstance(branch, str) or not branch.strip():
+        raise OutputError("Release Please pull request is missing headBranchName")
+    return [{"headBranchName": branch}]
 
 
 def main():
