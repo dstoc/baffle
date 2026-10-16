@@ -196,7 +196,7 @@ mod tests {
 
     fn create_request(secret: &str) -> crate::config::SessionConfig {
         let request = ControlRequest::from_toml(&format!(
-            "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"{secret}\"\nformat = \"bearer\"\n"
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"{secret}\"\nformat = \"bearer\""
         ))
         .expect("test create request should parse");
         let ControlRequest::Create { session, .. } = request else {

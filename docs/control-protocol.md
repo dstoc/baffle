@@ -5,12 +5,13 @@ carries one request and one response. Requests are UTF-8 TOML. Responses are
 UTF-8 JSON. Both payloads use the same four-byte unsigned big-endian length
 prefix.
 
-Protocol version 1 is the only supported version. A client selects its
-version by setting `version = 1` in each request. The `reload` and `reload_all`
-operations extend version 1. Baffle does not perform a
-separate capability handshake or negotiate a version range. It returns
-`unsupported_version` when the request has a valid integer version other than
-1. The integer version field is a 16-bit unsigned value. A missing, malformed,
+Protocol version 2 is the only supported version. A client selects its
+version by setting `version = 2` in each request. Version 2 changes the inline
+`create` request to carry the current version 2 session configuration. Baffle
+does not perform a separate capability handshake or negotiate a version
+range. It returns `unsupported_version` when the request has a valid integer
+version other than 2. Version 1 clients are not compatible with this protocol.
+The integer version field is a 16-bit unsigned value. A missing, malformed,
 or out-of-range field is `invalid_request`.
 
 ## Frame format
@@ -68,27 +69,27 @@ The request tables and policy fields are defined in the
 [configuration reference](configuration.md).
 
 Create an ephemeral session with an inline policy when the daemon uses the
-default `inline` mode. This is the version 1 control-protocol request sent by
-the typed client; it is not a session file. `baffle create --config` reads the
-separate version 2 session-file format in the [configuration reference](configuration.md):
+default `inline` mode. The `session` table uses the same version 2 schema as a
+session file. `baffle create --config` reads that schema from a local file and
+sends it in this table:
 
 ```toml
-version = 1
+version = 2
 operation = "create"
 
 [session]
+version = 2
 persistent = false
 
-[[rules]]
-host = "example.com"
+[session.rules."example.com"]
 mode = "tunnel"
 ports = [443]
 ```
 
 The checked-in [`examples/session.toml`](../examples/session.toml) is a
-version 2 session file parsed by a CI test. The control-protocol create request
-has a `session` table and zero or more rules. `persistent` defaults to false.
-`session.unmatched` defaults to `deny`; `tunnel` permits only opaque unmatched
+version 2 session file parsed by a CI test. The `session` table contains the
+session schema fields and a named `rules` table. `persistent` defaults to
+false. `session.unmatched` defaults to `deny`; `tunnel` permits only opaque unmatched
 HTTPS tunnels on port 443.
 Each rule defaults to HTTPS port 443.
 
@@ -96,7 +97,7 @@ Create a session from a daemon-managed file when the daemon uses
 `create_mode = "file_only"`:
 
 ```toml
-version = 1
+version = 2
 operation = "create_from_file"
 name = "cladding/github.toml"
 ```
@@ -119,7 +120,7 @@ available only for sessions created from a daemon-managed file.
 Reload one session by its opaque ID:
 
 ```toml
-version = 1
+version = 2
 operation = "reload"
 session_id = "session_example_01"
 ```
@@ -127,7 +128,7 @@ session_id = "session_example_01"
 Reload every active file-backed session owned by the caller:
 
 ```toml
-version = 1
+version = 2
 operation = "reload_all"
 ```
 
@@ -204,7 +205,7 @@ session. It does not close other clients' leases.
 Stop an owned session:
 
 ```toml
-version = 1
+version = 2
 operation = "stop"
 session_id = "session_example_01"
 ```
@@ -215,7 +216,7 @@ digits, hyphens, and underscores.
 List sessions owned by the authenticated UID:
 
 ```toml
-version = 1
+version = 2
 operation = "list"
 ```
 
@@ -232,13 +233,13 @@ successful response has a `result` object.
 Create response:
 
 ```json
-{"version":1,"ok":true,"result":{"id":"session_example_01","socket":"/run/baffle/proxies/session_example_01.sock","persistent":false}}
+{"version":2,"ok":true,"result":{"id":"session_example_01","socket":"/run/baffle/proxies/session_example_01.sock","persistent":false}}
 ```
 
 List response:
 
 ```json
-{"version":1,"ok":true,"result":{"sessions":[{"id":"session_example_01","socket":"/run/baffle/proxies/session_example_01.sock","persistent":false,"state":"running","generation":1,"draining_generations":0}]}}
+{"version":2,"ok":true,"result":{"sessions":[{"id":"session_example_01","socket":"/run/baffle/proxies/session_example_01.sock","persistent":false,"state":"running","generation":1,"draining_generations":0}]}}
 ```
 
 Each list entry contains `id`, `socket`, `persistent`, `state`, `generation`,
@@ -251,13 +252,13 @@ credentials. `stop` returns
 `reason`:
 
 ```json
-{"version":1,"ok":true,"result":{"id":"session_example_01","status":"unchanged","socket":"/run/baffle/proxies/session_example_01.sock"}}
+{"version":2,"ok":true,"result":{"id":"session_example_01","status":"unchanged","socket":"/run/baffle/proxies/session_example_01.sock"}}
 ```
 
 `reload_all` returns these entries in `result.results`:
 
 ```json
-{"version":1,"ok":true,"result":{"results":[{"id":"session_example_01","status":"reloaded","socket":"/run/baffle/proxies/session_example_01.sock"}]}}
+{"version":2,"ok":true,"result":{"results":[{"id":"session_example_01","status":"reloaded","socket":"/run/baffle/proxies/session_example_01.sock"}]}}
 ```
 
 The `--all` CLI command prints every result and exits unsuccessfully when any
@@ -267,7 +268,7 @@ An error response has `ok = false` and an `error` object with a stable code
 and safe message:
 
 ```json
-{"version":1,"ok":false,"error":{"code":"invalid_request","message":"request is invalid"}}
+{"version":2,"ok":false,"error":{"code":"invalid_request","message":"request is invalid"}}
 ```
 
 The message does not include request data. Clients should branch on the code,
@@ -277,7 +278,7 @@ not the message.
 | --- | --- |
 | `unauthorized` | The peer UID does not match the configured operator, or peer credentials could not be read. |
 | `invalid_request` | The frame is empty, not UTF-8, malformed TOML, has a missing or malformed field, or has an unsupported field. |
-| `unsupported_version` | The request has a 16-bit unsigned protocol version other than 1. |
+| `unsupported_version` | The request has a 16-bit unsigned protocol version other than 2. |
 | `frame_too_large` | The request payload exceeds 262,144 bytes. |
 | `truncated_frame` | The frame header or payload ended before the declared length. |
 | `read_timeout` | The client did not complete a frame read before the configured timeout. |

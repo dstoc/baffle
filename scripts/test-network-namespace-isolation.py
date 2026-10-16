@@ -513,15 +513,15 @@ def main() -> None:
         route_probe_port = start_route_probe(processes, daemon_ns)
         request = textwrap.dedent(
             f'''\
-            version = 1
+            version = 2
             operation = "create"
 
             [session]
+            version = 2
             persistent = true
             socket_name = "cladding/namespace.sock"
 
-            [[rules]]
-            host = "localhost"
+[session.rules."localhost"]
             mode = "tunnel"
             ports = [{upstream_port}]
             '''

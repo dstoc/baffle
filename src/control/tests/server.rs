@@ -136,7 +136,7 @@ async fn refuses_unentitled_secret_before_creating_a_session() {
         .uid();
     let control_state = Arc::new(state(directory.path(), uid, &[]));
     let (mut client, task) = connect_handler(&listener, Arc::clone(&control_state)).await;
-    let request = "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n";
+    let request = "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"";
     write_request(&mut client, request).await;
     let (body, response) = read_response(&mut client).await;
 
@@ -167,7 +167,7 @@ async fn provisioning_limit_rejects_an_excess_create_request() {
     let (mut client, task) = connect_handler(&listener, Arc::clone(&control_state)).await;
     write_request(
         &mut client,
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"busy.example.test\"\nmode = \"tunnel\"\n",
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"busy.example.test\"]\nmode = \"tunnel\"",
     )
     .await;
     let (_, response) = read_response(&mut client).await;
@@ -193,7 +193,7 @@ async fn authorized_create_keeps_secret_private_from_control_responses() {
     let socket = directory.path().join("control.sock");
     let listener = UnixListener::bind(&socket).expect("test socket should bind");
     let (mut client, task) = connect_handler(&listener, Arc::clone(&state)).await;
-    let request = "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"example.com\"\nmode = \"intercept\"\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n";
+    let request = "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"";
     write_request(&mut client, request).await;
     let (body, response) = read_response(&mut client).await;
     task.await.expect("control handler should finish");

@@ -154,7 +154,7 @@ directory = "{secrets}"
     );
     assert!(control_socket.exists(), "daemon should bind control socket");
 
-    let request = b"version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"shutdown.example.test\"\nmode = \"tunnel\"\n";
+    let request = b"version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"shutdown.example.test\"]\nmode = \"tunnel\"";
     let mut control = UnixStream::connect(&control_socket).expect("control client should connect");
     control
         .write_all(&(request.len() as u32).to_be_bytes())

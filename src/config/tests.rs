@@ -44,16 +44,25 @@ username = "x-access-token"
 "#;
 
 const MINIMAL_CREATE: &str = r#"
-version = 1
+version = 2
 operation = "create"
 
 [session]
+version = 2
 
-[[rules]]
-host = "Example.COM."
+[session.rules."Example.COM."]
 mode = "intercept"
 "#;
 
 fn config_with(rule: &str) -> String {
-    format!("version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\n{rule}\n")
+    let mut lines = rule.lines();
+    let first = lines.next().unwrap_or_default();
+    let (host, fields) = if let Some(host) = first.strip_prefix("host = ") {
+        (host, lines.collect::<Vec<_>>().join("\n"))
+    } else {
+        ("\"example.com\"", rule.to_owned())
+    };
+    format!(
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.{host}]\n{fields}\n"
+    )
 }

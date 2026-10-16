@@ -68,14 +68,21 @@ fn control_listener_handles_requests_and_rejects_bad_connections() {
     );
 
     assert!(
-        request(&daemon.socket, "version = 1\noperation = \"list\"\n")["ok"]
+        request(&daemon.socket, "version = 2\noperation = \"list\"\n")["ok"]
             .as_bool()
             .unwrap()
     );
 
-    let response = request(&daemon.socket, "version = 2\noperation = \"list\"\n");
+    let response = request(
+        &daemon.socket,
+        "version = 1\noperation = \"create\"\n\n[session]\n\npersistent = true\n\n[[rules]]\nhost = \"old.example\"\nmode = \"tunnel\"\n",
+    );
     assert_eq!(response["error"]["code"], "unsupported_version");
-    let response = request(&daemon.socket, "version = 1\noperation = \"unknown\"\n");
+    assert_eq!(
+        response["error"]["message"],
+        "protocol version is not supported"
+    );
+    let response = request(&daemon.socket, "version = 2\noperation = \"unknown\"\n");
     assert_eq!(response["error"]["code"], "invalid_request");
 
     let mut oversized = UnixStream::connect(&daemon.socket).expect("client should connect");
@@ -109,7 +116,7 @@ fn control_listener_handles_requests_and_rejects_bad_connections() {
     assert_eq!(read_response(&mut stalled)["error"]["code"], "read_timeout");
 
     assert!(
-        request(&daemon.socket, "version = 1\noperation = \"list\"\n")["ok"]
+        request(&daemon.socket, "version = 2\noperation = \"list\"\n")["ok"]
             .as_bool()
             .unwrap()
     );
@@ -118,7 +125,7 @@ fn control_listener_handles_requests_and_rejects_bad_connections() {
     multiple
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("client timeout should be set");
-    let frame = encode_frame(b"version = 1\noperation = \"list\"\n");
+    let frame = encode_frame(b"version = 2\noperation = \"list\"\n");
     multiple
         .write_all(&[frame.as_slice(), frame.as_slice()].concat())
         .expect("two requests should be written");
@@ -198,7 +205,7 @@ fn control_listener_handles_requests_and_rejects_bad_connections() {
 
     let stopped = request(
         &daemon.socket,
-        &format!("version = 1\noperation = \"stop\"\nsession_id = \"{persistent_id}\"\n"),
+        &format!("version = 2\noperation = \"stop\"\nsession_id = \"{persistent_id}\"\n"),
     );
     assert_eq!(stopped["result"]["stopped"], true);
     assert!(
@@ -245,7 +252,7 @@ fn file_only_creates_nested_sessions_from_fresh_policy_snapshots_and_keeps_ephem
     assert_eq!(
         request(
             &daemon.socket,
-            "version = 1\noperation = \"create_from_file\"\nname = \"cladding/github.toml\"\n",
+            "version = 2\noperation = \"create_from_file\"\nname = \"cladding/github.toml\"\n",
         )["error"]["code"],
         "config_file_invalid"
     );
@@ -427,7 +434,7 @@ fn file_backed_reload_keeps_old_tunnels_and_cuts_over_new_connections_and_socket
     drop(old_tunnel);
     let stopped = request(
         &daemon.socket,
-        &format!("version = 1\noperation = \"stop\"\nsession_id = {session_id:?}\n"),
+        &format!("version = 2\noperation = \"stop\"\nsession_id = {session_id:?}\n"),
     );
     assert_eq!(stopped["result"]["stopped"], true);
     assert!(!current_socket.exists());
@@ -523,7 +530,7 @@ fn concurrent_reload_stop_and_creator_disconnect_do_not_resurrect_a_session() {
         stop_start.wait();
         request(
             &stop_control,
-            &format!("version = 1\noperation = \"stop\"\nsession_id = {stop_id:?}\n"),
+            &format!("version = 2\noperation = \"stop\"\nsession_id = {stop_id:?}\n"),
         )
     });
 
@@ -641,7 +648,7 @@ fn reload_failures_preserve_active_socket_and_reload_all_reports_each_file_sessi
             .join("second.toml"),
     )
     .expect("second policy should be removed before reload-all");
-    let all = request(&daemon.socket, "version = 1\noperation = \"reload_all\"\n");
+    let all = request(&daemon.socket, "version = 2\noperation = \"reload_all\"\n");
     assert_eq!(all["ok"], true);
     let results = all["result"]["results"]
         .as_array()
@@ -672,7 +679,7 @@ fn reload_failures_preserve_active_socket_and_reload_all_reports_each_file_sessi
     for id in [first_id, second_id] {
         let stopped = request(
             &daemon.socket,
-            &format!("version = 1\noperation = \"stop\"\nsession_id = {id:?}\n"),
+            &format!("version = 2\noperation = \"stop\"\nsession_id = {id:?}\n"),
         );
         assert_eq!(stopped["result"]["stopped"], true);
     }
@@ -734,7 +741,7 @@ fn credential_rotation_is_an_effective_change_and_unavailable_credentials_roll_b
 
     let stopped = request(
         &daemon.socket,
-        &format!("version = 1\noperation = \"stop\"\nsession_id = {id:?}\n"),
+        &format!("version = 2\noperation = \"stop\"\nsession_id = {id:?}\n"),
     );
     assert_eq!(stopped["result"]["stopped"], true);
 }
@@ -790,7 +797,7 @@ fn reload_limits_pinned_policy_generations_without_closing_old_tunnels() {
     }
     let stopped = request(
         &daemon.socket,
-        &format!("version = 1\noperation = \"stop\"\nsession_id = {id:?}\n"),
+        &format!("version = 2\noperation = \"stop\"\nsession_id = {id:?}\n"),
     );
     assert_eq!(stopped["result"]["stopped"], true);
     stop_origin.store(true, Ordering::Release);
@@ -818,14 +825,14 @@ fn file_only_rejects_unsafe_names_files_and_inline_creation_without_changing_fil
     assert_eq!(
         request(
             &daemon.socket,
-            "version = 1\noperation = \"create_from_file\"\nname = \"missing.toml\"\n",
+            "version = 2\noperation = \"create_from_file\"\nname = \"missing.toml\"\n",
         )["error"]["code"],
         "config_file_not_found"
     );
     assert_eq!(
         request(
             &daemon.socket,
-            "version = 1\noperation = \"create_from_file\"\nname = \"../outside/github.toml\"\n",
+            "version = 2\noperation = \"create_from_file\"\nname = \"../outside/github.toml\"\n",
         )["error"]["code"],
         "invalid_request"
     );
@@ -834,7 +841,7 @@ fn file_only_rejects_unsafe_names_files_and_inline_creation_without_changing_fil
     assert_eq!(
         request(
             &daemon.socket,
-            "version = 1\noperation = \"create_from_file\"\nname = \"invalid.toml\"\n",
+            "version = 2\noperation = \"create_from_file\"\nname = \"invalid.toml\"\n",
         )["error"]["code"],
         "config_file_invalid"
     );
@@ -842,7 +849,7 @@ fn file_only_rejects_unsafe_names_files_and_inline_creation_without_changing_fil
     assert_eq!(
         request(
             &daemon.socket,
-            "version = 1\noperation = \"create_from_file\"\nname = \"oversized.toml\"\n",
+            "version = 2\noperation = \"create_from_file\"\nname = \"oversized.toml\"\n",
         )["error"]["code"],
         "config_file_invalid"
     );
@@ -854,7 +861,7 @@ fn file_only_rejects_unsafe_names_files_and_inline_creation_without_changing_fil
     assert_eq!(
         request(
             &daemon.socket,
-            "version = 1\noperation = \"create_from_file\"\nname = \"unreadable.toml\"\n",
+            "version = 2\noperation = \"create_from_file\"\nname = \"unreadable.toml\"\n",
         )["error"]["code"],
         "config_file_unavailable"
     );
@@ -864,7 +871,7 @@ fn file_only_rejects_unsafe_names_files_and_inline_creation_without_changing_fil
     assert_eq!(
         request(
             &daemon.socket,
-            "version = 1\noperation = \"create_from_file\"\nname = \"linked.toml\"\n",
+            "version = 2\noperation = \"create_from_file\"\nname = \"linked.toml\"\n",
         )["error"]["code"],
         "config_file_unavailable"
     );
@@ -873,7 +880,7 @@ fn file_only_rejects_unsafe_names_files_and_inline_creation_without_changing_fil
     assert_eq!(
         request(
             &daemon.socket,
-            "version = 1\noperation = \"create_from_file\"\nname = \"redirected/github.toml\"\n",
+            "version = 2\noperation = \"create_from_file\"\nname = \"redirected/github.toml\"\n",
         )["error"]["code"],
         "config_file_unavailable"
     );
@@ -882,12 +889,12 @@ fn file_only_rejects_unsafe_names_files_and_inline_creation_without_changing_fil
         .expect("trusted configuration file should exist");
     let inline_create = request(
         &daemon.socket,
-        "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"replacement.example\"\nmode = \"tunnel\"\n",
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"replacement.example\"]\nmode = \"tunnel\"",
     );
     assert_eq!(inline_create["error"]["code"], "operation_not_allowed");
     let malformed_alternate = request(
         &daemon.socket,
-        "version = 1\noperation = \"create_from_file\"\nname = \"cladding/github.toml\"\n\n[session]\npersistent = true\n",
+        "version = 2\noperation = \"create_from_file\"\nname = \"cladding/github.toml\"\n\n[session]\npersistent = true\n",
     );
     assert_eq!(malformed_alternate["error"]["code"], "invalid_request");
     assert_eq!(
@@ -939,7 +946,7 @@ fn file_only_keeps_the_config_directory_descriptor_across_rename_and_allows_auth
     assert_eq!(list_sessions(&daemon.socket).len(), 1);
     let stopped = request(
         &daemon.socket,
-        &format!("version = 1\noperation = \"stop\"\nsession_id = \"{persistent_id}\"\n"),
+        &format!("version = 2\noperation = \"stop\"\nsession_id = \"{persistent_id}\"\n"),
     );
     assert_eq!(stopped["result"]["stopped"], true);
     assert!(!persistent_socket.exists());
@@ -951,7 +958,7 @@ fn file_only_rolls_back_when_runtime_provisioning_fails() {
     write_session_policy(&daemon, "rollback.toml", "rollback.example.test", true);
     let failed = request(
         &daemon.socket,
-        "version = 1\noperation = \"create_from_file\"\nname = \"rollback.toml\"\n",
+        "version = 2\noperation = \"create_from_file\"\nname = \"rollback.toml\"\n",
     );
     assert_eq!(failed["error"]["code"], "internal_error");
     assert!(list_sessions(&daemon.socket).is_empty());
@@ -972,7 +979,7 @@ fn failed_session_creation_leaves_no_socket_or_registry_entry() {
     let daemon = start_daemon_with_socket_dir(250, &"s".repeat(80));
     let failed = request(
         &daemon.socket,
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"rollback.example.test\"\nmode = \"tunnel\"\n",
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"rollback.example.test\"]\nmode = \"tunnel\"",
     );
     assert_eq!(failed["error"]["code"], "internal_error");
     assert!(list_sessions(&daemon.socket).is_empty());
@@ -1018,7 +1025,7 @@ fn daemon_reclaims_stale_control_and_session_sockets_after_crash() {
         "a second daemon must not remove an active control socket"
     );
     assert_eq!(
-        request(&daemon.socket, "version = 1\noperation = \"list\"\n")["ok"],
+        request(&daemon.socket, "version = 2\noperation = \"list\"\n")["ok"],
         true,
         "the active daemon should remain available"
     );
@@ -1084,7 +1091,7 @@ fn daemon_reclaims_stale_control_and_session_sockets_after_crash() {
     assert_eq!(remaining_entries.len(), 1);
     assert_eq!(remaining_entries[0].file_name(), "cladding");
     assert_eq!(
-        request(&daemon.socket, "version = 1\noperation = \"list\"\n")["ok"],
+        request(&daemon.socket, "version = 2\noperation = \"list\"\n")["ok"],
         true
     );
 
@@ -1157,7 +1164,7 @@ fn concurrent_daemon_restarts_preserve_the_live_control_socket() {
             .ok()
             .and_then(|mut stream| {
                 stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
-                write_frame(&mut stream, b"version = 1\noperation = \"list\"\n");
+                write_frame(&mut stream, b"version = 2\noperation = \"list\"\n");
                 Some(read_response(&mut stream)["ok"] == true)
             })
             .unwrap_or(false);
@@ -1175,7 +1182,7 @@ fn concurrent_daemon_restarts_preserve_the_live_control_socket() {
     assert_eq!(
         request(
             &crashed_daemon.socket,
-            "version = 1\noperation = \"list\"\n"
+            "version = 2\noperation = \"list\"\n"
         )["ok"],
         true,
         "the surviving daemon should retain its control socket"
@@ -1317,7 +1324,7 @@ fn create_session(control_socket: &PathBuf, persistent: bool, host: &str) -> (Un
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("client timeout should be set");
     let body = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n\n[[rules]]\nhost = \"{host}\"\nmode = \"tunnel\"\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = {persistent}\n\n[session.rules.\"{host}\"]\nmode = \"tunnel\""
     );
     write_frame(&mut control, body.as_bytes());
     let response = read_response(&mut control);
@@ -1336,7 +1343,7 @@ fn create_named_session(
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("client timeout should be set");
     let body = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\nsocket_name = {socket_name:?}\n\n[[rules]]\nhost = {host:?}\nmode = \"tunnel\"\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = {persistent}\nsocket_name = {socket_name:?}\n\n[session.rules.{host:?}]\nmode = \"tunnel\""
     );
     write_frame(&mut control, body.as_bytes());
     let response = read_response(&mut control);
@@ -1349,7 +1356,7 @@ fn create_from_file(control_socket: &PathBuf, name: &str) -> (UnixStream, Value)
     control
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("client timeout should be set");
-    let body = format!("version = 1\noperation = \"create_from_file\"\nname = {name:?}\n");
+    let body = format!("version = 2\noperation = \"create_from_file\"\nname = {name:?}\n");
     write_frame(&mut control, body.as_bytes());
     let response = read_response(&mut control);
     (control, response)
@@ -1431,7 +1438,7 @@ fn intercept_policy_with_secret(host: &str, persistent: bool) -> String {
 fn reload_session(control_socket: &PathBuf, session_id: &str) -> Value {
     request(
         control_socket,
-        &format!("version = 1\noperation = \"reload\"\nsession_id = {session_id:?}\n"),
+        &format!("version = 2\noperation = \"reload\"\nsession_id = {session_id:?}\n"),
     )
 }
 
@@ -1511,7 +1518,7 @@ fn write_session_policy_contents(daemon: &DaemonProcess, name: &str, contents: &
 }
 
 fn list_sessions(control_socket: &PathBuf) -> Vec<Value> {
-    request(control_socket, "version = 1\noperation = \"list\"\n")["result"]["sessions"]
+    request(control_socket, "version = 2\noperation = \"list\"\n")["result"]["sessions"]
         .as_array()
         .expect("list should return a session array")
         .clone()

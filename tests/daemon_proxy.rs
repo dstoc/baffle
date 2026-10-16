@@ -244,7 +244,7 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
     wait_for_path(&ephemeral_socket, false).await;
     timeout(Duration::from_secs(3), async {
         loop {
-            let (_, listed) = daemon.request("version = 1\noperation = \"list\"\n");
+            let (_, listed) = daemon.request("version = 2\noperation = \"list\"\n");
             if listed["result"]["sessions"].as_array().unwrap().len() == 1 {
                 break;
             }
@@ -271,7 +271,7 @@ async fn real_daemon_uses_isolated_unix_sockets_for_tunnel_sessions_and_leases()
     fs::write(&persistent_socket, b"replacement file")
         .expect("test should place an unrelated file at the old socket path");
     let (_, stopped) = daemon.request(&format!(
-        "version = 1\noperation = \"stop\"\nsession_id = \"{session_id}\"\n"
+        "version = 2\noperation = \"stop\"\nsession_id = \"{session_id}\"\n"
     ));
     assert_eq!(stopped["result"]["stopped"], true);
     assert_eq!(
@@ -369,7 +369,7 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
         .map(PathBuf::from)
         .expect("v2 CLI create should print the proxy socket");
 
-    let (_, listed) = daemon.request("version = 1\noperation = \"list\"\n");
+    let (_, listed) = daemon.request("version = 2\noperation = \"list\"\n");
     let listed = serde_json::to_string(&listed).expect("session list should serialize");
     assert!(!listed.contains("api-token"));
     assert!(!listed.contains("daemon-only-token-42"));
@@ -465,7 +465,7 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
     assert!(!logs.contains("unentitled-secret-value"));
 
     let (_, stopped) = daemon.request(&format!(
-        "version = 1\noperation = \"stop\"\nsession_id = \"{id}\"\n"
+        "version = 2\noperation = \"stop\"\nsession_id = \"{id}\"\n"
     ));
     assert_eq!(stopped["result"]["stopped"], true);
     wait_for_path(&proxy_socket, false).await;
@@ -550,7 +550,7 @@ async fn real_daemon_applies_v2_inferred_interception_and_policy_through_file_re
     daemon.write_session_config(config_name, &reloaded_config);
     let (_, reloaded) = daemon.request(&reload_request(&id));
     assert_eq!(reloaded["result"]["status"], "reloaded", "{reloaded}");
-    let (_, listed) = daemon.request("version = 1\noperation = \"list\"\n");
+    let (_, listed) = daemon.request("version = 2\noperation = \"list\"\n");
     assert_eq!(listed["result"]["sessions"][0]["generation"], 2);
 
     if cfg!(baffle_integration_test) {
@@ -596,7 +596,7 @@ async fn real_daemon_applies_v2_inferred_interception_and_policy_through_file_re
     let logs = fs::read_to_string(&daemon.log_path).expect("daemon log should be readable");
     assert!(!logs.contains("v2-daemon-token-73"));
     let (_, stopped) = daemon.request(&format!(
-        "version = 1\noperation = \"stop\"\nsession_id = {id:?}\n"
+        "version = 2\noperation = \"stop\"\nsession_id = {id:?}\n"
     ));
     assert_eq!(stopped["result"]["stopped"], true);
     wait_for_path(&proxy_socket, false).await;
@@ -714,7 +714,7 @@ async fn real_daemon_reloads_unmatched_tunnel_policy_without_cancelling_connecti
         .as_str()
         .expect("generic session should have an ID");
     let (_, stopped) = daemon.request(&format!(
-        "version = 1\noperation = \"stop\"\nsession_id = {generic_id:?}\n"
+        "version = 2\noperation = \"stop\"\nsession_id = {generic_id:?}\n"
     ));
     assert_eq!(stopped["result"]["stopped"], true, "{stopped}");
 
@@ -1378,13 +1378,13 @@ async fn wait_for_path(path: &Path, expected: bool) {
 
 fn tunnel_session(persistent: bool, port: u16) -> String {
     format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = {persistent}\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{port}]\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = {persistent}\n\n[session.rules.\"localhost\"]\nmode = \"tunnel\"\nports = [{port}]"
     )
 }
 
 fn injected_session(host: &str, port: u16, secret: &str) -> String {
     format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"{host}\"\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"{secret}\"\nformat = \"bearer\"\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"{host}\"]\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]\n\n[[session.rules.\"{host}\".inject]]\nheader = \"Authorization\"\nsecret = \"{secret}\"\nformat = \"bearer\""
     )
 }
 
@@ -1395,7 +1395,7 @@ fn v2_injected_session(port: u16, path: &str, socket_name: &str) -> String {
 }
 
 fn reload_request(id: &str) -> String {
-    format!("version = 1\noperation = \"reload\"\nsession_id = {id:?}\n")
+    format!("version = 2\noperation = \"reload\"\nsession_id = {id:?}\n")
 }
 
 fn write_upstream_certificates(directory: &Path) -> (PathBuf, Vec<u8>, Vec<u8>) {

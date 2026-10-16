@@ -82,7 +82,7 @@ pub(super) fn upstream_root() -> (String, String, Vec<u8>) {
 
 pub(super) fn intercept_session(port: u16) -> SessionConfig {
     let input = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"proxy-token\"\nformat = \"bearer\"\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"localhost\"]\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]\n\n[[session.rules.\"localhost\".inject]]\nheader = \"Authorization\"\nsecret = \"proxy-token\"\nformat = \"bearer\""
     );
     let ControlRequest::Create { session, .. } =
         ControlRequest::from_toml(&input).expect("interception session should parse")
@@ -94,7 +94,7 @@ pub(super) fn intercept_session(port: u16) -> SessionConfig {
 
 pub(super) fn intercept_session_with_path(port: u16, path: &str) -> SessionConfig {
     let input = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [{port}]\npaths = [{path:?}]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"proxy-token\"\nformat = \"bearer\"\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"localhost\"]\nmode = \"intercept\"\nports = [{port}]\npaths = [{path:?}]\n\n[[session.rules.\"localhost\".inject]]\nheader = \"Authorization\"\nsecret = \"proxy-token\"\nformat = \"bearer\""
     );
     let ControlRequest::Create { session, .. } =
         ControlRequest::from_toml(&input).expect("interception policy should parse")
@@ -106,7 +106,7 @@ pub(super) fn intercept_session_with_path(port: u16, path: &str) -> SessionConfi
 
 pub(super) fn tunnel_session(port: u16) -> SessionConfig {
     let input = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{port}]\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"localhost\"]\nmode = \"tunnel\"\nports = [{port}]"
     );
     let ControlRequest::Create { session, .. } =
         ControlRequest::from_toml(&input).expect("tunnel session should parse")

@@ -98,13 +98,14 @@ pub struct HeaderInjection {
     pub format: InjectionFormat,
     pub username: Option<String>,
 }
-pub(super) fn validate_rules(raw_rules: Vec<RawHostRule>) -> Result<Vec<HostRule>, ConfigError> {
+pub(super) fn validate_named_rules(
+    raw_rules: BTreeMap<String, RawNamedRule>,
+) -> Result<Vec<HostRule>, ConfigError> {
     let mut hosts = HashSet::new();
     let mut rules = Vec::with_capacity(raw_rules.len());
-    for (index, raw) in raw_rules.into_iter().enumerate() {
+    for (index, (raw_host, raw)) in raw_rules.into_iter().enumerate() {
         let context = format!("rules[{index}]");
-        let RawHostRule {
-            host: raw_host,
+        let RawNamedRule {
             mode: raw_mode,
             ports,
             paths: raw_paths,
@@ -219,23 +220,6 @@ pub(super) fn validate_rules(raw_rules: Vec<RawHostRule>) -> Result<Vec<HostRule
     }
 
     Ok(rules)
-}
-
-pub(super) fn validate_named_rules(
-    raw_rules: BTreeMap<String, RawNamedRule>,
-) -> Result<Vec<HostRule>, ConfigError> {
-    validate_rules(
-        raw_rules
-            .into_iter()
-            .map(|(host, raw)| RawHostRule {
-                host,
-                mode: raw.mode,
-                ports: raw.ports,
-                paths: raw.paths,
-                inject: raw.inject,
-            })
-            .collect(),
-    )
 }
 
 fn validate_hostname(input: &str) -> Result<String, &'static str> {
@@ -474,20 +458,6 @@ fn validate_basic_username(input: &str) -> Result<(), &'static str> {
     }
     Ok(())
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct RawHostRule {
-    host: String,
-    #[serde(default)]
-    mode: Option<RuleMode>,
-    #[serde(default = "default_ports")]
-    ports: Vec<u16>,
-    #[serde(default)]
-    paths: Option<Vec<RawPathRule>>,
-    #[serde(default)]
-    inject: Option<Vec<RawHeaderInjection>>,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawNamedRule {

@@ -4,6 +4,7 @@
 //! use daemon runtime types.
 
 use std::{
+    collections::BTreeMap,
     error::Error,
     fmt, io,
     path::{Path, PathBuf},
@@ -17,7 +18,9 @@ use tokio::{
 };
 
 /// The protocol version implemented by this client.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
+
+const SESSION_CONFIG_VERSION: u16 = 2;
 
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -48,16 +51,7 @@ impl Client {
     /// ephemeral. Dropping or closing that handle releases the lease. A
     /// persistent session returns without retaining the control connection.
     pub async fn create(&self, config: SessionConfig) -> Result<Session, ClientError> {
-        let request = CreateRequest {
-            version: PROTOCOL_VERSION,
-            operation: "create",
-            session: SessionSettings {
-                persistent: config.persistent,
-                socket_name: config.socket_name,
-                unmatched: config.unmatched,
-            },
-            rules: config.rules,
-        };
+        let request = CreateRequest::new(config)?;
         let mut stream = self.open_control().await?;
         let response = exchange(&mut stream, &request).await?;
         let created: CreateResult = success_result(response)?;
@@ -516,8 +510,39 @@ impl Error for ClientError {
 struct CreateRequest {
     version: u16,
     operation: &'static str,
-    session: SessionSettings,
-    rules: Vec<HostRule>,
+    session: SessionConfigWire,
+}
+
+impl CreateRequest {
+    fn new(config: SessionConfig) -> Result<Self, ClientError> {
+        let mut rules = BTreeMap::new();
+        for rule in config.rules {
+            let host = rule.host.clone();
+            let value = NamedHostRule {
+                mode: rule.mode,
+                ports: rule.ports,
+                paths: rule.paths,
+                inject: rule.inject,
+            };
+            if rules.insert(host, value).is_some() {
+                return Err(ClientError::Protocol(
+                    "session configuration contains duplicate host rules".into(),
+                ));
+            }
+        }
+
+        Ok(Self {
+            version: PROTOCOL_VERSION,
+            operation: "create",
+            session: SessionConfigWire {
+                version: SESSION_CONFIG_VERSION,
+                persistent: config.persistent,
+                socket_name: config.socket_name,
+                unmatched: config.unmatched,
+                rules,
+            },
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -528,12 +553,24 @@ struct CreateFromFileRequest<'a> {
 }
 
 #[derive(Serialize)]
-struct SessionSettings {
+struct SessionConfigWire {
+    version: u16,
     persistent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     socket_name: Option<String>,
     #[serde(skip_serializing_if = "UnmatchedHostPolicy::is_deny")]
     unmatched: UnmatchedHostPolicy,
+    rules: BTreeMap<String, NamedHostRule>,
+}
+
+#[derive(Serialize)]
+struct NamedHostRule {
+    mode: RuleMode,
+    ports: Vec<u16>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    inject: Vec<HeaderInjection>,
 }
 
 #[derive(Serialize)]
@@ -699,51 +736,34 @@ fn validate_session_config_name(name: &str) -> Result<(), ClientError> {
 mod tests {
     use super::{
         ClientError, CreateFromFileRequest, CreateRequest, HostRule, InjectionFormat,
-        SessionConfig, SessionSettings, UnmatchedHostPolicy, map_remote_error,
-        validate_session_config_name,
+        SessionConfig, UnmatchedHostPolicy, map_remote_error, validate_session_config_name,
     };
 
     #[test]
-    fn serializes_create_requests_with_the_v1_wire_shape() {
+    fn serializes_create_requests_with_the_current_session_schema() {
         let policy = SessionConfig::new()
             .persistent(true)
             .socket_name("cladding/github.sock")
             .with_rule(HostRule::intercept("api.example.com"));
-        let encoded = toml::to_string(&CreateRequest {
-            version: 1,
-            operation: "create",
-            session: SessionSettings {
-                persistent: true,
-                socket_name: policy.socket_name,
-                unmatched: policy.unmatched,
-            },
-            rules: policy.rules,
-        })
-        .expect("request should serialize");
+        let encoded = toml::to_string(&CreateRequest::new(policy).expect("request should build"))
+            .expect("request should serialize");
         assert!(encoded.contains("operation = \"create\""));
-        assert!(encoded.contains("version = 1"));
-        assert!(encoded.contains("[session]\npersistent = true"));
+        assert!(encoded.contains("version = 2"));
+        assert!(encoded.contains("[session]\nversion = 2\npersistent = true"));
         assert!(encoded.contains("socket_name = \"cladding/github.sock\""));
-        assert!(encoded.contains("[[rules]]"));
+        assert!(encoded.contains("[session.rules.\"api.example.com\"]"));
         assert!(encoded.contains("mode = \"intercept\""));
         assert!(encoded.contains("ports = [443]"));
+        assert!(!encoded.contains("[[rules]]"));
+        assert!(!encoded.contains("host = \"api.example.com\""));
         assert!(!encoded.contains("private_addresses"));
     }
 
     #[test]
     fn omits_socket_name_when_not_requested() {
         let policy = SessionConfig::new().with_rule(HostRule::tunnel("api.example.com"));
-        let encoded = toml::to_string(&CreateRequest {
-            version: 1,
-            operation: "create",
-            session: SessionSettings {
-                persistent: policy.persistent,
-                socket_name: policy.socket_name,
-                unmatched: policy.unmatched,
-            },
-            rules: policy.rules,
-        })
-        .expect("request should serialize");
+        let encoded = toml::to_string(&CreateRequest::new(policy).expect("request should build"))
+            .expect("request should serialize");
 
         assert!(!encoded.contains("socket_name"));
         assert!(!encoded.contains("unmatched"));
@@ -752,19 +772,21 @@ mod tests {
     #[test]
     fn serializes_opt_in_unmatched_tunneling_in_session_settings() {
         let policy = SessionConfig::new().unmatched_host_policy(UnmatchedHostPolicy::Tunnel);
-        let encoded = toml::to_string(&CreateRequest {
-            version: 1,
-            operation: "create",
-            session: SessionSettings {
-                persistent: policy.persistent,
-                socket_name: policy.socket_name,
-                unmatched: policy.unmatched,
-            },
-            rules: policy.rules,
-        })
-        .expect("request should serialize");
+        let encoded = toml::to_string(&CreateRequest::new(policy).expect("request should build"))
+            .expect("request should serialize");
 
         assert!(encoded.contains("unmatched = \"tunnel\""));
+    }
+
+    #[test]
+    fn rejects_duplicate_hosts_that_cannot_be_encoded_as_named_rules() {
+        let policy = SessionConfig::new()
+            .with_rule(HostRule::tunnel("api.example.com"))
+            .with_rule(HostRule::intercept("api.example.com"));
+        let error = CreateRequest::new(policy)
+            .err()
+            .expect("duplicate hosts must be rejected");
+        assert!(error.to_string().contains("duplicate host rules"));
     }
 
     #[test]
@@ -810,7 +832,7 @@ mod tests {
     #[test]
     fn serializes_file_create_and_validates_relative_toml_names() {
         let request = CreateFromFileRequest {
-            version: 1,
+            version: super::PROTOCOL_VERSION,
             operation: "create_from_file",
             name: "cladding/github.toml",
         };

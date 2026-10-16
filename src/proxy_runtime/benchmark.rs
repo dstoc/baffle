@@ -858,7 +858,7 @@ fn tls_material(ca: &ManagedCa) -> Result<(Vec<u8>, OriginMaterial), BenchError>
 
 fn intercept_session(port: u16) -> SessionConfig {
     let request = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]\n\n[[rules.inject]]\nheader = \"X-Bench-Token\"\nsecret = \"benchmark-token\"\nformat = \"raw\"\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"localhost\"]\nmode = \"intercept\"\nports = [{port}]\npaths = [\"/allowed\"]\n\n[[session.rules.\"localhost\".inject]]\nheader = \"X-Bench-Token\"\nsecret = \"benchmark-token\"\nformat = \"raw\""
     );
     let ControlRequest::Create { session, .. } =
         ControlRequest::from_toml(&request).expect("benchmark session policy should parse")
@@ -870,7 +870,7 @@ fn intercept_session(port: u16) -> SessionConfig {
 
 fn tunnel_session(port: u16) -> SessionConfig {
     let request = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\npersistent = true\n\n[[rules]]\nhost = \"localhost\"\nmode = \"tunnel\"\nports = [{port}]\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"localhost\"]\nmode = \"tunnel\"\nports = [{port}]"
     );
     let ControlRequest::Create { session, .. } =
         ControlRequest::from_toml(&request).expect("tunnel benchmark policy should parse")
