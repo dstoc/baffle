@@ -473,13 +473,9 @@ fn remove_stale_session_sockets(directory: &Path, expected_uid: u32) -> Result<(
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
-    let client_uid = match stream.peer_cred() {
-        Ok(credentials) if credentials.uid() == state.trusted_operator_uid => credentials.uid(),
-        Ok(_) => {
-            let _ = write_error(&mut stream, ERR_UNAUTHORIZED).await;
-            return;
-        }
-        Err(_) => {
+    match stream.peer_cred() {
+        Ok(credentials) if credentials.uid() == state.trusted_operator_uid => {}
+        _ => {
             let _ = write_error(&mut stream, ERR_UNAUTHORIZED).await;
             return;
         }
@@ -520,15 +516,7 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
             } else {
                 match state.provisioning_slots.clone().try_acquire_owned() {
                     Ok(permit) => {
-                        create_session_response(
-                            &state,
-                            client_uid,
-                            session,
-                            None,
-                            permit,
-                            &mut lease_id,
-                        )
-                        .await
+                        create_session_response(&state, session, None, permit, &mut lease_id).await
                     }
                     Err(_) => error_value(ERR_BUSY),
                 }
@@ -571,19 +559,11 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
                         return;
                     }
                 };
-                create_session_response(
-                    &state,
-                    client_uid,
-                    session,
-                    Some(name),
-                    permit,
-                    &mut lease_id,
-                )
-                .await
+                create_session_response(&state, session, Some(name), permit, &mut lease_id).await
             }
         }
         ControlRequest::Stop { session_id, .. } => {
-            if state.sessions.stop(&session_id, client_uid).await {
+            if state.sessions.stop(&session_id).await {
                 success(json!({ "stopped": true }))
             } else {
                 error_value(ERR_SESSION_NOT_FOUND)
@@ -594,7 +574,6 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
                 .sessions
                 .reload(
                     &session_id,
-                    client_uid,
                     state.session_configs.as_ref(),
                     &state.secret_store,
                 )
@@ -607,16 +586,12 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
         ControlRequest::ReloadAll { .. } => {
             let results = state
                 .sessions
-                .reload_all(
-                    client_uid,
-                    state.session_configs.as_ref(),
-                    &state.secret_store,
-                )
+                .reload_all(state.session_configs.as_ref(), &state.secret_store)
                 .await;
             success(json!({ "results": results }))
         }
         ControlRequest::List { .. } => success(json!({
-            "sessions": state.sessions.list(client_uid).await,
+            "sessions": state.sessions.list().await,
         })),
     };
 
@@ -638,24 +613,18 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
 
 async fn create_session_response(
     state: &ControlState,
-    client_uid: u32,
     session: SessionConfig,
     config_source: Option<String>,
     permit: tokio::sync::OwnedSemaphorePermit,
     lease_id: &mut Option<String>,
 ) -> Value {
-    let secrets = match state.secret_store.resolve(client_uid, &session) {
+    let secrets = match state.secret_store.resolve(&session) {
         Ok(secrets) => secrets,
-        Err(
-            SecretStoreError::UnauthorizedClient
-            | SecretStoreError::NotEntitled
-            | SecretStoreError::Unavailable,
-        ) => return error_value(ERR_SECRET_UNAVAILABLE),
+        Err(SecretStoreError::NotEntitled | SecretStoreError::Unavailable) => {
+            return error_value(ERR_SECRET_UNAVAILABLE);
+        }
     };
-    let result = state
-        .sessions
-        .create(client_uid, session, secrets, config_source)
-        .await;
+    let result = state.sessions.create(session, secrets, config_source).await;
     drop(permit);
     match result {
         Ok(created) => {

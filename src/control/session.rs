@@ -63,7 +63,6 @@ impl SessionManager {
 
     pub(super) async fn create(
         &self,
-        owner_uid: u32,
         session: SessionConfig,
         secrets: ResolvedSecrets,
         config_source: Option<String>,
@@ -144,7 +143,6 @@ impl SessionManager {
             id,
             ManagedSession {
                 info: info.clone(),
-                owner_uid,
                 configuration: session,
                 secrets,
                 config_source,
@@ -170,15 +168,12 @@ impl SessionManager {
         self.registry.lock().await.accepting_sessions = false;
     }
 
-    pub(super) async fn stop(&self, id: &str, owner_uid: u32) -> bool {
+    pub(super) async fn stop(&self, id: &str) -> bool {
         let reload_lock = {
             let registry = self.registry.lock().await;
             let Some(session) = registry.sessions.get(id) else {
                 return false;
             };
-            if session.owner_uid != owner_uid {
-                return false;
-            }
             Arc::clone(&session.reload_lock)
         };
         let _serial = reload_lock.lock().await;
@@ -187,9 +182,6 @@ impl SessionManager {
             let Some(session) = registry.sessions.get_mut(id) else {
                 return false;
             };
-            if session.owner_uid != owner_uid {
-                return false;
-            }
             if session.info.state == SessionLifecycle::Stopping {
                 return true;
             }
@@ -336,7 +328,7 @@ impl SessionManager {
         while shutdowns.join_next().await.is_some() {}
     }
 
-    pub(super) async fn list(&self, owner_uid: u32) -> Vec<SessionInfo> {
+    pub(super) async fn list(&self) -> Vec<SessionInfo> {
         let mut registry = self.registry.lock().await;
         for session in registry.sessions.values_mut() {
             session
@@ -347,7 +339,6 @@ impl SessionManager {
         let mut sessions = registry
             .sessions
             .values()
-            .filter(|session| session.owner_uid == owner_uid)
             .map(|session| session.info.clone())
             .collect::<Vec<_>>();
         sessions.sort_by(|left, right| left.id.cmp(&right.id));
@@ -365,7 +356,6 @@ pub(super) fn absolute_socket_path(path: &Path) -> io::Result<PathBuf> {
 
 pub(super) struct ManagedSession {
     pub(super) info: SessionInfo,
-    pub(super) owner_uid: u32,
     // Keep the validated configuration with its runtime. Secret values are
     // held separately and neither value is included in list responses.
     pub(super) configuration: SessionConfig,

@@ -26,15 +26,15 @@ async fn concurrent_provisioning_reservations_enforce_the_session_limit() {
     };
     let secret_store = SecretStore::new(directory.path().to_path_buf(), uid, Default::default());
     let first_secrets = secret_store
-        .resolve(uid, &session)
+        .resolve(&session)
         .expect("empty secret requirements should resolve");
     let second_secrets = secret_store
-        .resolve(uid, &session)
+        .resolve(&session)
         .expect("empty secret requirements should resolve");
 
     let (first, second) = tokio::join!(
-        manager.create(uid, session.clone(), first_secrets, None),
-        manager.create(uid, session.clone(), second_secrets, None),
+        manager.create(session.clone(), first_secrets, None),
+        manager.create(session.clone(), second_secrets, None),
     );
     assert_eq!(u8::from(first.is_ok()) + u8::from(second.is_ok()), 1);
     let created = match (first, second) {
@@ -42,19 +42,18 @@ async fn concurrent_provisioning_reservations_enforce_the_session_limit() {
         | (Err(SessionError::AtCapacity), Ok(created)) => created,
         _ => panic!("one create should reserve the only session slot"),
     };
-    assert_eq!(manager.list(uid).await.len(), 1);
+    assert_eq!(manager.list().await.len(), 1);
     assert!(matches!(
         manager
             .create(
-                uid,
                 session.clone(),
                 secret_store
-                    .resolve(uid, &session)
+                    .resolve(&session)
                     .expect("empty secret requirements should resolve"),
                 None,
             )
             .await,
         Err(super::SessionError::AtCapacity)
     ));
-    assert!(manager.stop(&created.id, uid).await);
+    assert!(manager.stop(&created.id).await);
 }
