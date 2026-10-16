@@ -267,3 +267,100 @@ async fn rejects_expired_upstream_certificate_through_running_proxy() -> Result<
     runtime.shutdown(Duration::from_secs(2)).await;
     Ok(())
 }
+
+#[tokio::test]
+async fn reuses_intercepted_leaf_certificates_within_runtime_and_keeps_ca_isolated()
+-> Result<(), TestError> {
+    let directory = tempfile::tempdir()?;
+    let ca = write_managed_ca(directory.path());
+    let (stable_origin, stable_task) =
+        start_tls_origin_connections(upstream_tls_config("localhost"), 3).await?;
+    let (different_origin, different_task) =
+        start_tls_origin_connections(upstream_tls_config("localhost"), 1).await?;
+    let ports = [stable_origin.port(), different_origin.port()]
+        .into_iter()
+        .map(|port| port.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let input = format!(
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"localhost\"]\nmode = \"intercept\"\nports = [{ports}]\npaths = [\"/allowed\"]\n\n[[session.rules.\"localhost\".inject]]\nheader = \"Authorization\"\nsecret = \"proxy-token\"\nformat = \"bearer\"\n"
+    );
+    let ControlRequest::Create { session, .. } = ControlRequest::from_toml(&input)? else {
+        panic!("expected create request");
+    };
+    let (runtime, _) = start_runtime_named(
+        directory.path(),
+        session.clone(),
+        Arc::clone(&ca),
+        "cache-test",
+        Duration::from_secs(2),
+    )
+    .await?;
+
+    let first = open_tls_client(
+        runtime.socket_path(),
+        &format!("localhost:{}", stable_origin.port()),
+        &ca,
+    )
+    .await?;
+    let first_leaf = first.get_ref().1.peer_certificates().unwrap()[0].to_vec();
+    drop(first);
+
+    let second = open_tls_client(
+        runtime.socket_path(),
+        &format!("localhost:{}", stable_origin.port()),
+        &ca,
+    )
+    .await?;
+    let second_leaf = second.get_ref().1.peer_certificates().unwrap()[0].to_vec();
+    drop(second);
+    assert_eq!(
+        first_leaf, second_leaf,
+        "the runtime should reuse the mirrored leaf for a stable upstream certificate"
+    );
+
+    let different = open_tls_client(
+        runtime.socket_path(),
+        &format!("localhost:{}", different_origin.port()),
+        &ca,
+    )
+    .await?;
+    let different_leaf = different.get_ref().1.peer_certificates().unwrap()[0].to_vec();
+    drop(different);
+    assert_ne!(
+        first_leaf, different_leaf,
+        "a distinct upstream certificate must receive distinct mirrored material"
+    );
+
+    let other_directory = tempfile::tempdir()?;
+    let other_ca = write_managed_ca(other_directory.path());
+    let (other_runtime, _) = start_runtime_named(
+        other_directory.path(),
+        session,
+        Arc::clone(&other_ca),
+        "other-cache-test",
+        Duration::from_secs(2),
+    )
+    .await?;
+    let other_session_leaf = open_tls_client(
+        other_runtime.socket_path(),
+        &format!("localhost:{}", stable_origin.port()),
+        &other_ca,
+    )
+    .await?
+    .get_ref()
+    .1
+    .peer_certificates()
+    .unwrap()[0]
+        .to_vec();
+    assert_ne!(
+        first_leaf, other_session_leaf,
+        "a separate runtime must issue leaves with its own CA"
+    );
+
+    runtime.shutdown(Duration::from_secs(2)).await;
+    other_runtime.shutdown(Duration::from_secs(2)).await;
+    timeout(Duration::from_secs(2), stable_task).await??;
+    timeout(Duration::from_secs(2), different_task).await??;
+    Ok(())
+}

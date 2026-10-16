@@ -20,7 +20,10 @@ use rama::{
         KeyLogIntent,
         boring::{
             client::{BoringClientConfigExt as _, TlsConnectorData},
-            proxy::TlsMitmRelay,
+            proxy::{
+                TlsMitmRelay,
+                cert_issuer::{CachedBoringMitmCertIssuer, InMemoryBoringMitmCertIssuer},
+            },
         },
         client::{ServerVerifyMode, TlsClientConfig},
         server::peek_client_hello_from_input_with_timeout_policy,
@@ -42,12 +45,23 @@ use crate::{
 use super::super::benchmark_tcp_nodelay_enabled;
 use super::{ProxyRuntimeError, http};
 
+pub(super) type CachedRelay =
+    TlsMitmRelay<CachedBoringMitmCertIssuer<InMemoryBoringMitmCertIssuer>>;
+
+pub(super) fn new_cached_relay(ca: &ManagedCa) -> Arc<CachedRelay> {
+    let (certificate, private_key) = ca.runtime_signing_material();
+    Arc::new(
+        TlsMitmRelay::new_cached_in_memory(certificate, private_key)
+            .with_keylog_intent(KeyLogIntent::Disabled),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn intercept_client<S>(
     mut client: S,
     policy: Arc<SessionPolicy>,
     secrets: Arc<ResolvedSecrets>,
-    ca: Arc<ManagedCa>,
+    relay: Arc<CachedRelay>,
     authority: String,
     destination: Destination,
     metrics: Arc<Metrics>,
@@ -113,7 +127,6 @@ where
             .map_err(|error| ProxyRuntimeError::Run(error.to_string()))?;
     }
 
-    let (certificate, private_key) = ca.runtime_signing_material();
     // Preserve the inspected ClientHello's ALPN and TLS parameters for the
     // upstream connection. Bind the verification identity to the authorized
     // CONNECT target rather than any client-supplied alternate identity.
@@ -140,8 +153,6 @@ where
     };
     let connector_data = TlsConnectorData::try_from(&egress_config)
         .map_err(|error| ProxyRuntimeError::Build(error.to_string()))?;
-    let relay = TlsMitmRelay::new_cached_in_memory(certificate, private_key)
-        .with_keylog_intent(KeyLogIntent::Disabled);
     let request_policy = http::RamaPolicyLayer {
         policy: Arc::clone(&policy),
         connect_authority: authority.clone(),

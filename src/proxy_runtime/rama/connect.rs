@@ -14,7 +14,6 @@ use tokio::{
 };
 
 use crate::{
-    ca::ManagedCa,
     config::RuleMode,
     policy::{Destination, SessionPolicy},
     secrets::ResolvedSecrets,
@@ -29,7 +28,7 @@ pub(super) async fn handle_client<S>(
     mut client: S,
     policy: Arc<SessionPolicy>,
     secrets: Arc<ResolvedSecrets>,
-    ca: Arc<ManagedCa>,
+    tls_relay: Arc<tls::CachedRelay>,
     metrics: Arc<Metrics>,
     io_timeout: Duration,
 ) -> Result<(), ProxyRuntimeError>
@@ -82,7 +81,7 @@ where
         client,
         policy,
         secrets,
-        ca,
+        tls_relay,
         parsed.authority,
         destination,
         metrics,
