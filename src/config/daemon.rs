@@ -14,7 +14,6 @@ const DEFAULT_MAX_CONNECTIONS_PER_SESSION: usize = 128;
 const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 5;
 const DEFAULT_CONTROL_READ_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_MAX_PROVISIONING_REQUESTS: usize = 8;
-const DEFAULT_CONNECTION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_IO_TIMEOUT_MS: u64 = 30_000;
 use super::{ConfigError, deserialize, policy::validate_allowed_secrets};
 
@@ -36,7 +35,6 @@ pub struct DaemonSettings {
     pub shutdown_grace_seconds: u64,
     pub control_read_timeout_ms: u64,
     pub max_provisioning_requests: usize,
-    pub connection_timeout_ms: u64,
     pub io_timeout_ms: u64,
     pub session_config_dir: Option<PathBuf>,
     pub create_mode: SessionCreateMode,
@@ -97,7 +95,6 @@ impl DaemonConfig {
             shutdown_grace_seconds: raw.daemon.shutdown_grace_seconds,
             control_read_timeout_ms: raw.daemon.control_read_timeout_ms,
             max_provisioning_requests: raw.daemon.max_provisioning_requests,
-            connection_timeout_ms: raw.daemon.connection_timeout_ms,
             io_timeout_ms: raw.daemon.io_timeout_ms,
             session_config_dir,
             create_mode: raw.daemon.create_mode,
@@ -201,8 +198,6 @@ struct RawDaemonSettings {
     control_read_timeout_ms: u64,
     #[serde(default = "default_max_provisioning_requests")]
     max_provisioning_requests: usize,
-    #[serde(default = "default_connection_timeout_ms")]
-    connection_timeout_ms: u64,
     #[serde(default = "default_io_timeout_ms")]
     io_timeout_ms: u64,
     #[serde(default)]
@@ -244,10 +239,6 @@ fn default_control_read_timeout_ms() -> u64 {
 
 fn default_max_provisioning_requests() -> usize {
     DEFAULT_MAX_PROVISIONING_REQUESTS
-}
-
-fn default_connection_timeout_ms() -> u64 {
-    DEFAULT_CONNECTION_TIMEOUT_MS
 }
 
 fn default_io_timeout_ms() -> u64 {
