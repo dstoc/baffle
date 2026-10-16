@@ -2,12 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use url::Host;
-
 use crate::config::{
     HeaderInjection, PathRule, RuleMode, SessionConfig, UnmatchedHostPolicy,
     canonicalize_request_path,
 };
+use crate::dns::normalize_dns_name;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthorizationError {
@@ -101,7 +100,7 @@ impl SessionPolicy {
         let Ok((mode, destination)) = self.authorize_connect_authority(authority, &[]) else {
             return false;
         };
-        let Some(server_name) = server_name.and_then(normalize_dns_name) else {
+        let Some(server_name) = server_name.and_then(|name| normalize_dns_name(name).ok()) else {
             return false;
         };
         mode == RuleMode::Intercept && server_name == destination.host
@@ -198,7 +197,7 @@ fn parse_authority_text(
     if port == 0 {
         return Err(AuthorizationError::InvalidAuthority);
     }
-    let host = normalize_dns_name(host).ok_or(AuthorizationError::InvalidAuthority)?;
+    let host = normalize_dns_name(host).map_err(|_| AuthorizationError::InvalidAuthority)?;
     Ok(Destination { host, port })
 }
 
@@ -219,35 +218,6 @@ fn canonical_authorized_path(
         return Err(AuthorizationError::Denied);
     }
     Ok(Some(canonical))
-}
-
-fn normalize_dns_name(input: &str) -> Option<String> {
-    if input.is_empty() || !input.is_ascii() || input.contains('%') {
-        return None;
-    }
-    let input = input.to_ascii_lowercase();
-    let input = input.strip_suffix('.').unwrap_or(&input);
-    if input.is_empty() || input.len() > 253 {
-        return None;
-    }
-
-    // URL host parsing rejects non-canonical IP literals such as `127.1`.
-    let Host::Domain(host) = Host::parse(input).ok()? else {
-        return None;
-    };
-    for label in host.split('.') {
-        if label.is_empty()
-            || label.len() > 63
-            || label.starts_with('-')
-            || label.ends_with('-')
-            || !label
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return None;
-        }
-    }
-    Some(host)
 }
 
 #[cfg(test)]
