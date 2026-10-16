@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use baffle_proxy::client::{Client, HostRule, SessionConfig};
+use baffle_proxy::client::{Client, HostRule, SessionConfig, default_control_socket};
 use std::path::PathBuf;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -58,22 +58,4 @@ async fn main() -> Result<()> {
     // the proxy session.
     session.close();
     Ok(())
-}
-
-fn default_control_socket() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                // SAFETY: geteuid has no preconditions and does not access memory.
-                let uid = unsafe { libc::geteuid() };
-                PathBuf::from(format!("/tmp/baffle-{uid}"))
-            })
-            .join("Library/Caches/Baffle/control.sock")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        PathBuf::from("/run/baffle/control.sock")
-    }
 }

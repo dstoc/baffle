@@ -7,26 +7,9 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use baffle_client::{
     Client, ClientError, HeaderInjection, HostRule, InjectionFormat, ReloadResult, ReloadStatus,
-    RuleMode, Session, SessionConfig, SessionInfo,
+    RuleMode, Session, SessionConfig, SessionInfo, default_control_socket,
 };
 use clap::{ArgGroup, Args, Parser, Subcommand};
-
-#[cfg(not(target_os = "macos"))]
-fn default_control_socket() -> PathBuf {
-    PathBuf::from("/run/baffle/control.sock")
-}
-
-#[cfg(target_os = "macos")]
-fn default_control_socket() -> PathBuf {
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            // SAFETY: geteuid has no preconditions and does not access memory.
-            let uid = unsafe { libc::geteuid() };
-            PathBuf::from(format!("/tmp/baffle-{uid}"))
-        });
-    base.join("Library/Caches/Baffle/control.sock")
-}
 
 #[derive(Debug, Parser)]
 #[command(
