@@ -11,7 +11,7 @@ DEPENDENCY_SECTIONS = {"dependencies", "dev-dependencies", "build-dependencies"}
 
 
 class ReleasePleaseManifestTests(unittest.TestCase):
-    def test_release_workflow_validates_generated_pull_request(self):
+    def test_release_workflow_validates_generated_pull_request_without_mutation(self):
         workflow = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
         ci_workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
 
@@ -47,22 +47,19 @@ class ReleasePleaseManifestTests(unittest.TestCase):
         self.assertIn(
             "run: python3 -m unittest scripts.test_release_please_outputs", workflow
         )
+        self.assertIn("validate-release-candidates:", workflow)
         self.assertIn(
             "if: ${{ needs.release-please.result == 'success' && needs.release-please.outputs.prs_created == 'true' }}",
             workflow,
         )
         self.assertIn("cargo metadata --locked --format-version 1", workflow)
-        self.assertIn("python3 scripts/sync_release_please_candidate.py", workflow)
-        self.assertIn("crates/baffle-client/Cargo.toml", workflow)
         self.assertIn(
-            "python3 -m unittest scripts.test_release_please_manifests scripts.test_release_please_candidate",
+            "python3 -m unittest scripts.test_release_please_manifests scripts.test_publish_crates",
             workflow,
         )
-        self.assertLess(
-            workflow.index("python3 scripts/sync_release_please_candidate.py"),
-            workflow.index("cargo metadata --locked --format-version 1"),
-        )
-        self.assertIn('git push origin "HEAD:${RELEASE_PR_BRANCH}"', workflow)
+        self.assertNotIn("sync_release_please_candidate.py", workflow)
+        self.assertNotIn("git push origin", workflow)
+        self.assertNotIn("git commit -m", workflow)
         self.assertIn(
             "name: Dispatch Rust CI for generated release candidate", workflow
         )
@@ -76,11 +73,7 @@ class ReleasePleaseManifestTests(unittest.TestCase):
             ),
             1,
         )
-        self.assertLess(
-            workflow.index("name: Commit synchronized release candidate"),
-            workflow.index("name: Dispatch Rust CI for generated release candidate"),
-        )
-        self.assertIn("needs.synchronize-release-candidates.result == 'skipped'", workflow)
+        self.assertIn("needs.validate-release-candidates.result == 'skipped'", workflow)
 
     def test_historical_release_validation_uses_current_workflow_fixture_checkout(self):
         workflow = (REPO_ROOT / ".github/workflows/release-please.yml").read_text()
