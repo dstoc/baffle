@@ -164,9 +164,43 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build Baffle and run CLI version check
+        env:
+          RUST_BACKTRACE: "1"
+          CARGO_TERM_COLOR: never
+        shell: bash
         run: |
-          cargo build --locked --target aarch64-apple-darwin --bin baffle
-          ./target/aarch64-apple-darwin/debug/baffle --version
+          set -o pipefail
+          set +e
+          cargo build --locked --target aarch64-apple-darwin --bin baffle \
+            2>&1 | tee "$RUNNER_TEMP/macos-unix-integration.log"
+          build_status=$?
+          if (( build_status == 0 )); then
+            ./target/aarch64-apple-darwin/debug/baffle --version \
+              2>&1 | tee -a "$RUNNER_TEMP/macos-unix-integration.log"
+            build_status=$?
+          fi
+          set -e
+          if (( build_status != 0 )); then
+            python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          log_path = Path(os.environ["RUNNER_TEMP"]) / "macos-unix-integration.log"
+          output = log_path.read_text(encoding="utf-8", errors="replace")
+          details = "\n".join(output.splitlines()[-100:])
+          message = "Native build failure details:\n" + details
+          message = (
+              message.replace("%", "%25")
+              .replace("\r", "%0D")
+              .replace("\n", "%0A")
+          )
+          print(
+              "::error file=.github/workflows/ci.yml,line=140,title=Native macOS build failure::"
+              + message
+          )
+          PY
+          fi
+          exit "$build_status"
 
       - name: Run native daemon, policy, lease, and Unix proxy integration
         env:
