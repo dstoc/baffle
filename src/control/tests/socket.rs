@@ -94,6 +94,55 @@ fn recursively_removes_stale_owned_sockets_without_following_symlinks() {
 }
 
 #[test]
+fn preserves_outside_sockets_when_nested_directory_is_replaced_after_open() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+        .expect("socket directory should be private");
+    let uid = fs::metadata(directory.path())
+        .expect("socket directory metadata should be readable")
+        .uid();
+
+    let nested = directory.path().join("cladding");
+    fs::create_dir(&nested).expect("nested socket directory should be created");
+    let nested_socket = nested.join("inside.sock");
+    drop(UnixListener::bind(&nested_socket).expect("nested stale socket should bind"));
+
+    let outside = tempfile::tempdir().expect("outside directory should be created");
+    fs::set_permissions(outside.path(), fs::Permissions::from_mode(0o700))
+        .expect("outside directory should be private");
+    let outside_socket = outside.path().join("outside.sock");
+    drop(UnixListener::bind(&outside_socket).expect("outside stale socket should bind"));
+
+    let detached = directory.path().join("detached");
+    let root = super::open_socket_directory(directory.path())
+        .expect("session socket directory should open");
+    let mut replaced = false;
+    super::remove_stale_session_sockets_at(&root, directory.path(), uid, &mut |path| {
+        if path == nested && !replaced {
+            fs::rename(path, &detached).expect("opened nested directory should be detached");
+            std::os::unix::fs::symlink(outside.path(), path)
+                .expect("nested path should become a symlink to the outside directory");
+            replaced = true;
+        }
+    })
+    .expect("cleanup should remain confined to opened directories");
+
+    assert!(replaced, "test should replace the opened nested directory");
+    assert!(
+        nested.symlink_metadata().unwrap().file_type().is_symlink(),
+        "replacement symlink should remain"
+    );
+    assert!(
+        !detached.join("inside.sock").exists(),
+        "cleanup should remove the stale socket from the pinned directory"
+    );
+    assert!(
+        outside_socket.exists(),
+        "cleanup must preserve a socket outside the configured directory"
+    );
+}
+
+#[test]
 fn preserves_session_sockets_owned_by_another_uid() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))

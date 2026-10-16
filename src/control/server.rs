@@ -1,9 +1,11 @@
 use std::{
+    ffi::{CStr, CString, OsStr, OsString},
     fs::{self, File, OpenOptions},
     io,
     os::{
-        fd::AsRawFd,
+        fd::{AsRawFd, FromRawFd},
         unix::{
+            ffi::{OsStrExt, OsStringExt},
             fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::UnixStream as StdUnixStream,
         },
@@ -398,18 +400,125 @@ fn ensure_private_directory(path: &Path, expected_uid: u32) -> Result<()> {
 /// path that changed while it was being checked. Returns true only when this
 /// call removed a stale socket.
 fn remove_stale_socket(path: &Path, expected_uid: u32) -> Result<bool> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error).with_context(|| format!("could not inspect {}", path.display()));
+    let parent_path = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = CString::new(
+        path.file_name()
+            .ok_or_else(|| anyhow::anyhow!("socket path has no file name"))?
+            .as_bytes(),
+    )
+    .context("socket path contains a null byte")?;
+    let parent = open_socket_directory(parent_path)
+        .with_context(|| format!("could not open socket directory {}", parent_path.display()))?;
+    remove_stale_socket_at(&parent, &name, path, expected_uid)
+}
+
+fn remove_stale_session_sockets(directory: &Path, expected_uid: u32) -> Result<()> {
+    let directory_fd = open_socket_directory(directory).with_context(|| {
+        format!(
+            "could not open session socket directory {}",
+            directory.display()
+        )
+    })?;
+    remove_stale_session_sockets_at(&directory_fd, directory, expected_uid, &mut |_| {})
+}
+
+fn open_socket_directory(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+fn remove_stale_session_sockets_at(
+    directory: &File,
+    display_path: &Path,
+    expected_uid: u32,
+    on_directory_open: &mut impl FnMut(&Path),
+) -> Result<()> {
+    for name in directory_entry_names(directory.as_raw_fd()).with_context(|| {
+        format!(
+            "could not read session socket directory {}",
+            display_path.display()
+        )
+    })? {
+        let name_c =
+            CString::new(name.as_bytes()).context("directory entry contains a null byte")?;
+        let path = display_path.join(&name);
+        let Some(metadata) = stat_at(directory.as_raw_fd(), &name_c)
+            .with_context(|| format!("could not inspect {}", path.display()))?
+        else {
+            continue;
+        };
+        match metadata.st_mode & libc::S_IFMT {
+            libc::S_IFDIR => {
+                let child_fd = unsafe {
+                    libc::openat(
+                        directory.as_raw_fd(),
+                        name_c.as_ptr(),
+                        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+                    )
+                };
+                if child_fd == -1 {
+                    let error = io::Error::last_os_error();
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) || error.raw_os_error() == Some(libc::ELOOP)
+                    {
+                        continue;
+                    }
+                    return Err(error).with_context(|| {
+                        format!(
+                            "could not open nested session socket directory {}",
+                            path.display()
+                        )
+                    });
+                }
+                // SAFETY: openat returned a new descriptor owned by this File.
+                let child = unsafe { File::from_raw_fd(child_fd) };
+                let opened = child
+                    .metadata()
+                    .with_context(|| format!("could not inspect {}", path.display()))?;
+                if opened.dev() != metadata.st_dev || opened.ino() != metadata.st_ino {
+                    continue;
+                }
+                on_directory_open(&path);
+                remove_stale_session_sockets_at(&child, &path, expected_uid, on_directory_open)?;
+            }
+            libc::S_IFSOCK => {
+                remove_stale_socket_at(directory, &name_c, &path, expected_uid)?;
+            }
+            _ => {}
         }
+    }
+    Ok(())
+}
+
+fn remove_stale_socket_at(
+    parent: &File,
+    name: &CString,
+    display_path: &Path,
+    expected_uid: u32,
+) -> Result<bool> {
+    let Some(metadata) = stat_at(parent.as_raw_fd(), name)
+        .with_context(|| format!("could not inspect {}", display_path.display()))?
+    else {
+        return Ok(false);
     };
-    if !metadata.file_type().is_socket() || metadata.uid() != expected_uid {
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFSOCK || metadata.st_uid != expected_uid {
         return Ok(false);
     }
 
-    match StdUnixStream::connect(path) {
+    let socket_path = pinned_socket_path(parent.as_raw_fd(), name).with_context(|| {
+        format!(
+            "could not make a pinned path for {}",
+            display_path.display()
+        )
+    })?;
+    match StdUnixStream::connect(&socket_path) {
         Ok(stream) => {
             drop(stream);
             Ok(false)
@@ -420,60 +529,140 @@ fn remove_stale_socket(path: &Path, expected_uid: u32) -> Result<bool> {
                 io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
             ) =>
         {
-            let current = match fs::symlink_metadata(path) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("could not recheck {}", path.display()));
-                }
+            let Some(current) = stat_at(parent.as_raw_fd(), name)
+                .with_context(|| format!("could not recheck {}", display_path.display()))?
+            else {
+                return Ok(false);
             };
-            if !current.file_type().is_socket()
-                || current.uid() != expected_uid
-                || current.dev() != metadata.dev()
-                || current.ino() != metadata.ino()
+            if current.st_mode & libc::S_IFMT != libc::S_IFSOCK
+                || current.st_uid != expected_uid
+                || current.st_dev != metadata.st_dev
+                || current.st_ino != metadata.st_ino
             {
                 bail!("socket path changed during stale socket cleanup");
             }
-            fs::remove_file(path)
-                .with_context(|| format!("could not remove stale socket {}", path.display()))?;
+            if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } == -1 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::NotFound {
+                    return Ok(false);
+                }
+                return Err(error).with_context(|| {
+                    format!("could not remove stale socket {}", display_path.display())
+                });
+            }
             Ok(true)
         }
         Err(error) => Err(error).with_context(|| {
             format!(
                 "could not check whether socket {} is active",
-                path.display()
+                display_path.display()
             )
         }),
     }
 }
 
-fn remove_stale_session_sockets(directory: &Path, expected_uid: u32) -> Result<()> {
-    for entry in fs::read_dir(directory).with_context(|| {
-        format!(
-            "could not read session socket directory {}",
-            directory.display()
+fn stat_at(parent_fd: libc::c_int, name: &CString) -> io::Result<Option<libc::stat>> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            parent_fd,
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
         )
-    })? {
-        let entry = entry.context("could not inspect session socket directory entry")?;
-        let path = entry.path();
-        // DirEntry::file_type does not follow symlinks. Recurse only into real
-        // directories so a symlink in the socket tree cannot expose paths
-        // outside the configured directory.
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("could not inspect {}", path.display()));
-            }
-        };
-        if file_type.is_dir() {
-            remove_stale_session_sockets(&path, expected_uid)?;
-        } else if file_type.is_socket() {
-            remove_stale_socket(&path, expected_uid)?;
-        }
+    } == 0
+    {
+        // SAFETY: fstatat initialized metadata when it returned success.
+        return Ok(Some(unsafe { metadata.assume_init() }));
     }
-    Ok(())
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::NotFound {
+        Ok(None)
+    } else {
+        Err(error)
+    }
+}
+
+struct DirectoryStream(*mut libc::DIR);
+
+impl Drop for DirectoryStream {
+    fn drop(&mut self) {
+        // SAFETY: this stream was returned by fdopendir and is closed exactly once.
+        unsafe { libc::closedir(self.0) };
+    }
+}
+
+fn directory_entry_names(directory_fd: libc::c_int) -> io::Result<Vec<OsString>> {
+    let stream_fd = unsafe { libc::fcntl(directory_fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if stream_fd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fdopendir takes ownership of stream_fd on success.
+    let stream = unsafe { libc::fdopendir(stream_fd) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: fdopendir did not take ownership when it failed.
+        unsafe { libc::close(stream_fd) };
+        return Err(error);
+    }
+    let stream = DirectoryStream(stream);
+    let mut names = Vec::new();
+    loop {
+        clear_errno();
+        // SAFETY: stream is valid until DirectoryStream is dropped.
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error().unwrap_or_default() != 0 {
+                return Err(error);
+            }
+            break;
+        }
+        // SAFETY: readdir returned a dirent with a nul-terminated d_name.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        names.push(OsString::from_vec(name.to_bytes().to_vec()));
+    }
+    Ok(names)
+}
+
+#[cfg(target_os = "linux")]
+fn clear_errno() {
+    // SAFETY: libc exposes the calling thread's errno slot.
+    unsafe { *libc::__errno_location() = 0 };
+}
+
+#[cfg(target_os = "macos")]
+fn clear_errno() {
+    // SAFETY: libc exposes the calling thread's errno slot.
+    unsafe { *libc::__error() = 0 };
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn clear_errno() {}
+
+#[cfg(target_os = "linux")]
+fn pinned_socket_path(parent_fd: libc::c_int, name: &CString) -> io::Result<std::path::PathBuf> {
+    let mut path = std::path::PathBuf::from(format!("/proc/self/fd/{parent_fd}"));
+    path.push(OsStr::from_bytes(name.as_bytes()));
+    Ok(path)
+}
+
+#[cfg(target_os = "macos")]
+fn pinned_socket_path(parent_fd: libc::c_int, name: &CString) -> io::Result<std::path::PathBuf> {
+    let mut path = std::path::PathBuf::from(format!("/dev/fd/{parent_fd}"));
+    path.push(OsStr::from_bytes(name.as_bytes()));
+    Ok(path)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn pinned_socket_path(_parent_fd: libc::c_int, _name: &CString) -> io::Result<std::path::PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "descriptor-relative Unix socket connections are unavailable on this platform",
+    ))
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<ControlState>) {
