@@ -23,6 +23,8 @@ pub use protocol::ControlRequest;
 pub use session::{SessionConfig, UnmatchedHostPolicy};
 pub use session_file::SessionFile;
 pub(crate) const MAX_SESSION_CONFIG_NAME_BYTES: usize = 1_024;
+pub(crate) const SESSION_FILE_INVALID_MESSAGE: &str =
+    "session configuration file is invalid; use the current schema with version = 2";
 pub const PROTOCOL_VERSION: u16 = 1;
 
 /// A safe configuration error. Error text never contains input values.

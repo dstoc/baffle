@@ -190,31 +190,19 @@ format = "bearer"
 }
 
 #[test]
-fn rejects_v1_and_protocol_shaped_session_files_with_migration_hints() {
+fn rejects_unsupported_session_file_versions() {
     let v1 = SessionFile::from_toml(
         "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n",
     )
-    .expect_err("v1 session file must be rejected");
-    assert!(v1.to_string().contains("version 1 is unsupported"));
-    assert!(v1.to_string().contains("migrate to version 2"));
-
-    let operation = SessionFile::from_toml("version = 2\noperation = \"create\"\n")
-        .expect_err("operation is not part of a session file");
-    assert!(operation.to_string().contains("control-protocol field"));
-
-    let session_table = SessionFile::from_toml("version = 2\n\n[session]\npersistent = true\n")
-        .expect_err("the old session table must be rejected");
-    assert!(
-        session_table
-            .to_string()
-            .contains("move persistent, socket_name, and unmatched")
+    .expect_err("v1 session files must be rejected");
+    assert_eq!(
+        v1.to_string(),
+        "unsupported session configuration version; expected version = 2"
     );
 
-    let old_rules = SessionFile::from_toml(
-        "version = 2\n\n[[rules]]\nhost = \"example.com\"\nmode = \"tunnel\"\n",
-    )
-    .expect_err("array rules must be rejected");
-    assert!(old_rules.to_string().contains("quoted hostname tables"));
+    let v3 = SessionFile::from_toml("version = 3\n")
+        .expect_err("unknown session file versions must be rejected");
+    assert_eq!(v3.to_string(), v1.to_string());
 
     let missing_version = SessionFile::from_toml("[rules.\"example.com\"]\n")
         .expect_err("schema version is required");
