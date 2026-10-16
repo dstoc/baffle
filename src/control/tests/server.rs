@@ -14,8 +14,8 @@ use tokio::{
 
 use crate::{config::SessionCreateMode, secrets::SecretStore};
 
-use super::super::test_support::session_manager;
-use super::{ControlState, handle_connection};
+use super::support::session_manager;
+use crate::control::server::{ControlState, handle_connection};
 
 fn state(directory: &std::path::Path, uid: u32, allowed: &[&str]) -> ControlState {
     ControlState {

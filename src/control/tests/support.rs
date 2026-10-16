@@ -13,7 +13,7 @@ use crate::{
     telemetry::Metrics,
 };
 
-use super::session::SessionManager;
+use crate::control::session::SessionManager;
 
 pub(super) fn session_manager(directory: &std::path::Path, max_sessions: usize) -> SessionManager {
     let key_pair = KeyPair::generate().expect("CA key should be generated");
