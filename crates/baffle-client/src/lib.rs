@@ -17,14 +17,20 @@ use tokio::{
     net::UnixStream,
 };
 
+mod policy;
+
+pub use policy::{
+    MAX_SESSION_CONFIG_COMPONENT_BYTES, MAX_SESSION_CONFIG_NAME_BYTES,
+    SESSION_CONFIG_INVALID_MESSAGE, SESSION_CONFIG_VERSION, SessionConfigError,
+    canonicalize_request_path, normalize_dns_name, validate_secret_name,
+    validate_session_config_name,
+};
+
 /// The protocol version implemented by this client.
 pub const PROTOCOL_VERSION: u16 = 2;
 
-const SESSION_CONFIG_VERSION: u16 = 2;
-
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_SESSION_CONFIG_NAME_BYTES: usize = 1_024;
 
 /// Return the default control socket path for the current platform.
 ///
@@ -102,7 +108,8 @@ impl Client {
     /// connection while the session is ephemeral.
     pub async fn create_from_file(&self, name: impl AsRef<str>) -> Result<Session, ClientError> {
         let name = name.as_ref();
-        validate_session_config_name(name)?;
+        validate_session_config_name(name)
+            .map_err(|error| ClientError::InvalidPolicy(error.to_string()))?;
         let request = CreateFromFileRequest {
             version: PROTOCOL_VERSION,
             operation: "create_from_file",
@@ -743,24 +750,6 @@ fn map_remote_error(error: RemoteError) -> ClientError {
         "internal_error" | "shutting_down" => ClientError::Provisioning(message),
         _ => ClientError::Server { code, message },
     }
-}
-
-fn validate_session_config_name(name: &str) -> Result<(), ClientError> {
-    if name.is_empty()
-        || name.len() > MAX_SESSION_CONFIG_NAME_BYTES
-        || !name.ends_with(".toml")
-        || name.contains('\\')
-        || name.contains(':')
-        || name.chars().any(char::is_control)
-        || name.split('/').any(|component| {
-            component.is_empty() || component == "." || component == ".." || component.len() > 255
-        })
-    {
-        return Err(ClientError::InvalidPolicy(
-            "session configuration name is invalid".into(),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

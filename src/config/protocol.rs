@@ -1,12 +1,6 @@
 use serde::Deserialize;
 
-pub(crate) const MAX_SESSION_CONFIG_COMPONENT_BYTES: usize = 255;
-
-use super::{
-    ConfigError, MAX_SESSION_CONFIG_NAME_BYTES, PROTOCOL_VERSION, deserialize,
-    session::SessionConfig,
-    session_file::{RawSessionConfig, validate_session_config},
-};
+use super::{ConfigError, PROTOCOL_VERSION, SessionConfig, deserialize};
 
 /// A validated control request. `Create` carries a validated policy, not raw TOML.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,10 +36,16 @@ impl ControlRequest {
         validate_protocol_version(envelope.version)?;
         let raw: RawControlRequest = deserialize(input)?;
         match raw {
-            RawControlRequest::Create { version, session } => Ok(Self::Create {
-                version,
-                session: validate_session_config(session)?,
-            }),
+            RawControlRequest::Create { version, session } => {
+                let session = toml::to_string(&session).map_err(|_| {
+                    ConfigError::new(
+                        "invalid session configuration TOML syntax or value (values omitted)",
+                    )
+                })?;
+                let session = SessionConfig::from_toml(&session)
+                    .map_err(|error| ConfigError::new(error.to_string()))?;
+                Ok(Self::Create { version, session })
+            }
             RawControlRequest::Stop {
                 version,
                 session_id,
@@ -68,7 +68,8 @@ impl ControlRequest {
             }
             RawControlRequest::ReloadAll { version } => Ok(Self::ReloadAll { version }),
             RawControlRequest::CreateFromFile { version, name } => {
-                let name = validate_session_config_name(&name)?;
+                baffle_client::validate_session_config_name(&name)
+                    .map_err(|error| ConfigError::new(error.to_string()))?;
                 Ok(Self::CreateFromFile { version, name })
             }
             RawControlRequest::List { version } => Ok(Self::List { version }),
@@ -81,28 +82,6 @@ struct RawProtocolVersion {
     version: u16,
 }
 
-fn validate_session_config_name(name: &str) -> Result<String, ConfigError> {
-    if name.is_empty()
-        || name.len() > MAX_SESSION_CONFIG_NAME_BYTES
-        || !name.ends_with(".toml")
-        || name.contains('\\')
-        || name.contains(':')
-        || name.chars().any(char::is_control)
-    {
-        return Err(ConfigError::new("session configuration name is invalid"));
-    }
-
-    for component in name.split('/') {
-        if component.is_empty()
-            || component == "."
-            || component == ".."
-            || component.len() > MAX_SESSION_CONFIG_COMPONENT_BYTES
-        {
-            return Err(ConfigError::new("session configuration name is invalid"));
-        }
-    }
-    Ok(name.to_owned())
-}
 fn validate_protocol_version(version: u16) -> Result<(), ConfigError> {
     if version != PROTOCOL_VERSION {
         return Err(ConfigError::unsupported_protocol_version());
@@ -126,26 +105,10 @@ fn validate_session_id(id: &str) -> Result<(), ConfigError> {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum RawControlRequest {
-    Create {
-        version: u16,
-        session: RawSessionConfig,
-    },
-    Stop {
-        version: u16,
-        session_id: String,
-    },
-    Reload {
-        version: u16,
-        session_id: String,
-    },
-    ReloadAll {
-        version: u16,
-    },
-    CreateFromFile {
-        version: u16,
-        name: String,
-    },
-    List {
-        version: u16,
-    },
+    Create { version: u16, session: toml::Value },
+    Stop { version: u16, session_id: String },
+    Reload { version: u16, session_id: String },
+    ReloadAll { version: u16 },
+    CreateFromFile { version: u16, name: String },
+    List { version: u16 },
 }

@@ -6,8 +6,8 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use baffle_client::{
-    Client, ClientError, HeaderInjection, HostRule, InjectionFormat, ReloadResult, ReloadStatus,
-    RuleMode, Session, SessionConfig, SessionInfo, default_control_socket,
+    Client, ClientError, ReloadResult, ReloadStatus, Session, SessionConfig, SessionInfo,
+    default_control_socket,
 };
 use clap::{ArgGroup, Args, Parser, Subcommand};
 
@@ -237,46 +237,7 @@ fn load_local_session_config(path: &std::path::Path) -> Result<SessionConfig> {
         .with_context(|| format!("could not read local session config {}", path.display()))?;
     let session = crate::config::SessionFile::from_toml(&toml)
         .with_context(|| format!("could not parse local session config {}", path.display()))?;
-
-    Ok(SessionConfig {
-        persistent: session.persistent,
-        socket_name: session.socket_name,
-        unmatched: match session.unmatched {
-            crate::config::UnmatchedHostPolicy::Deny => baffle_client::UnmatchedHostPolicy::Deny,
-            crate::config::UnmatchedHostPolicy::Tunnel => {
-                baffle_client::UnmatchedHostPolicy::Tunnel
-            }
-        },
-        rules: session
-            .rules
-            .into_iter()
-            .map(|rule| HostRule {
-                host: rule.host,
-                mode: match rule.mode {
-                    crate::config::RuleMode::Tunnel => RuleMode::Tunnel,
-                    crate::config::RuleMode::Intercept => RuleMode::Intercept,
-                },
-                ports: rule.ports,
-                paths: rule.paths.iter().map(|path| path.as_str()).collect(),
-                inject: rule
-                    .inject
-                    .into_iter()
-                    .map(|injection| HeaderInjection {
-                        header: injection.header,
-                        secret: injection.secret.as_str().to_owned(),
-                        format: match injection.format {
-                            crate::config::InjectionFormat::Raw => InjectionFormat::Raw,
-                            crate::config::InjectionFormat::Bearer => InjectionFormat::Bearer,
-                            crate::config::InjectionFormat::BasicPassword => {
-                                InjectionFormat::BasicPassword
-                            }
-                        },
-                        username: injection.username,
-                    })
-                    .collect(),
-            })
-            .collect(),
-    })
+    Ok(session)
 }
 
 fn report_created_session(session: &Session) -> Result<()> {

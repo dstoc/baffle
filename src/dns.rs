@@ -1,47 +1,4 @@
-use std::net::IpAddr;
-
-use url::Host;
-
-/// Normalize and validate an exact ASCII DNS hostname.
-///
-/// A final dot is removed and ASCII letters are converted to lowercase. IP
-/// literals, wildcards, invalid labels, and names longer than 253 bytes are
-/// rejected.
-pub(crate) fn normalize_dns_name(input: &str) -> Result<String, &'static str> {
-    if input.is_empty() || input.contains('*') {
-        return Err("must be an exact DNS hostname");
-    }
-
-    let input = input.to_ascii_lowercase();
-    let host = input.strip_suffix('.').unwrap_or(&input);
-    if host.is_empty() || host.len() > 253 || host.parse::<IpAddr>().is_ok() || !host.is_ascii() {
-        return Err("must be an exact DNS hostname, not an IP address or wildcard");
-    }
-
-    for label in host.split('.') {
-        if label.is_empty()
-            || label.len() > 63
-            || label.starts_with('-')
-            || label.ends_with('-')
-            || !label
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return Err("contains an invalid DNS label");
-        }
-    }
-
-    // The URL host parser also rejects non-canonical IPv4 forms such as
-    // 127.1, octal components, and a single integer. Parsing is local and
-    // does not perform DNS resolution.
-    match Host::parse(host) {
-        Ok(Host::Domain(domain)) => Ok(domain),
-        Ok(Host::Ipv4(_) | Host::Ipv6(_)) => {
-            Err("must be an exact DNS hostname, not an IP address or wildcard")
-        }
-        Err(_) => Err("must be a valid exact DNS hostname"),
-    }
-}
+pub(crate) use baffle_client::normalize_dns_name;
 
 #[cfg(test)]
 mod tests {

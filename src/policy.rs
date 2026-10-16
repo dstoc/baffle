@@ -3,8 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::{
-    HeaderInjection, PathRule, RuleMode, SessionConfig, UnmatchedHostPolicy,
-    canonicalize_request_path,
+    HeaderInjection, RuleMode, SessionConfig, UnmatchedHostPolicy, canonicalize_request_path,
 };
 use crate::dns::normalize_dns_name;
 
@@ -34,7 +33,7 @@ pub(crate) struct RequestFacts<'a> {
 struct CompiledRule {
     mode: RuleMode,
     ports: HashSet<u16>,
-    paths: Vec<PathRule>,
+    paths: Vec<String>,
     injections: Vec<HeaderInjection>,
 }
 
@@ -213,11 +212,17 @@ fn canonical_authorized_path(
     if !rule
         .paths
         .iter()
-        .any(|pattern| pattern.matches_canonical_path(&canonical))
+        .any(|pattern| matches_path_pattern(pattern, &canonical))
     {
         return Err(AuthorizationError::Denied);
     }
     Ok(Some(canonical))
+}
+
+fn matches_path_pattern(pattern: &str, path: &str) -> bool {
+    pattern
+        .strip_suffix("**")
+        .map_or(pattern == path, |prefix| path.starts_with(prefix))
 }
 
 #[cfg(test)]
