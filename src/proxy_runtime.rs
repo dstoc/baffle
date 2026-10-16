@@ -7,6 +7,7 @@
 mod rama;
 
 pub use rama::ProxyRuntime;
+pub(crate) use rama::SocketDirectoryRegistry;
 
 #[cfg(any(test, feature = "benchmark-tcp-nodelay"))]
 pub(crate) fn benchmark_tcp_nodelay_mode() -> String {

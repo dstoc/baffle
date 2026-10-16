@@ -10,7 +10,7 @@ use std::{
     },
     path::{Component, Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -121,7 +121,10 @@ pub(super) struct UnixSocketGuard {
 }
 
 impl UnixSocketGuard {
-    fn bind(path: &Path) -> io::Result<(UnixListener, Self)> {
+    fn bind(
+        path: &Path,
+        socket_directories: Arc<SocketDirectoryRegistry>,
+    ) -> io::Result<(UnixListener, Self)> {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -140,7 +143,8 @@ impl UnixSocketGuard {
                 .as_bytes(),
         )
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid socket name"))?;
-        let (parent, created_directories, normalized) = open_socket_parent(&absolute)?;
+        let (parent, created_directories, normalized) =
+            open_socket_parent(&absolute, socket_directories)?;
         if stat_at(parent.as_raw_fd(), &name)?.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -236,22 +240,35 @@ struct DirectoryRecord {
     leases: usize,
 }
 
-static DIRECTORY_REGISTRY: OnceLock<Mutex<HashMap<DirectoryKey, DirectoryRecord>>> =
-    OnceLock::new();
-static SOCKET_PARENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+/// Coordinates socket-directory creation and cleanup for one session manager.
+///
+/// The map lock also serializes directory traversal with lease removal, so a
+/// directory cannot be unlinked before a concurrent bind registers its lease.
+pub(crate) struct SocketDirectoryRegistry {
+    directories: Mutex<HashMap<DirectoryKey, DirectoryRecord>>,
+}
 
-struct CreatedDirectorySet(Vec<DirectoryKey>);
+impl Default for SocketDirectoryRegistry {
+    fn default() -> Self {
+        Self {
+            directories: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+struct CreatedDirectorySet {
+    keys: Vec<DirectoryKey>,
+    registry: Arc<SocketDirectoryRegistry>,
+}
 
 impl Drop for CreatedDirectorySet {
     fn drop(&mut self) {
-        // Provisioning holds this lock while it walks and registers directory
-        // descriptors. Serialize removal with that walk so a newly opened
-        // directory cannot be unlinked before its lease is registered.
-        let path_lock = SOCKET_PARENT_LOCK.get_or_init(|| Mutex::new(()));
-        let _path_lock = path_lock.lock().unwrap_or_else(|error| error.into_inner());
-        let registry = DIRECTORY_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut registry = registry.lock().unwrap_or_else(|error| error.into_inner());
-        while let Some(key) = self.0.pop() {
+        let mut registry = self
+            .registry
+            .directories
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while let Some(key) = self.keys.pop() {
             release_directory_lease(&mut registry, key, unlink_directory_at);
         }
     }
@@ -312,6 +329,7 @@ fn unlink_directory_at(record: &DirectoryRecord) -> io::Result<()> {
 }
 
 fn register_directory(
+    registry: &mut HashMap<DirectoryKey, DirectoryRecord>,
     parent: &OwnedFd,
     name: &CString,
     metadata: &libc::stat,
@@ -322,8 +340,6 @@ fn register_directory(
         device: metadata.st_dev,
         inode: metadata.st_ino,
     };
-    let registry = DIRECTORY_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut registry = registry.lock().unwrap_or_else(|error| error.into_inner());
     let record = registry.entry(key).or_insert(DirectoryRecord {
         parent: parent.try_clone()?,
         name: name.clone(),
@@ -338,12 +354,20 @@ fn register_directory(
     Ok(key)
 }
 
-fn open_socket_parent(path: &Path) -> io::Result<(OwnedFd, CreatedDirectorySet, PathBuf)> {
-    let path_lock = SOCKET_PARENT_LOCK.get_or_init(|| Mutex::new(()));
-    let mut created = CreatedDirectorySet(Vec::new());
+fn open_socket_parent(
+    path: &Path,
+    registry: Arc<SocketDirectoryRegistry>,
+) -> io::Result<(OwnedFd, CreatedDirectorySet, PathBuf)> {
+    let mut created = CreatedDirectorySet {
+        keys: Vec::new(),
+        registry: Arc::clone(&registry),
+    };
     let result = {
-        let _path_lock = path_lock.lock().unwrap_or_else(|error| error.into_inner());
-        open_socket_parent_locked(path, &mut created)
+        let mut directories = registry
+            .directories
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        open_socket_parent_locked(path, &mut directories, &mut created)
     };
     match result {
         Ok((parent, normalized)) => Ok((parent, created, normalized)),
@@ -356,6 +380,7 @@ fn open_socket_parent(path: &Path) -> io::Result<(OwnedFd, CreatedDirectorySet, 
 
 fn open_socket_parent_locked(
     path: &Path,
+    registry: &mut HashMap<DirectoryKey, DirectoryRecord>,
     created: &mut CreatedDirectorySet,
 ) -> io::Result<(OwnedFd, PathBuf)> {
     let parent_path = path
@@ -441,10 +466,16 @@ fn open_socket_parent_locked(
             return Err(error);
         }
         normalized.push(component.to_string_lossy().as_ref());
-        let registered =
-            register_directory(&current, &component, &metadata, normalized.clone(), made);
+        let registered = register_directory(
+            registry,
+            &current,
+            &component,
+            &metadata,
+            normalized.clone(),
+            made,
+        );
         match registered {
-            Ok(key) => created.0.push(key),
+            Ok(key) => created.keys.push(key),
             Err(error) => {
                 if made {
                     remove_created_directory_if_unchanged(
@@ -539,8 +570,11 @@ fn stat_at(parent: libc::c_int, name: &CString) -> io::Result<Option<libc::stat>
     }
 }
 
-pub(super) fn bind_unix_listener(path: &Path) -> io::Result<(UnixListener, UnixSocketGuard)> {
-    UnixSocketGuard::bind(path)
+pub(super) fn bind_unix_listener(
+    path: &Path,
+    socket_directories: Arc<SocketDirectoryRegistry>,
+) -> io::Result<(UnixListener, UnixSocketGuard)> {
+    UnixSocketGuard::bind(path, socket_directories)
 }
 
 struct ConnectionGuard(Arc<Metrics>);
@@ -554,25 +588,31 @@ impl Drop for ConnectionGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs::File, os::fd::RawFd};
+    use std::{fs::File, os::fd::RawFd, sync::Arc};
 
-    fn register_test_directory(parent_path: &Path, name: &str) -> (DirectoryKey, RawFd, OwnedFd) {
+    fn register_test_directory(
+        registry: &Arc<SocketDirectoryRegistry>,
+        parent_path: &Path,
+        name: &str,
+    ) -> (DirectoryKey, RawFd, OwnedFd) {
         let parent = OwnedFd::from(File::open(parent_path).expect("open test directory parent"));
         let name = CString::new(name).expect("test directory name has no nul byte");
         let metadata = stat_at(parent.as_raw_fd(), &name)
             .expect("inspect test directory")
             .expect("test directory exists");
         let path = parent_path.join(name.to_string_lossy().as_ref());
-        let key = register_directory(&parent, &name, &metadata, path, true)
-            .expect("register test directory");
-        let registry = DIRECTORY_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
-        let descriptor = registry
+        let mut directories = registry
+            .directories
             .lock()
-            .expect("lock directory registry")
+            .expect("lock directory registry");
+        let key = register_directory(&mut directories, &parent, &name, &metadata, path, true)
+            .expect("register test directory");
+        let descriptor = directories
             .get(&key)
             .expect("registered directory record")
             .parent
             .as_raw_fd();
+        drop(directories);
         (key, descriptor, parent)
     }
 
@@ -601,10 +641,14 @@ mod tests {
         );
     }
 
-    fn assert_registry_entry(key: DirectoryKey, expected: bool) {
-        let registry = DIRECTORY_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+    fn assert_registry_entry(
+        registry: &SocketDirectoryRegistry,
+        key: DirectoryKey,
+        expected: bool,
+    ) {
         assert_eq!(
             registry
+                .directories
                 .lock()
                 .expect("lock directory registry")
                 .contains_key(&key),
@@ -617,13 +661,17 @@ mod tests {
         let parent = tempfile::tempdir().expect("create parent directory");
         let path = parent.path().join("session-sockets");
         fs::create_dir(&path).expect("create session socket directory");
+        let registry = Arc::new(SocketDirectoryRegistry::default());
         let (key, descriptor, parent_fd) =
-            register_test_directory(parent.path(), "session-sockets");
+            register_test_directory(&registry, parent.path(), "session-sockets");
 
-        drop(CreatedDirectorySet(vec![key]));
+        drop(CreatedDirectorySet {
+            keys: vec![key],
+            registry: Arc::clone(&registry),
+        });
 
         assert!(!path.exists());
-        assert_registry_entry(key, false);
+        assert_registry_entry(&registry, key, false);
         assert_descriptor_released(descriptor, &parent_fd);
     }
 
@@ -632,14 +680,17 @@ mod tests {
         let parent = tempfile::tempdir().expect("create parent directory");
         let path = parent.path().join("session-sockets");
         fs::create_dir(&path).expect("create session socket directory");
+        let registry = Arc::new(SocketDirectoryRegistry::default());
         let (key, descriptor, parent_fd) =
-            register_test_directory(parent.path(), "session-sockets");
-        let registry = DIRECTORY_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut registry = registry.lock().expect("lock directory registry");
+            register_test_directory(&registry, parent.path(), "session-sockets");
+        let mut directories = registry
+            .directories
+            .lock()
+            .expect("lock directory registry");
 
         // Simulate a concurrent removal after the inode check. The following
         // unlinkat must return NotFound, and the zero-lease record must still go.
-        release_directory_lease(&mut registry, key, |record| {
+        release_directory_lease(&mut directories, key, |record| {
             fs::remove_dir(&path)?;
             let error = unlink_directory_at(record).expect_err("missing directory must fail");
             assert_eq!(error.kind(), io::ErrorKind::NotFound);
@@ -647,8 +698,8 @@ mod tests {
         });
 
         assert!(!path.exists());
-        assert!(!registry.contains_key(&key));
-        drop(registry);
+        assert!(!directories.contains_key(&key));
+        drop(directories);
         assert_descriptor_released(descriptor, &parent_fd);
     }
 
@@ -658,40 +709,212 @@ mod tests {
         let path = parent.path().join("session-sockets");
         fs::create_dir(&path).expect("create session socket directory");
         fs::write(path.join("in-use.sock"), b"preserve").expect("add directory content");
+        let registry = Arc::new(SocketDirectoryRegistry::default());
         let (key, descriptor, parent_fd) =
-            register_test_directory(parent.path(), "session-sockets");
+            register_test_directory(&registry, parent.path(), "session-sockets");
 
-        drop(CreatedDirectorySet(vec![key]));
+        drop(CreatedDirectorySet {
+            keys: vec![key],
+            registry: Arc::clone(&registry),
+        });
 
         assert!(path.is_dir());
         assert_eq!(
             fs::read(path.join("in-use.sock")).expect("read preserved content"),
             b"preserve"
         );
-        assert_registry_entry(key, false);
+        assert_registry_entry(&registry, key, false);
         assert_descriptor_released(descriptor, &parent_fd);
 
         let name = CString::new("session-sockets").expect("valid directory name");
         let metadata = stat_at(parent_fd.as_raw_fd(), &name)
             .expect("inspect existing session directory")
             .expect("nonempty session directory remains");
-        let new_key = register_directory(&parent_fd, &name, &metadata, path.clone(), false)
-            .expect("register existing directory for a later session");
+        let new_key = register_directory(
+            &mut registry
+                .directories
+                .lock()
+                .expect("lock directory registry"),
+            &parent_fd,
+            &name,
+            &metadata,
+            path.clone(),
+            false,
+        )
+        .expect("register existing directory for a later session");
         assert_eq!(new_key, key);
         let new_descriptor = {
-            let registry = DIRECTORY_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
-            let registry = registry.lock().expect("lock directory registry");
-            assert_eq!(registry.get(&new_key).expect("new lease record").leases, 1);
-            registry
+            let directories = registry
+                .directories
+                .lock()
+                .expect("lock directory registry");
+            assert_eq!(
+                directories.get(&new_key).expect("new lease record").leases,
+                1
+            );
+            directories
                 .get(&new_key)
                 .expect("new lease record")
                 .parent
                 .as_raw_fd()
         };
-        drop(CreatedDirectorySet(vec![new_key]));
+        drop(CreatedDirectorySet {
+            keys: vec![new_key],
+            registry: Arc::clone(&registry),
+        });
 
         assert!(path.is_dir());
-        assert_registry_entry(new_key, false);
+        assert_registry_entry(&registry, new_key, false);
         assert_descriptor_released(new_descriptor, &parent_fd);
+    }
+
+    #[tokio::test]
+    async fn directory_leases_are_shared_until_the_last_runtime_drops() {
+        let root = tempfile::tempdir().expect("create socket directory root");
+        let socket_parent = root.path().join("nested/runtime");
+        let registry = Arc::new(SocketDirectoryRegistry::default());
+        let first_path = socket_parent.join("first.sock");
+        let second_path = socket_parent.join("second.sock");
+
+        let (first_listener, first_guard) =
+            bind_unix_listener(&first_path, Arc::clone(&registry)).expect("bind first listener");
+        let (second_listener, second_guard) =
+            bind_unix_listener(&second_path, Arc::clone(&registry)).expect("bind second listener");
+        drop(first_listener);
+        drop(second_listener);
+
+        let parent_fd = OwnedFd::from(File::open(&socket_parent).expect("open socket parent"));
+        let mut parent_metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        assert_eq!(
+            unsafe { libc::fstat(parent_fd.as_raw_fd(), parent_metadata.as_mut_ptr()) },
+            0
+        );
+        let parent_metadata = unsafe { parent_metadata.assume_init() };
+        let parent_key = DirectoryKey {
+            device: parent_metadata.st_dev,
+            inode: parent_metadata.st_ino,
+        };
+        assert_eq!(
+            registry
+                .directories
+                .lock()
+                .expect("lock directory registry")
+                .get(&parent_key)
+                .expect("registered socket parent")
+                .leases,
+            2
+        );
+
+        drop(first_guard);
+        assert!(socket_parent.is_dir());
+        assert!(second_path.exists());
+        assert_eq!(
+            registry
+                .directories
+                .lock()
+                .expect("lock directory registry")
+                .get(&parent_key)
+                .expect("remaining socket parent lease")
+                .leases,
+            1
+        );
+
+        drop(second_guard);
+        assert!(!socket_parent.exists());
+        assert!(!root.path().join("nested").exists());
+        assert!(
+            !registry
+                .directories
+                .lock()
+                .expect("lock directory registry")
+                .contains_key(&parent_key)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn independent_runtimes_bind_concurrently_and_clean_up_independently() {
+        let root = tempfile::tempdir().expect("create socket directory root");
+        let first_registry = Arc::new(SocketDirectoryRegistry::default());
+        let second_registry = Arc::new(SocketDirectoryRegistry::default());
+        assert!(!Arc::ptr_eq(&first_registry, &second_registry));
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let first_path = root.path().join("first/nested/proxy.sock");
+        let second_path = root.path().join("second/nested/proxy.sock");
+        let first_task = {
+            let barrier = Arc::clone(&barrier);
+            let registry = Arc::clone(&first_registry);
+            let path = first_path.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                bind_unix_listener(&path, registry).expect("bind first independent listener")
+            })
+        };
+        let second_task = {
+            let barrier = Arc::clone(&barrier);
+            let registry = Arc::clone(&second_registry);
+            let path = second_path.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                bind_unix_listener(&path, registry).expect("bind second independent listener")
+            })
+        };
+        barrier.wait().await;
+        let (first_listener, first_guard) = first_task.await.expect("first bind task");
+        let (second_listener, second_guard) = second_task.await.expect("second bind task");
+        drop(first_listener);
+        drop(second_listener);
+
+        assert!(first_path.exists());
+        assert!(second_path.exists());
+        assert_ne!(
+            first_registry
+                .directories
+                .lock()
+                .expect("lock first directory registry")
+                .len(),
+            0
+        );
+        assert_ne!(
+            second_registry
+                .directories
+                .lock()
+                .expect("lock second directory registry")
+                .len(),
+            0
+        );
+
+        drop(first_guard);
+        assert!(!root.path().join("first").exists());
+        assert!(second_path.exists());
+        assert_eq!(
+            first_registry
+                .directories
+                .lock()
+                .expect("lock first directory registry")
+                .len(),
+            0,
+            "first runtime cleanup must release its own directory records"
+        );
+        assert_ne!(
+            second_registry
+                .directories
+                .lock()
+                .expect("lock second directory registry")
+                .len(),
+            0,
+            "first runtime cleanup must not release the other runtime's records"
+        );
+
+        drop(second_guard);
+        assert!(!root.path().join("second").exists());
+        assert_eq!(
+            second_registry
+                .directories
+                .lock()
+                .expect("lock second directory registry")
+                .len(),
+            0
+        );
     }
 }

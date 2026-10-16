@@ -93,6 +93,7 @@ impl ProxyRuntime {
             secrets,
             ca,
             socket_path,
+            Arc::new(ingress::SocketDirectoryRegistry::default()),
             permits,
             io_timeout,
             metrics,
@@ -114,6 +115,7 @@ impl ProxyRuntime {
         io_timeout: Duration,
         metrics: Arc<Metrics>,
         events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
+        socket_directories: Arc<ingress::SocketDirectoryRegistry>,
         listener_gate: Arc<AtomicU64>,
         listener_generation: u64,
     ) -> Result<Self, ProxyRuntimeError> {
@@ -123,6 +125,7 @@ impl ProxyRuntime {
             secrets,
             ca,
             socket_path,
+            socket_directories,
             Arc::new(Semaphore::new(max_connections)),
             io_timeout,
             metrics,
@@ -144,6 +147,7 @@ impl ProxyRuntime {
         io_timeout: Duration,
         metrics: Arc<Metrics>,
         events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
+        socket_directories: Arc<ingress::SocketDirectoryRegistry>,
         listener_gate: Arc<AtomicU64>,
         listener_generation: u64,
     ) -> Result<Self, ProxyRuntimeError> {
@@ -153,6 +157,7 @@ impl ProxyRuntime {
             secrets,
             ca,
             socket_path,
+            socket_directories,
             permits,
             io_timeout,
             metrics,
@@ -170,6 +175,7 @@ impl ProxyRuntime {
         secrets: Arc<ResolvedSecrets>,
         ca: Arc<ManagedCa>,
         socket_path: PathBuf,
+        socket_directories: Arc<ingress::SocketDirectoryRegistry>,
         permits: Arc<Semaphore>,
         io_timeout: Duration,
         metrics: Arc<Metrics>,
@@ -178,7 +184,8 @@ impl ProxyRuntime {
         listener_generation: u64,
     ) -> Result<Self, ProxyRuntimeError> {
         let (unix_listener, socket_guard) =
-            ingress::bind_unix_listener(&socket_path).map_err(ProxyRuntimeError::BindSocket)?;
+            ingress::bind_unix_listener(&socket_path, socket_directories)
+                .map_err(ProxyRuntimeError::BindSocket)?;
         let socket_guard = Arc::new(Mutex::new(Some(socket_guard)));
 
         let generation = Arc::new(ProxyGeneration {
@@ -345,6 +352,8 @@ mod connect;
 mod http;
 mod ingress;
 mod tls;
+
+pub(crate) use ingress::SocketDirectoryRegistry;
 
 #[cfg(test)]
 mod tests;
