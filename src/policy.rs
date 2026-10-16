@@ -29,7 +29,6 @@ pub(crate) struct RequestFacts<'a> {
     pub(crate) uri_authority: Option<&'a str>,
     pub(crate) path: &'a str,
     pub(crate) host_headers: &'a [&'a str],
-    pub(crate) secure_transport: bool,
 }
 
 #[derive(Clone)]
@@ -81,9 +80,7 @@ impl SessionPolicy {
         let destination = parse_authority_text(authority, Some(443))?;
         validate_host_header_text(host_headers, &destination)?;
         if let Some(rule) = self.rules.get(&destination.host) {
-            if !rule.ports.contains(&destination.port)
-                || (rule.mode == RuleMode::Tunnel && !rule.paths.is_empty())
-            {
+            if !rule.ports.contains(&destination.port) {
                 return Err(AuthorizationError::Denied);
             }
             return Ok((rule.mode, destination));
@@ -118,10 +115,6 @@ impl SessionPolicy {
         connect_authority: &str,
     ) -> Result<(&'a [HeaderInjection], Option<String>), AuthorizationError> {
         if facts.method.eq_ignore_ascii_case("CONNECT")
-            || (!facts.secure_transport
-                && !facts
-                    .scheme
-                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https")))
             || facts
                 .scheme
                 .is_some_and(|scheme| !scheme.eq_ignore_ascii_case("https"))
@@ -359,7 +352,6 @@ mod tests {
             uri_authority: Some("api.example.com:443"),
             path: "/private",
             host_headers: &["api.example.com"],
-            secure_transport: true,
         };
         assert_eq!(
             policy.authorize_intercepted_request(&facts, "api.example.com:443"),
@@ -420,11 +412,19 @@ mod tests {
             uri_authority: Some("example.com:443"),
             path: "/allowed/%7Euser",
             host_headers: &["example.com"],
-            secure_transport: true,
         };
         let (_, canonical) = policy
             .authorize_intercepted_request(&facts, "example.com:443")
             .expect("authorized request should pass");
+        assert_eq!(canonical.as_deref(), Some("/allowed/~user"));
+
+        let omitted_scheme = RequestFacts {
+            scheme: None,
+            ..facts
+        };
+        let (_, canonical) = policy
+            .authorize_intercepted_request(&omitted_scheme, "example.com:443")
+            .expect("authorized request without scheme should pass");
         assert_eq!(canonical.as_deref(), Some("/allowed/~user"));
 
         let wrong_authority = RequestFacts {
@@ -444,12 +444,19 @@ mod tests {
             Err(AuthorizationError::Denied)
         ));
         let plaintext = RequestFacts {
-            secure_transport: false,
             scheme: Some("http"),
             ..facts
         };
         assert!(matches!(
             policy.authorize_intercepted_request(&plaintext, "example.com:443"),
+            Err(AuthorizationError::InvalidAuthority)
+        ));
+        let connect = RequestFacts {
+            method: "CONNECT",
+            ..facts
+        };
+        assert!(matches!(
+            policy.authorize_intercepted_request(&connect, "example.com:443"),
             Err(AuthorizationError::InvalidAuthority)
         ));
     }
@@ -461,5 +468,11 @@ mod tests {
         )
         .expect_err("tunnel rules cannot carry path restrictions");
         assert!(error.to_string().contains("cannot use paths or inject"));
+
+        let v2_error = SessionFile::from_toml(
+            "version = 2\n\n[rules.\"example.com\"]\nmode = \"tunnel\"\npaths = [\"/allowed\"]\n",
+        )
+        .expect_err("v2 tunnel rules cannot carry path restrictions");
+        assert!(v2_error.to_string().contains("cannot use paths or inject"));
     }
 }
