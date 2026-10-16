@@ -5,9 +5,11 @@
 //! private Rama module owns the Unix listener, tasks, and cleanup.
 
 mod rama;
+mod test_trust;
 
 pub use rama::ProxyRuntime;
 pub(crate) use rama::SocketDirectoryRegistry;
+pub(crate) use test_trust::TestUpstreamTrust;
 
 #[cfg(any(test, feature = "benchmark-tcp-nodelay"))]
 pub(crate) fn benchmark_tcp_nodelay_mode() -> String {
@@ -26,9 +28,6 @@ pub(crate) fn benchmark_tcp_nodelay_enabled(socket_leg: &str) -> bool {
     let mode = benchmark_tcp_nodelay_mode();
     mode == socket_leg || mode == "all"
 }
-
-#[cfg(test)]
-pub(crate) use rama::set_test_upstream_trust_anchor;
 
 #[cfg(test)]
 mod benchmark;
@@ -92,19 +91,4 @@ pub struct ProxyRuntimeEvent {
     pub listener_generation: u64,
     pub retired: bool,
     pub result: Result<(), ProxyRuntimeError>,
-}
-
-#[cfg(baffle_integration_test)]
-pub(super) fn integration_test_upstream_root() -> Result<Option<Vec<u8>>, String> {
-    let Some(path) = std::env::var_os("BAFFLE_TEST_UPSTREAM_CA") else {
-        return Ok(None);
-    };
-    let pem = std::fs::read(path)
-        .map_err(|error| format!("could not read integration upstream CA: {error}"))?;
-    let (remainder, certificate) = x509_parser::pem::parse_x509_pem(&pem)
-        .map_err(|_| "could not parse integration upstream CA PEM".to_owned())?;
-    if certificate.label != "CERTIFICATE" || !remainder.iter().all(u8::is_ascii_whitespace) {
-        return Err("integration upstream CA must contain one certificate".to_owned());
-    }
-    Ok(Some(certificate.contents))
 }

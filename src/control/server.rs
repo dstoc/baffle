@@ -34,7 +34,7 @@ use crate::{
     ca::ManagedCa,
     config::SessionConfig,
     platform::normalize_system_path,
-    proxy_runtime::ProxyRuntimeEvent,
+    proxy_runtime::{ProxyRuntimeEvent, TestUpstreamTrust},
     telemetry::{Metrics, MetricsSnapshot},
 };
 
@@ -132,6 +132,9 @@ impl Drop for SocketGuard {
 
 impl ControlServer {
     pub fn bind(config: &DaemonConfig, ca: Arc<ManagedCa>) -> Result<Self> {
+        let test_upstream_trust = TestUpstreamTrust::from_environment()
+            .map_err(anyhow::Error::msg)
+            .context("invalid test upstream TLS trust configuration")?;
         let control_socket = &config.daemon.control_socket;
         let socket_dir = &config.daemon.socket_dir;
         let trusted_uid = config.daemon.trusted_operator_uid;
@@ -215,6 +218,7 @@ impl ControlServer {
                 sessions: SessionManager::new(
                     &config.daemon,
                     ca,
+                    test_upstream_trust,
                     runtime_event_sender,
                     Arc::clone(&metrics),
                 ),
@@ -1001,8 +1005,6 @@ async fn create_session_response(
         Err(SessionError::AtCapacity) => error_value(ERR_SESSION_LIMIT),
         Err(SessionError::Runtime(error)) => {
             warn!(error_class = error.class(), "failed to start proxy runtime");
-            #[cfg(baffle_integration_test)]
-            eprintln!("test-only proxy runtime startup error: {error:?}");
             error_value(ERR_INTERNAL)
         }
         Err(SessionError::ShuttingDown) => error_value(ERR_SHUTTING_DOWN),

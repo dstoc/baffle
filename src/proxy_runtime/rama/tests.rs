@@ -22,11 +22,11 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector, rustls};
 
-use super::{ProxyRuntime, RuntimeId, set_test_upstream_trust_anchor};
+use super::{ProxyRuntime, RuntimeId};
 use crate::{
     ca::ManagedCa,
     config::{ControlRequest, SessionConfig},
-    proxy_runtime::ProxyRuntimeEvent,
+    proxy_runtime::{ProxyRuntimeEvent, TestUpstreamTrust},
     secrets::ResolvedSecrets,
 };
 

@@ -16,6 +16,7 @@ use tokio::{
 use crate::{
     config::RuleMode,
     policy::{Destination, SessionPolicy},
+    proxy_runtime::TestUpstreamTrust,
     secrets::ResolvedSecrets,
     telemetry::Metrics,
 };
@@ -29,6 +30,7 @@ pub(super) async fn handle_client<S>(
     policy: Arc<SessionPolicy>,
     secrets: Arc<ResolvedSecrets>,
     tls_relay: Arc<tls::CachedRelay>,
+    test_upstream_trust: TestUpstreamTrust,
     metrics: Arc<Metrics>,
     io_timeout: Duration,
 ) -> Result<(), ProxyRuntimeError>
@@ -82,6 +84,7 @@ where
         policy,
         secrets,
         tls_relay,
+        test_upstream_trust,
         parsed.authority,
         destination,
         metrics,

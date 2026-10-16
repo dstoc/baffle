@@ -15,6 +15,7 @@ use crate::{
     config::{DaemonSettings, SessionConfig},
     proxy_runtime::{
         ProxyRuntime, ProxyRuntimeError, ProxyRuntimeEvent, RuntimeId, SocketDirectoryRegistry,
+        TestUpstreamTrust,
     },
     secrets::ResolvedSecrets,
     telemetry::Metrics,
@@ -28,6 +29,7 @@ pub(super) struct SessionManager {
     pub(super) io_timeout: Duration,
     pub(super) shutdown_grace: Duration,
     pub(super) ca: Arc<ManagedCa>,
+    pub(super) test_upstream_trust: TestUpstreamTrust,
     pub(super) runtime_events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
     pub(super) registry: Arc<Mutex<SessionRegistry>>,
     pub(super) socket_directories: Arc<SocketDirectoryRegistry>,
@@ -44,6 +46,7 @@ impl SessionManager {
     pub(super) fn new(
         settings: &DaemonSettings,
         ca: Arc<ManagedCa>,
+        test_upstream_trust: TestUpstreamTrust,
         runtime_events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
         metrics: Arc<Metrics>,
     ) -> Self {
@@ -54,6 +57,7 @@ impl SessionManager {
             io_timeout: Duration::from_millis(settings.io_timeout_ms),
             shutdown_grace: Duration::from_secs(settings.shutdown_grace_seconds),
             ca,
+            test_upstream_trust,
             runtime_events,
             registry: Arc::new(Mutex::new(SessionRegistry {
                 accepting_sessions: true,
@@ -72,11 +76,7 @@ impl SessionManager {
         config_source: Option<String>,
     ) -> std::result::Result<SessionInfo, SessionError> {
         let secrets = Arc::new(secrets);
-        let id = new_session_id().map_err(|_error| {
-            #[cfg(baffle_integration_test)]
-            eprintln!("test-only session ID generation error: {_error}");
-            SessionError::Internal
-        })?;
+        let id = new_session_id().map_err(|_| SessionError::Internal)?;
         let persistent = session.persistent;
         {
             let mut registry = self.registry.lock().await;
@@ -87,8 +87,6 @@ impl SessionManager {
                 return Err(SessionError::AtCapacity);
             }
             if registry.sessions.contains_key(&id) || !registry.provisioning.insert(id.clone()) {
-                #[cfg(baffle_integration_test)]
-                eprintln!("test-only generated session ID collided with an active reservation");
                 return Err(SessionError::Internal);
             }
         }
@@ -100,8 +98,6 @@ impl SessionManager {
         let socket_path = match absolute_socket_path(&self.socket_dir.join(socket_name)) {
             Ok(path) => path,
             Err(_error) => {
-                #[cfg(baffle_integration_test)]
-                eprintln!("test-only session socket path resolution error: {_error}");
                 self.registry.lock().await.provisioning.remove(&id);
                 return Err(SessionError::Internal);
             }
@@ -116,6 +112,7 @@ impl SessionManager {
             self.max_connections_per_session,
             self.io_timeout,
             Arc::clone(&self.metrics),
+            self.test_upstream_trust.clone(),
             self.runtime_events.clone(),
             Arc::clone(&self.socket_directories),
             Arc::clone(&listener_gate),
