@@ -13,7 +13,9 @@ use tokio::{sync::Mutex, task::JoinSet};
 use crate::{
     ca::ManagedCa,
     config::{DaemonSettings, SessionConfig},
-    proxy_runtime::{ProxyRuntime, ProxyRuntimeError, ProxyRuntimeEvent, RuntimeId},
+    proxy_runtime::{
+        ProxyRuntime, ProxyRuntimeError, ProxyRuntimeEvent, RuntimeId, SocketDirectoryRegistry,
+    },
     secrets::ResolvedSecrets,
     telemetry::Metrics,
 };
@@ -28,6 +30,7 @@ pub(super) struct SessionManager {
     pub(super) ca: Arc<ManagedCa>,
     pub(super) runtime_events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
     pub(super) registry: Arc<Mutex<SessionRegistry>>,
+    pub(super) socket_directories: Arc<SocketDirectoryRegistry>,
     pub(super) metrics: Arc<Metrics>,
 }
 
@@ -57,6 +60,7 @@ impl SessionManager {
                 sessions: HashMap::new(),
                 provisioning: HashSet::new(),
             })),
+            socket_directories: Arc::new(SocketDirectoryRegistry::default()),
             metrics,
         }
     }
@@ -113,6 +117,7 @@ impl SessionManager {
             self.io_timeout,
             Arc::clone(&self.metrics),
             self.runtime_events.clone(),
+            Arc::clone(&self.socket_directories),
             Arc::clone(&listener_gate),
             1,
         )
