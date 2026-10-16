@@ -132,8 +132,7 @@ parallel creation with `max_provisioning_requests`. Each Unix listener enforces
 outbound TCP connection attempts, and TLS ClientHello inspection. It does not
 time out an idle direction of an established tunnel. Tunnel forwarding
 continues until an endpoint closes, an I/O error occurs, or the session shuts
-down. The legacy `connection_timeout_ms` setting is accepted for configuration
-compatibility and has no runtime effect.
+down.
 
 ## Proxy runtime boundary
 

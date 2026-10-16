@@ -79,7 +79,6 @@ directory = "/Users/alice/Library/Application Support/Baffle/secrets"
 | `daemon.shutdown_grace_seconds` | integer | `5` | Grace period for each session during shutdown. Zero requests immediate forced shutdown. |
 | `daemon.control_read_timeout_ms` | positive integer | `5000` | Timeout for control request frame reads. Zero is invalid. |
 | `daemon.max_provisioning_requests` | positive integer | `8` | Maximum concurrent session creation requests. Additional requests receive `busy`. Zero is invalid. |
-| `daemon.connection_timeout_ms` | unsigned integer | `5000` | Legacy field from older daemon files. Baffle accepts it for compatibility and does not use it. |
 | `daemon.io_timeout_ms` | positive integer | `30000` | Maximum time for CONNECT request parsing, outbound TCP connection attempts, and TLS ClientHello inspection. It does not set an idle timeout on established tunnel traffic. Zero is invalid. |
 | `daemon.create_mode` | `inline` or `file_only` | `inline` | Selects how clients create sessions. `inline` accepts validated version 2 session files from the client. `file_only` accepts daemon-managed version 2 files. |
 | `daemon.session_config_dir` | absolute path | required in `file_only` mode | Directory containing administrator-managed version 2 session TOML files. It is invalid in `inline` mode. The daemon refuses symlinks, unsafe ownership, and group- or other-writable directories and files. |

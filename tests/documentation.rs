@@ -13,7 +13,6 @@ fn daemon_configuration_example_parses_and_defaults_match_the_reference() {
     assert_eq!(example.daemon.shutdown_grace_seconds, 5);
     assert_eq!(example.daemon.control_read_timeout_ms, 5_000);
     assert_eq!(example.daemon.max_provisioning_requests, 8);
-    assert_eq!(example.daemon.connection_timeout_ms, 5_000);
     assert_eq!(example.daemon.io_timeout_ms, 30_000);
     assert_eq!(example.daemon.create_mode, SessionCreateMode::Inline);
 
@@ -38,7 +37,6 @@ directory = "/var/lib/baffle/secrets"
     assert_eq!(minimal.daemon.shutdown_grace_seconds, 5);
     assert_eq!(minimal.daemon.control_read_timeout_ms, 5_000);
     assert_eq!(minimal.daemon.max_provisioning_requests, 8);
-    assert_eq!(minimal.daemon.connection_timeout_ms, 5_000);
     assert_eq!(minimal.daemon.io_timeout_ms, 30_000);
     assert_eq!(minimal.daemon.create_mode, SessionCreateMode::Inline);
     assert!(minimal.secrets.allowed.is_empty());

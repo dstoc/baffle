@@ -49,7 +49,6 @@ pub(super) fn session_manager(directory: &std::path::Path, max_sessions: usize) 
         shutdown_grace_seconds: 1,
         control_read_timeout_ms: 1_000,
         max_provisioning_requests: 1,
-        connection_timeout_ms: 1_000,
         io_timeout_ms: 1_000,
         session_config_dir: None,
         create_mode: SessionCreateMode::Inline,

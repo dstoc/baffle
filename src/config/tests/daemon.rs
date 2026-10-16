@@ -35,7 +35,6 @@ directory = "/var/lib/baffle/secrets"
     assert_eq!(config.daemon.trusted_operator_uid, 1000);
     assert_eq!(config.daemon.control_read_timeout_ms, 5_000);
     assert_eq!(config.daemon.max_provisioning_requests, 8);
-    assert_eq!(config.daemon.connection_timeout_ms, 5_000);
     assert_eq!(config.daemon.io_timeout_ms, 30_000);
     assert_eq!(config.daemon.create_mode, SessionCreateMode::Inline);
     assert_eq!(config.daemon.session_config_dir, None);
@@ -107,6 +106,17 @@ fn rejects_unknown_daemon_fields_without_echoing_values() {
     let error = DaemonConfig::from_toml(&input).expect_err("unknown field should fail");
     assert!(error.to_string().contains("unsupported field"));
     assert!(!error.to_string().contains("do-not-leak-this"));
+}
+
+#[test]
+fn rejects_retired_connection_timeout_ms_field() {
+    let input = DAEMON_EXAMPLE.replace(
+        "max_sessions = 64",
+        "max_sessions = 64\nconnection_timeout_ms = 5000",
+    );
+    let error = DaemonConfig::from_toml(&input)
+        .expect_err("retired connection_timeout_ms field should be rejected");
+    assert!(error.to_string().contains("unsupported field"));
 }
 
 #[test]
