@@ -44,14 +44,11 @@ async fn tunnel_and_intercept_sessions_run_and_stop_independently() -> Result<()
 
     let socket_path = tunnel_runtime.socket_path().to_path_buf();
     let mut tunnel = UnixStream::connect(&socket_path).await?;
-    tunnel
-        .write_all(
-            format!(
-                "CONNECT localhost:{echo_port} HTTP/1.1\r\nHost: localhost:{echo_port}\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await?;
+    let mut request =
+        format!("CONNECT localhost:{echo_port} HTTP/1.1\r\nHost: localhost:{echo_port}\r\n\r\n")
+            .into_bytes();
+    request.extend_from_slice(b"opaque tunnel payload");
+    tunnel.write_all(&request).await?;
     let mut tunnel = BufReader::new(tunnel);
     let mut status = String::new();
     timeout(Duration::from_secs(2), tunnel.read_line(&mut status)).await??;
@@ -63,7 +60,6 @@ async fn tunnel_and_intercept_sessions_run_and_stop_independently() -> Result<()
             break;
         }
     }
-    tunnel.get_mut().write_all(b"opaque tunnel payload").await?;
     let mut echoed = [0; 21];
     timeout(Duration::from_secs(2), tunnel.read_exact(&mut echoed)).await??;
     assert_eq!(&echoed, b"opaque tunnel payload");
