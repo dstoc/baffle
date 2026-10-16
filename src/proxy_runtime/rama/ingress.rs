@@ -23,7 +23,11 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{ca::ManagedCa, platform::normalize_system_path, telemetry::Metrics};
+use crate::{
+    ca::ManagedCa,
+    platform::{directory_open_flags, normalize_system_path},
+    telemetry::Metrics,
+};
 
 use super::{ProxyGeneration, ProxyRuntimeError, connect};
 
@@ -353,7 +357,7 @@ fn open_socket_parent_locked(
     let root = unsafe {
         libc::open(
             c"/".as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            directory_open_flags() | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
         )
     };
     if root == -1 {
@@ -382,7 +386,7 @@ fn open_socket_parent_locked(
             libc::openat(
                 current.as_raw_fd(),
                 component.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                directory_open_flags() | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };
         if fd == -1 && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
@@ -396,7 +400,7 @@ fn open_socket_parent_locked(
                 libc::openat(
                     current.as_raw_fd(),
                     component.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    directory_open_flags() | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 )
             };
         }
@@ -409,10 +413,18 @@ fn open_socket_parent_locked(
             return Err(io::Error::last_os_error());
         }
         let metadata = unsafe { metadata.assume_init() };
-        if made {
-            unsafe {
-                libc::fchmod(next.as_raw_fd(), 0o700);
-            }
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "socket path component is not a directory",
+            ));
+        }
+        if made
+            && let Err(error) =
+                set_created_directory_mode(current.as_raw_fd(), &component, &metadata)
+        {
+            remove_created_directory_if_unchanged(current.as_raw_fd(), &component, &metadata);
+            return Err(error);
         }
         normalized.push(component.to_string_lossy().as_ref());
         let registered =
@@ -421,9 +433,11 @@ fn open_socket_parent_locked(
             Ok(key) => created.0.push(key),
             Err(error) => {
                 if made {
-                    unsafe {
-                        libc::unlinkat(current.as_raw_fd(), component.as_ptr(), libc::AT_REMOVEDIR);
-                    }
+                    remove_created_directory_if_unchanged(
+                        current.as_raw_fd(),
+                        &component,
+                        &metadata,
+                    );
                 }
                 return Err(error);
             }
@@ -435,6 +449,59 @@ fn open_socket_parent_locked(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing socket name"))?;
     let logical_path = logical_absolute_parent.join(name);
     Ok((current, logical_path))
+}
+
+fn set_created_directory_mode(
+    parent: libc::c_int,
+    name: &CString,
+    expected: &libc::stat,
+) -> io::Result<()> {
+    let fd = unsafe {
+        libc::openat(
+            parent,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let directory = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(directory.as_raw_fd(), metadata.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let metadata = unsafe { metadata.assume_init() };
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || metadata.st_dev != expected.st_dev
+        || metadata.st_ino != expected.st_ino
+    {
+        return Err(io::Error::other(
+            "created socket directory changed before permission setup",
+        ));
+    }
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn remove_created_directory_if_unchanged(
+    parent: libc::c_int,
+    name: &CString,
+    expected: &libc::stat,
+) {
+    if stat_at(parent, name).is_ok_and(|current| {
+        current.is_some_and(|metadata| {
+            metadata.st_mode & libc::S_IFMT == libc::S_IFDIR
+                && metadata.st_dev == expected.st_dev
+                && metadata.st_ino == expected.st_ino
+        })
+    }) {
+        unsafe {
+            libc::unlinkat(parent, name.as_ptr(), libc::AT_REMOVEDIR);
+        }
+    }
 }
 
 fn stat_at(parent: libc::c_int, name: &CString) -> io::Result<Option<libc::stat>> {
