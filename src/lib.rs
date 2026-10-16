@@ -10,3 +10,7 @@ mod policy;
 pub mod proxy_runtime;
 mod secrets;
 pub mod telemetry;
+
+#[cfg(test)]
+#[path = "../tests/common/test_ca.rs"]
+mod test_ca;

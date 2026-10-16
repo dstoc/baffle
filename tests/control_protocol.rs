@@ -9,7 +9,7 @@ use std::{
         fs::{MetadataExt, PermissionsExt, symlink},
         net::UnixStream,
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Barrier,
@@ -19,9 +19,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use serde_json::Value;
 use tempfile::TempDir;
+
+#[allow(dead_code)]
+mod common;
+use common::{encode_frame, read_response, request, write_frame, write_test_ca};
 
 struct DaemonProcess {
     child: Child,
@@ -1435,7 +1438,7 @@ fn intercept_policy_with_secret(host: &str, persistent: bool) -> String {
     )
 }
 
-fn reload_session(control_socket: &PathBuf, session_id: &str) -> Value {
+fn reload_session(control_socket: &Path, session_id: &str) -> Value {
     request(
         control_socket,
         &format!("version = 2\noperation = \"reload\"\nsession_id = {session_id:?}\n"),
@@ -1517,14 +1520,14 @@ fn write_session_policy_contents(daemon: &DaemonProcess, name: &str, contents: &
         .expect("session config should be private");
 }
 
-fn list_sessions(control_socket: &PathBuf) -> Vec<Value> {
+fn list_sessions(control_socket: &Path) -> Vec<Value> {
     request(control_socket, "version = 2\noperation = \"list\"\n")["result"]["sessions"]
         .as_array()
         .expect("list should return a session array")
         .clone()
 }
 
-fn wait_for_session_count(control_socket: &PathBuf, expected: usize) {
+fn wait_for_session_count(control_socket: &Path, expected: usize) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if list_sessions(control_socket).len() == expected {
@@ -1557,60 +1560,4 @@ fn assert_proxy_available(socket_path: &PathBuf) {
             || status.starts_with("HTTP/1.0 403"),
         "running deny-all proxy should respond through its own Unix socket: {status:?}"
     );
-}
-
-fn write_test_ca(directory: &std::path::Path) -> (PathBuf, PathBuf) {
-    let key_pair = KeyPair::generate().expect("CA key should be generated");
-    let mut parameters = CertificateParams::default();
-    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let certificate = parameters
-        .self_signed(&key_pair)
-        .expect("CA certificate should be generated");
-
-    let certificate_path = directory.join("ca.pem");
-    let private_key_path = directory.join("ca-key.pem");
-    fs::write(&certificate_path, certificate.pem()).expect("CA certificate should be saved");
-    fs::write(&private_key_path, key_pair.serialize_pem()).expect("CA key should be saved");
-    fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o600))
-        .expect("CA key permissions should be restricted");
-    (certificate_path, private_key_path)
-}
-
-fn request(socket: &PathBuf, request: &str) -> Value {
-    let mut stream = UnixStream::connect(socket).expect("client should connect");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .expect("client timeout should be set");
-    write_frame(&mut stream, request.as_bytes());
-    read_response(&mut stream)
-}
-
-fn write_frame(stream: &mut UnixStream, payload: &[u8]) {
-    let length = u32::try_from(payload.len()).expect("test frame should fit in u32");
-    stream
-        .write_all(&length.to_be_bytes())
-        .expect("frame header should be written");
-    stream
-        .write_all(payload)
-        .expect("frame payload should be written");
-}
-
-fn encode_frame(payload: &[u8]) -> Vec<u8> {
-    let length = u32::try_from(payload.len()).expect("test frame should fit in u32");
-    [length.to_be_bytes().as_slice(), payload].concat()
-}
-
-fn read_response(stream: &mut UnixStream) -> Value {
-    let mut header = [0; 4];
-    stream
-        .read_exact(&mut header)
-        .expect("response header should be complete");
-    let length = u32::from_be_bytes(header) as usize;
-    assert!(length <= 256 * 1024, "response should fit expected limit");
-    let mut body = vec![0; length];
-    stream
-        .read_exact(&mut body)
-        .expect("response body should be complete");
-    serde_json::from_slice(&body).expect("response should be valid JSON")
 }

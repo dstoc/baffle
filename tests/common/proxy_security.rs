@@ -1,13 +1,12 @@
 //! Backend-neutral fixtures for tests that drive a live Baffle proxy runtime.
 
-use std::{error::Error, fs, path::Path, sync::Arc, time::Duration};
+use std::{error::Error, path::Path, sync::Arc, time::Duration};
 
 use baffle_proxy::{
     ca::ManagedCa,
     config::{ControlRequest, SessionConfig},
     proxy_runtime::{ProxyRuntimeEvent, RuntimeId},
 };
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
@@ -18,6 +17,9 @@ use tokio_rustls::rustls::{
     ClientConfig, RootCertStore, crypto::aws_lc_rs, pki_types::CertificateDer,
 };
 use tokio_rustls::{TlsConnector, client::TlsStream, rustls::pki_types::ServerName};
+
+#[path = "test_ca.rs"]
+mod test_ca;
 
 pub(crate) fn session_config() -> SessionConfig {
     let request = ControlRequest::from_toml(
@@ -55,21 +57,7 @@ pub(crate) fn loopback_session_config(port: u16) -> SessionConfig {
 }
 
 pub(crate) fn write_test_ca(directory: &std::path::Path) -> Arc<ManagedCa> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let key_pair = KeyPair::generate().expect("CA key should be generated");
-    let mut parameters = CertificateParams::default();
-    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let certificate = parameters
-        .self_signed(&key_pair)
-        .expect("CA certificate should be generated");
-    let certificate_path = directory.join("ca.pem");
-    let private_key_path = directory.join("ca-key.pem");
-    fs::write(&certificate_path, certificate.pem()).expect("CA certificate should be saved");
-    fs::write(&private_key_path, key_pair.serialize_pem()).expect("CA key should be saved");
-    fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o600))
-        .expect("CA key permissions should be restricted");
+    let (certificate_path, private_key_path) = test_ca::write_test_ca(directory);
     Arc::new(
         ManagedCa::load(&baffle_proxy::config::CaConfig {
             certificate: certificate_path,
