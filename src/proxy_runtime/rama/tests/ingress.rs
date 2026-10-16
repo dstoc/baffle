@@ -82,6 +82,87 @@ async fn nested_socket_parent_symlink_is_rejected() -> Result<(), TestError> {
 }
 
 #[tokio::test]
+async fn socket_binding_traverses_a_search_only_ancestor() -> Result<(), TestError> {
+    let directory = tempfile::tempdir()?;
+    let ancestor = directory.path().join("search-only");
+    let socket_parent = ancestor.join("sockets");
+    fs::create_dir(&ancestor)?;
+    fs::create_dir(&socket_parent)?;
+    fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o111))?;
+    fs::set_permissions(&socket_parent, fs::Permissions::from_mode(0o700))?;
+
+    let ca = write_managed_ca(directory.path());
+    let path = socket_parent.join("github.sock");
+    let (events, _) = mpsc::unbounded_channel();
+    let runtime = ProxyRuntime::start(
+        RuntimeId::new("rama-search-only-ancestor"),
+        tunnel_session(443),
+        ca,
+        path.clone(),
+        4,
+        events,
+    )
+    .await?;
+
+    assert!(path.exists());
+    runtime.shutdown(Duration::from_secs(1)).await;
+    assert!(!path.exists());
+    fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn socket_binding_traverses_the_var_run_system_alias() -> Result<(), TestError> {
+    let conventional_alias = fs::symlink_metadata("/var/run")
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        && fs::read_link("/var/run").is_ok_and(|target| target == std::path::Path::new("/run"));
+    if !conventional_alias {
+        return Ok(());
+    }
+
+    let directory = match tempfile::tempdir_in("/run/lock") {
+        Ok(directory) => directory,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::ReadOnlyFilesystem
+                    | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            eprintln!("Skipping /var/run socket bind fixture: {error}");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let alias_path = std::path::Path::new("/var/run/lock")
+        .join(directory.path().file_name().expect("fixture has a name"))
+        .join("cladding/github.sock");
+    let canonical_path = directory.path().join("cladding/github.sock");
+    let ca = write_managed_ca(directory.path());
+    let (events, _) = mpsc::unbounded_channel();
+    let runtime = ProxyRuntime::start(
+        RuntimeId::new("rama-var-run-alias"),
+        tunnel_session(443),
+        ca,
+        alias_path.clone(),
+        4,
+        events,
+    )
+    .await?;
+
+    assert!(alias_path.exists());
+    assert_eq!(
+        fs::symlink_metadata(&canonical_path)?.permissions().mode() & 0o777,
+        0o600
+    );
+    runtime.shutdown(Duration::from_secs(1)).await;
+    assert!(!alias_path.exists());
+    Ok(())
+}
+
+#[tokio::test]
 async fn renamed_socket_parent_cleanup_leaves_replacement_path_untouched() -> Result<(), TestError>
 {
     let directory = tempfile::tempdir()?;

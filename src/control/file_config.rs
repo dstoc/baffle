@@ -1,11 +1,11 @@
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, Read},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{
             ffi::OsStrExt,
-            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+            fs::{MetadataExt, PermissionsExt},
         },
     },
     path::Path,
@@ -14,7 +14,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use crate::platform::normalize_system_path;
+use crate::platform::{directory_open_flags, normalize_system_path};
 
 const MAX_SESSION_CONFIG_BYTES: usize = 256 * 1024;
 
@@ -58,7 +58,7 @@ impl SessionConfigStore {
                 directory = openat_file(
                     directory.as_raw_fd(),
                     &component,
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    directory_open_flags() | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 )
                 .map_err(classify_config_file_io)?;
                 let metadata = directory
@@ -105,11 +105,17 @@ fn open_trusted_directory_tree(path: &Path, trusted_uid: u32) -> Result<File> {
     if !path.is_absolute() {
         bail!("session configuration directory must be absolute");
     }
-    let mut directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open("/")
-        .context("could not open filesystem root for session configuration")?;
+    let root = unsafe {
+        libc::open(
+            c"/".as_ptr(),
+            directory_open_flags() | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if root == -1 {
+        return Err(io::Error::last_os_error())
+            .context("could not open filesystem root for session configuration");
+    }
+    let mut directory = unsafe { File::from_raw_fd(root) };
     let components = path
         .components()
         .filter_map(|component| match component {
@@ -129,7 +135,7 @@ fn open_trusted_directory_tree(path: &Path, trusted_uid: u32) -> Result<File> {
         directory = openat_file(
             directory.as_raw_fd(),
             &component,
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            directory_open_flags() | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
         )
         .context("could not securely open session configuration directory")?;
         let is_root = index + 1 == components.len();
@@ -195,6 +201,54 @@ fn classify_config_file_io(error: io::Error) -> SessionConfigFileError {
         SessionConfigFileError::NotFound
     } else {
         SessionConfigFileError::Unavailable
+    }
+}
+
+#[cfg(test)]
+mod traversal_tests {
+    use super::SessionConfigStore;
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+    };
+
+    #[test]
+    fn opens_session_config_directory_through_search_only_ancestor() {
+        let directory = tempfile::tempdir().expect("temporary root should be created");
+        let ancestor = directory.path().join("search-only");
+        let config_directory = ancestor.join("sessions");
+        fs::create_dir(&ancestor).expect("search-only ancestor should be created");
+        fs::create_dir(&config_directory).expect("session directory should be created");
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o111))
+            .expect("ancestor should be searchable but not readable");
+        fs::set_permissions(&config_directory, fs::Permissions::from_mode(0o700))
+            .expect("session directory should be private");
+        let trusted_uid = fs::metadata(directory.path())
+            .expect("temporary root should have metadata")
+            .uid();
+
+        SessionConfigStore::open(&config_directory, trusted_uid)
+            .expect("search-only ancestor should not require read permission");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn opens_session_config_directory_through_var_run_alias() {
+        let is_conventional_alias = fs::symlink_metadata("/var/run")
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            && fs::read_link("/var/run").is_ok_and(|target| target == std::path::Path::new("/run"));
+        if !is_conventional_alias {
+            return;
+        }
+
+        let run_metadata = fs::metadata("/run").expect("run directory should have metadata");
+        if run_metadata.permissions().mode() & 0o022 != 0 {
+            // A writable /run does not satisfy the existing config-root policy.
+            return;
+        }
+        let trusted_uid = run_metadata.uid();
+        SessionConfigStore::open(std::path::Path::new("/var/run"), trusted_uid)
+            .expect("session config should open through the supported Linux alias");
     }
 }
 

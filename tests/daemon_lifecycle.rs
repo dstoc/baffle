@@ -220,6 +220,167 @@ directory = "{secrets}"
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn daemon_starts_with_socket_directory_under_var_run_alias() {
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        path::Path,
+        process::Child,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    if !fs::symlink_metadata("/var/run").is_ok_and(|metadata| metadata.file_type().is_symlink())
+        || !fs::read_link("/var/run").is_ok_and(|target| target == Path::new("/run"))
+    {
+        return;
+    }
+
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let config_directory = tempfile::tempdir().expect("temporary config directory should exist");
+    let socket_root = match tempfile::tempdir_in("/run/lock") {
+        Ok(directory) => directory,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::ReadOnlyFilesystem
+                    | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            eprintln!("Skipping daemon /var/run startup fixture: {error}");
+            return;
+        }
+        Err(error) => panic!("temporary socket root should be created: {error}"),
+    };
+    let alias_socket_dir = Path::new("/var/run/lock")
+        .join(
+            socket_root
+                .path()
+                .file_name()
+                .expect("socket root has a name"),
+        )
+        .join("proxies");
+    let config_path = config_directory.path().join("daemon.toml");
+    let control_socket = config_directory.path().join("run/control.sock");
+    let certificate_path = config_directory.path().join("ca.pem");
+    let private_key_path = config_directory.path().join("ca-key.pem");
+    let secrets_directory = config_directory.path().join("secrets");
+    fs::create_dir(&secrets_directory).expect("secrets directory should be created");
+    fs::set_permissions(&secrets_directory, fs::Permissions::from_mode(0o700))
+        .expect("secrets directory should be private");
+    let trusted_uid = fs::metadata(config_directory.path())
+        .expect("config directory should have metadata")
+        .uid();
+    fs::write(
+        &config_path,
+        format!(
+            "[daemon]\ncontrol_socket = \"{}\"\nsocket_dir = \"{}\"\ntrusted_operator_uid = {trusted_uid}\n\n[ca]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n[secrets]\ndirectory = \"{}\"\n",
+            control_socket.display(),
+            alias_socket_dir.display(),
+            certificate_path.display(),
+            private_key_path.display(),
+            secrets_directory.display(),
+        ),
+    )
+    .expect("daemon config should be written");
+
+    let initialize = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("ca")
+        .arg("init")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("CA initialization should run");
+    assert!(
+        initialize.status.success(),
+        "CA initialization should succeed: {}",
+        String::from_utf8_lossy(&initialize.stderr)
+    );
+
+    let daemon_log = config_directory.path().join("daemon.log");
+    let daemon_log_file = fs::File::create(&daemon_log).expect("daemon log should be created");
+    let child = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .arg("daemon")
+        .arg("--config")
+        .arg(&config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(daemon_log_file))
+        .spawn()
+        .expect("daemon process should start");
+    let mut child = ChildGuard(child);
+
+    let startup_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if control_socket.exists() {
+            break;
+        }
+        if let Some(status) = child
+            .0
+            .try_wait()
+            .expect("daemon status should be readable")
+        {
+            panic!(
+                "daemon exited before startup through /var/run: {status}; log: {}",
+                fs::read_to_string(&daemon_log).unwrap_or_default()
+            );
+        }
+        assert!(
+            Instant::now() < startup_deadline,
+            "daemon should start with a socket directory under /var/run"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        socket_root.path().join("proxies").is_dir(),
+        "daemon should create its configured socket directory through the alias"
+    );
+    assert_eq!(
+        fs::metadata(socket_root.path().join("proxies"))
+            .expect("socket directory should have metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+
+    let signal = Command::new("kill")
+        .arg("-INT")
+        .arg(child.0.id().to_string())
+        .status()
+        .expect("kill command should be available");
+    assert!(signal.success(), "daemon should receive SIGINT");
+    let shutdown_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child
+            .0
+            .try_wait()
+            .expect("daemon status should be readable")
+        {
+            assert!(status.success(), "daemon should stop cleanly: {status}");
+            break;
+        }
+        assert!(
+            Instant::now() < shutdown_deadline,
+            "daemon should stop after SIGINT"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !control_socket.exists(),
+        "daemon should remove control socket"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn daemon_does_not_start_when_ca_material_is_missing() {
