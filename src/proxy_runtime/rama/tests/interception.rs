@@ -283,7 +283,7 @@ async fn reuses_intercepted_leaf_certificates_within_runtime_and_keeps_ca_isolat
         .collect::<Vec<_>>()
         .join(", ");
     let input = format!(
-        "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"localhost\"\nmode = \"intercept\"\nports = [{ports}]\npaths = [\"/allowed\"]\n\n[[rules.inject]]\nheader = \"Authorization\"\nsecret = \"proxy-token\"\nformat = \"bearer\"\n"
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.rules.\"localhost\"]\nmode = \"intercept\"\nports = [{ports}]\npaths = [\"/allowed\"]\n\n[[session.rules.\"localhost\".inject]]\nheader = \"Authorization\"\nsecret = \"proxy-token\"\nformat = \"bearer\"\n"
     );
     let ControlRequest::Create { session, .. } = ControlRequest::from_toml(&input)? else {
         panic!("expected create request");
