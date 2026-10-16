@@ -83,9 +83,8 @@ workflows.
   validate their own OS-level network controls.
 - `.github/workflows/ci.yml` runs the privileged Linux namespace fixture and
   native Apple Silicon Unix-socket tests on pull requests and main-branch
-  pushes. The separate
-  `.github/workflows/network-namespace.yml` workflow runs the same fixture only
-  when manually dispatched. Operators must validate their actual deployment
+  pushes. To run the namespace fixture on demand, manually dispatch
+  `.github/workflows/ci.yml`. Operators must validate their actual deployment
   topology as well.
 - Only the trusted operator may access the control socket. Expose only the
   assigned mode-`0600` session socket to each client. Never expose the CA

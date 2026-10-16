@@ -8,8 +8,8 @@ daemon and Unix data-socket tests.
 `.github/workflows/ci.yml` runs formatting, Clippy, debug tests, release tests,
 examples, the privileged Linux network-namespace fixture, and native Apple
 Silicon macOS daemon integration. The required status check remains exactly
-`Format, lint, and test`. The manually dispatched
-`.github/workflows/network-namespace.yml` runs the same privileged fixture.
+`Format, lint, and test`. To run the privileged fixture on demand, manually
+dispatch `.github/workflows/ci.yml`.
 
 | Area | Required coverage |
 | --- | --- |
