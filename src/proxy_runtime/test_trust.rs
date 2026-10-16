@@ -43,10 +43,9 @@ impl TestUpstreamTrust {
     pub(crate) fn certificate(&self) -> Option<rama::crypto::pki_types::CertificateDer<'static>> {
         #[cfg(any(test, baffle_integration_test))]
         {
-            return self
-                .anchor_der
+            self.anchor_der
                 .as_ref()
-                .map(|anchor| rama::crypto::pki_types::CertificateDer::from(anchor.to_vec()));
+                .map(|anchor| rama::crypto::pki_types::CertificateDer::from(anchor.to_vec()))
         }
 
         #[cfg(not(any(test, baffle_integration_test)))]
