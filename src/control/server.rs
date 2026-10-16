@@ -24,7 +24,9 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::config::{ControlRequest, DaemonConfig, PROTOCOL_VERSION, SessionCreateMode};
+use crate::config::{
+    ControlRequest, DaemonConfig, PROTOCOL_VERSION, SESSION_FILE_INVALID_MESSAGE, SessionCreateMode,
+};
 use crate::secrets::{SecretStore, SecretStoreError};
 use crate::{
     ca::ManagedCa,
@@ -70,10 +72,7 @@ const ERR_CONFIG_FILE_UNAVAILABLE: (&str, &str) = (
     "config_file_unavailable",
     "session configuration file is unavailable",
 );
-const ERR_CONFIG_FILE_INVALID: (&str, &str) = (
-    "config_file_invalid",
-    "session configuration file is invalid; use version = 2, remove operation and [session], move settings to the root, and use [rules.\"hostname\"] tables",
-);
+const ERR_CONFIG_FILE_INVALID: (&str, &str) = ("config_file_invalid", SESSION_FILE_INVALID_MESSAGE);
 
 pub struct ControlServer {
     listener: Option<UnixListener>,

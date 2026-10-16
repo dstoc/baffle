@@ -96,7 +96,7 @@ fn defaults_create_persistence_and_destination_port() {
 }
 
 #[test]
-fn rejects_removed_private_addresses_field_for_migration() {
+fn rejects_removed_private_addresses_field() {
     assert!(
         ControlRequest::from_toml(
             "version = 1\noperation = \"create\"\n\n[session]\n\n[[rules]]\nhost = \"internal.example\"\nmode = \"tunnel\"\nports = [8443]\nprivate_addresses = [\"10.20.30.40\"]\n",

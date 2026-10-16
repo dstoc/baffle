@@ -19,95 +19,78 @@ pub struct SessionFile;
 impl SessionFile {
     /// Parse and validate a version 2 session file.
     pub fn from_toml(input: &str) -> Result<SessionConfig, ConfigError> {
-        let value = toml::from_str::<toml::Value>(input).map_err(|_| {
+        let raw: RawSessionConfig = toml::from_str(input).map_err(|_| {
             ConfigError::new("invalid session configuration TOML syntax or value (values omitted)")
         })?;
-        let Some(root) = value.as_table() else {
-            return Err(ConfigError::new(
-                "session configuration must be a TOML document with version = 2",
-            ));
-        };
 
-        match root.get("version").and_then(toml::Value::as_integer) {
-            Some(1) => {
-                return Err(ConfigError::new(
-                    "session configuration version 1 is unsupported; migrate to version 2 by removing operation, moving session settings to the root, and changing [[rules]] host entries to [rules.\"hostname\"]",
-                ));
-            }
+        match raw.version {
             Some(SESSION_FILE_VERSION) => {}
             Some(_) => {
                 return Err(ConfigError::new(
                     "unsupported session configuration version; expected version = 2",
                 ));
             }
-            None if root.contains_key("version") => {
-                return Err(ConfigError::new(
-                    "session configuration version must be the integer 2",
-                ));
-            }
             None => {
                 return Err(ConfigError::new(
-                    "session configuration must declare version = 2; version 1 session files must be migrated",
+                    "session configuration must declare version = 2",
                 ));
             }
         }
 
-        if root.contains_key("operation") {
-            return Err(ConfigError::new(
-                "operation is a control-protocol field and is not valid in a session file; remove it from the version 2 document",
-            ));
-        }
-        if root.contains_key("session") {
-            return Err(ConfigError::new(
-                "the [session] table is not valid in a version 2 session file; move persistent, socket_name, and unmatched to the document root",
-            ));
-        }
-        if root.get("rules").is_some_and(toml::Value::is_array) {
-            return Err(ConfigError::new(
-                "[[rules]] entries are not valid in a version 2 session file; use quoted hostname tables such as [rules.\"example.com\"]",
-            ));
-        }
-        if root.get("unmatched").is_some_and(|value| {
-            !value
-                .as_str()
-                .is_some_and(|policy| matches!(policy, "deny" | "tunnel"))
-        }) {
-            return Err(ConfigError::new("unmatched must be \"deny\" or \"tunnel\""));
+        if !raw.unsupported_fields.is_empty() {
+            return Err(invalid_session_file());
         }
 
-        let raw: RawSessionConfig = toml::from_str(input).map_err(|_| {
-            ConfigError::new(
-                "invalid version 2 session configuration field or value (values omitted)",
-            )
-        })?;
-        if raw.version != SESSION_FILE_VERSION as u16 {
-            return Err(ConfigError::new(
-                "unsupported session configuration version; expected version = 2",
-            ));
-        }
-        let rules = validate_named_rules(raw.rules)?;
+        let unmatched = match raw.unmatched.as_deref().unwrap_or("deny") {
+            "deny" => UnmatchedHostPolicy::Deny,
+            "tunnel" => UnmatchedHostPolicy::Tunnel,
+            _ => return Err(ConfigError::new("unmatched must be \"deny\" or \"tunnel\"")),
+        };
+        let rules: BTreeMap<String, RawNamedRule> = match raw.rules {
+            Some(RawRules::Named(rules)) => rules,
+            Some(RawRules::Other(value)) => {
+                let _ = value;
+                return Err(invalid_session_file());
+            }
+            None => BTreeMap::new(),
+        };
+
+        let rules = validate_named_rules(rules)?;
         Ok(SessionConfig {
             persistent: raw.persistent,
             socket_name: raw
                 .socket_name
                 .map(|name| validate_socket_name(&name))
                 .transpose()?,
-            unmatched: raw.unmatched,
+            unmatched,
             rules,
         })
     }
 }
 
+fn invalid_session_file() -> ConfigError {
+    ConfigError::new("invalid version 2 session configuration field or value (values omitted)")
+}
+
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawSessionConfig {
-    version: u16,
+    #[serde(default)]
+    version: Option<i64>,
     #[serde(default)]
     persistent: bool,
     #[serde(default)]
     socket_name: Option<String>,
     #[serde(default)]
-    unmatched: UnmatchedHostPolicy,
+    unmatched: Option<String>,
     #[serde(default)]
-    rules: BTreeMap<String, RawNamedRule>,
+    rules: Option<RawRules>,
+    #[serde(default, flatten)]
+    unsupported_fields: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawRules {
+    Named(BTreeMap<String, RawNamedRule>),
+    Other(toml::Value),
 }

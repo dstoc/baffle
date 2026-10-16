@@ -239,9 +239,7 @@ fn reload_failure_text(reason: Option<&str>) -> &str {
         Some("inline_session") => "inline-configured sessions cannot be reloaded",
         Some("configuration_not_found") => "configuration file was not found",
         Some("configuration_unavailable") => "configuration file could not be read safely",
-        Some("configuration_invalid") => {
-            "configuration file is invalid; use version = 2, move session settings to the root, set unmatched to \"deny\" or \"tunnel\", and use [rules.\"hostname\"] tables"
-        }
+        Some("configuration_invalid") => crate::config::SESSION_FILE_INVALID_MESSAGE,
         Some("credentials_unavailable") => "credentials are unavailable",
         Some("listener_unavailable") => "replacement listener could not be created",
         Some("generation_limit") => "reload resource limit reached",
