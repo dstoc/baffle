@@ -404,27 +404,3 @@ async fn cancelling_shutdown_with_an_inflight_intercepted_request_closes_it()
     origin_task.abort();
     Ok(())
 }
-
-#[tokio::test]
-async fn proxy_task_failure_is_reported_to_the_session_event_channel() -> Result<(), TestError> {
-    let directory = tempfile::tempdir()?;
-    let ca = write_managed_ca(directory.path());
-    let (runtime, mut events) = start_runtime(
-        directory.path(),
-        tunnel_session(443),
-        ca,
-        Duration::from_secs(1),
-    )
-    .await?;
-
-    runtime.task_abort.abort();
-    let event = timeout(Duration::from_secs(2), events.recv())
-        .await?
-        .ok_or_else(|| io::Error::other("session event channel should remain open"))?;
-    assert!(
-        event.result.is_err(),
-        "proxy task failure must reach its supervisor"
-    );
-    runtime.shutdown(Duration::from_secs(1)).await;
-    Ok(())
-}

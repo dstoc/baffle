@@ -3,19 +3,7 @@ use super::*;
 pub(super) type TestError = Box<dyn Error + Send + Sync>;
 
 pub(super) fn write_managed_ca(directory: &Path) -> Arc<ManagedCa> {
-    let key = KeyPair::generate().expect("Baffle CA key should generate");
-    let mut params = CertificateParams::default();
-    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let certificate = params
-        .self_signed(&key)
-        .expect("Baffle CA certificate should generate");
-    let cert_path = directory.join("baffle-ca.pem");
-    let key_path = directory.join("baffle-ca-key.pem");
-    fs::write(&cert_path, certificate.pem()).expect("Baffle CA certificate should be saved");
-    fs::write(&key_path, key.serialize_pem()).expect("Baffle CA key should be saved");
-    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
-        .expect("Baffle CA key should be private");
+    let (cert_path, key_path) = crate::test_ca::write_test_ca(directory);
     Arc::new(
         ManagedCa::load(&crate::config::CaConfig {
             certificate: cert_path,
