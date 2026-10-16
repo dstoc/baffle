@@ -137,3 +137,13 @@ fn release_docs_include_current_rama_benchmark_instructions_only() {
     assert!(!guide.to_ascii_lowercase().contains("unix-to-tcp bridge"));
     assert!(include_str!("../scripts/package-release.sh").contains("release-docs.txt"));
 }
+
+#[test]
+fn integration_test_discovery_requires_no_explicit_test_manifest_targets() {
+    let manifest = include_str!("../Cargo.toml");
+    let parsed = toml::from_str::<toml::Table>(manifest).expect("Cargo.toml should parse");
+    assert!(
+        parsed.get("test").is_none(),
+        "Cargo.toml should not declare explicit [[test]] targets; integration tests rely on standard Cargo discovery"
+    );
+}

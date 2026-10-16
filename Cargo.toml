@@ -50,22 +50,6 @@ http = "=1.5.0"
 tempfile = "3.27.0"
 tokio-rustls = "0.26.5"
 
-[[test]]
-name = "client"
-path = "tests/client.rs"
-
-[[test]]
-name = "daemon_lifecycle"
-path = "tests/daemon_lifecycle.rs"
-
-[[test]]
-name = "control_protocol"
-path = "tests/control_protocol.rs"
-
-[[test]]
-name = "proxy_runtime"
-path = "tests/proxy_runtime.rs"
-
 [[example]]
 name = "cladding_socat"
 path = "examples/cladding_socat.rs"
