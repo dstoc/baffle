@@ -109,9 +109,7 @@ fn validate_session_config_name(name: &str) -> Result<String, ConfigError> {
         return Err(ConfigError::new("session configuration name is invalid"));
     }
 
-    let mut component_count = 0;
     for component in name.split('/') {
-        component_count += 1;
         if component.is_empty()
             || component == "."
             || component == ".."
@@ -119,9 +117,6 @@ fn validate_session_config_name(name: &str) -> Result<String, ConfigError> {
         {
             return Err(ConfigError::new("session configuration name is invalid"));
         }
-    }
-    if component_count == 0 {
-        return Err(ConfigError::new("session configuration name is invalid"));
     }
     Ok(name.to_owned())
 }

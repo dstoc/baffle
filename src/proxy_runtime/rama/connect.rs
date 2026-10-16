@@ -217,14 +217,15 @@ where
         }
     };
     let read_ahead = bytes.split_off(header_end);
-    let headers = std::str::from_utf8(&bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "CONNECT headers are not ASCII"))?;
-    if !headers.is_ascii() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "CONNECT headers are not ASCII",
-        ));
-    }
+    let headers = match std::str::from_utf8(&bytes) {
+        Ok(headers) if headers.is_ascii() => headers,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CONNECT headers are not ASCII",
+            ));
+        }
+    };
     let mut lines = headers[..headers.len() - 4].split("\r\n");
     let request_line = lines
         .next()
@@ -418,6 +419,22 @@ mod parser_tests {
         .await;
 
         assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::InvalidData));
+    }
+
+    #[tokio::test]
+    async fn rejects_non_ascii_and_invalid_utf8_headers_with_the_same_error() {
+        for value in [vec![0xc3, 0xa9], vec![0xff]] {
+            let mut request = b"CONNECT example.com:443 HTTP/1.1\r\nX: ".to_vec();
+            request.extend_from_slice(&value);
+            request.extend_from_slice(b"\r\n\r\n");
+
+            let error = parse(request, 4096)
+                .await
+                .err()
+                .expect("non-ASCII headers must fail");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(error.to_string(), "CONNECT headers are not ASCII");
+        }
     }
 
     #[tokio::test]
