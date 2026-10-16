@@ -305,6 +305,28 @@ class ReleasePleaseManifestTests(unittest.TestCase):
                             "must close on its opening line"
                         )
 
+    def test_root_manifest_relies_on_default_test_discovery(self):
+        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
+        self.assertNotIn(
+            "test",
+            manifest,
+            "Cargo.toml should not declare explicit [[test]] targets; integration tests rely on standard Cargo discovery",
+        )
+        tests_dir = REPO_ROOT / "tests"
+        test_files = sorted(p.stem for p in tests_dir.glob("*.rs"))
+        self.assertEqual(
+            test_files,
+            [
+                "cli",
+                "client",
+                "control_protocol",
+                "daemon_lifecycle",
+                "daemon_proxy",
+                "documentation",
+                "proxy_runtime",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
