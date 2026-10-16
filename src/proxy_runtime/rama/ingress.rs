@@ -578,17 +578,16 @@ mod tests {
     }
 
     fn assert_descriptor_released(descriptor: RawFd, parent: &OwnedFd) {
-        if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 {
-            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        let mut actual = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(descriptor, actual.as_mut_ptr()) } == -1 {
+            let error = io::Error::last_os_error();
+            assert_eq!(
+                error.raw_os_error(),
+                Some(libc::EBADF),
+                "released descriptor returned an unexpected error: {error}"
+            );
             return;
         }
-
-        let mut actual = std::mem::MaybeUninit::<libc::stat>::uninit();
-        assert_eq!(
-            unsafe { libc::fstat(descriptor, actual.as_mut_ptr()) },
-            0,
-            "reused descriptor must remain inspectable"
-        );
         let actual = unsafe { actual.assume_init() };
         let mut expected = std::mem::MaybeUninit::<libc::stat>::uninit();
         assert_eq!(
