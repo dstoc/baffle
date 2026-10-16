@@ -15,8 +15,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ca::ManagedCa, config::SessionConfig, policy::SessionPolicy, secrets::ResolvedSecrets,
-    telemetry::Metrics,
+    ca::ManagedCa, config::SessionConfig, policy::SessionPolicy, proxy_runtime::TestUpstreamTrust,
+    secrets::ResolvedSecrets, telemetry::Metrics,
 };
 
 pub(crate) const MAX_POLICY_GENERATIONS: usize = 8;
@@ -68,6 +68,7 @@ impl ProxyRuntime {
             max_connections,
             Duration::from_secs(30),
             Arc::new(Metrics::default()),
+            TestUpstreamTrust::default(),
             events,
         )
         .await
@@ -83,6 +84,7 @@ impl ProxyRuntime {
         max_connections: usize,
         io_timeout: Duration,
         metrics: Arc<Metrics>,
+        test_upstream_trust: TestUpstreamTrust,
         events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
     ) -> Result<Self, ProxyRuntimeError> {
         let permits = Arc::new(Semaphore::new(max_connections));
@@ -96,6 +98,7 @@ impl ProxyRuntime {
             permits,
             io_timeout,
             metrics,
+            test_upstream_trust,
             events,
             listener_gate,
             1,
@@ -113,6 +116,7 @@ impl ProxyRuntime {
         max_connections: usize,
         io_timeout: Duration,
         metrics: Arc<Metrics>,
+        test_upstream_trust: TestUpstreamTrust,
         events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
         listener_gate: Arc<AtomicU64>,
         listener_generation: u64,
@@ -126,6 +130,7 @@ impl ProxyRuntime {
             Arc::new(Semaphore::new(max_connections)),
             io_timeout,
             metrics,
+            test_upstream_trust,
             events,
             listener_gate,
             listener_generation,
@@ -143,6 +148,7 @@ impl ProxyRuntime {
         permits: Arc<Semaphore>,
         io_timeout: Duration,
         metrics: Arc<Metrics>,
+        test_upstream_trust: TestUpstreamTrust,
         events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
         listener_gate: Arc<AtomicU64>,
         listener_generation: u64,
@@ -156,6 +162,7 @@ impl ProxyRuntime {
             permits,
             io_timeout,
             metrics,
+            test_upstream_trust,
             events,
             listener_gate,
             listener_generation,
@@ -173,6 +180,7 @@ impl ProxyRuntime {
         permits: Arc<Semaphore>,
         io_timeout: Duration,
         metrics: Arc<Metrics>,
+        test_upstream_trust: TestUpstreamTrust,
         events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
         listener_gate: Arc<AtomicU64>,
         listener_generation: u64,
@@ -197,6 +205,7 @@ impl ProxyRuntime {
             ingress::ProxySettings {
                 generations: generation_receiver,
                 tls_relay,
+                test_upstream_trust,
                 permits: Arc::clone(&permits),
                 cancellation: cancellation.clone(),
                 retirement: retirement.clone(),
@@ -348,6 +357,3 @@ mod tls;
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-pub(crate) use tls::set_test_upstream_trust_anchor;

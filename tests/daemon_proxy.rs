@@ -480,6 +480,10 @@ async fn real_daemon_applies_v2_inferred_interception_and_policy_through_file_re
     let mut upstream = spawn_tls_origin(upstream_certificate, upstream_key).await;
     let daemon =
         DaemonProcess::start_file_only_with_upstream_ca(2, &["api-token"], Some(&upstream_root));
+    if cfg!(baffle_integration_test) {
+        fs::remove_file(&upstream_root)
+            .expect("daemon should load its upstream trust anchor during startup");
+    }
     daemon.write_secret("api-token", "v2-daemon-token-73");
 
     let config_name = "policies/api.toml";

@@ -37,6 +37,7 @@ use tokio::{
 use crate::{
     ca::ManagedCa,
     policy::{Destination, SessionPolicy},
+    proxy_runtime::TestUpstreamTrust,
     secrets::ResolvedSecrets,
     telemetry::Metrics,
 };
@@ -62,6 +63,7 @@ pub(super) async fn intercept_client<S>(
     policy: Arc<SessionPolicy>,
     secrets: Arc<ResolvedSecrets>,
     relay: Arc<CachedRelay>,
+    test_upstream_trust: TestUpstreamTrust,
     authority: String,
     destination: Destination,
     metrics: Arc<Metrics>,
@@ -134,22 +136,13 @@ where
         .with_server_name(rama_host(&destination)?)
         .with_server_verify(ServerVerifyMode::Auto)
         .with_keylog(KeyLogIntent::Disabled);
-    // Test runtimes can add a private trust anchor through this helper while
-    // production keeps Rama's configured system roots.
-    #[cfg(test)]
-    let egress_config = match test_upstream_trust_anchor() {
+    // Test runtimes can add a private trust anchor while production keeps
+    // Rama's configured system roots.
+    let egress_config = match test_upstream_trust.certificate() {
         Some(anchor) => egress_config
             .try_with_server_trust_anchors([anchor])
             .map_err(|error| ProxyRuntimeError::Build(error.to_string()))?,
         None => egress_config,
-    };
-    #[cfg(baffle_integration_test)]
-    let egress_config = match super::super::integration_test_upstream_root() {
-        Ok(Some(anchor)) => egress_config
-            .try_with_server_trust_anchors([rama::crypto::pki_types::CertificateDer::from(anchor)])
-            .map_err(|error| ProxyRuntimeError::Build(error.to_string()))?,
-        Ok(None) => egress_config,
-        Err(error) => return Err(ProxyRuntimeError::Build(error)),
     };
     let connector_data = TlsConnectorData::try_from(&egress_config)
         .map_err(|error| ProxyRuntimeError::Build(error.to_string()))?;
@@ -223,28 +216,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for RamaIo<S> {
     fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_shutdown(context)
     }
-}
-
-#[cfg(test)]
-static TEST_UPSTREAM_TRUST_ANCHOR: std::sync::OnceLock<std::sync::Mutex<Option<Vec<u8>>>> =
-    std::sync::OnceLock::new();
-
-#[cfg(test)]
-fn test_upstream_trust_anchor() -> Option<rama::crypto::pki_types::CertificateDer<'static>> {
-    TEST_UPSTREAM_TRUST_ANCHOR
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .expect("test trust anchor lock should not be poisoned")
-        .clone()
-        .map(rama::crypto::pki_types::CertificateDer::from)
-}
-
-#[cfg(test)]
-pub(crate) fn set_test_upstream_trust_anchor(anchor: Vec<u8>) {
-    *TEST_UPSTREAM_TRUST_ANCHOR
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .expect("test trust anchor lock should not be poisoned") = Some(anchor);
 }
 
 fn rama_host(destination: &Destination) -> Result<rama::net::address::Host, ProxyRuntimeError> {

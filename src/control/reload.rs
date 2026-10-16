@@ -234,6 +234,7 @@ impl SessionManager {
             permits,
             self.io_timeout,
             Arc::clone(&self.metrics),
+            self.test_upstream_trust.clone(),
             self.runtime_events.clone(),
             Arc::clone(&listener_gate),
             next_listener_generation,

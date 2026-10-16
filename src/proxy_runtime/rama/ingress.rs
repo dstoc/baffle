@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     platform::{directory_open_flags, normalize_system_path},
+    proxy_runtime::TestUpstreamTrust,
     telemetry::Metrics,
 };
 
@@ -36,6 +37,7 @@ const UNIX_SOCKET_PATH_BYTES: usize =
 pub(super) struct ProxySettings {
     pub(super) generations: watch::Receiver<Arc<ProxyGeneration>>,
     pub(super) tls_relay: Arc<tls::CachedRelay>,
+    pub(super) test_upstream_trust: TestUpstreamTrust,
     pub(super) permits: Arc<Semaphore>,
     pub(super) cancellation: CancellationToken,
     pub(super) retirement: CancellationToken,
@@ -53,6 +55,7 @@ pub(super) async fn run_proxy(
     let ProxySettings {
         generations,
         tls_relay,
+        test_upstream_trust,
         permits,
         cancellation,
         retirement,
@@ -84,6 +87,7 @@ pub(super) async fn run_proxy(
                     Err(_) => continue,
                 };
                 let tls_relay = Arc::clone(&tls_relay);
+                let test_upstream_trust = test_upstream_trust.clone();
                 let metrics = Arc::clone(&metrics);
                 connections.spawn(async move {
                     let _permit = permit;
@@ -94,6 +98,7 @@ pub(super) async fn run_proxy(
                         Arc::clone(&generation.policy),
                         Arc::clone(&generation.secrets),
                         tls_relay,
+                        test_upstream_trust,
                         metrics,
                         io_timeout,
                     ).await {

@@ -33,8 +33,7 @@ pub(super) fn upstream_tls_config_with_expiration(
     server_name: &str,
     expired: bool,
 ) -> rustls::ServerConfig {
-    let (root_certificate, root_key, root_der) = upstream_root();
-    set_test_upstream_trust_anchor(root_der);
+    let (root_certificate, root_key, _) = upstream_root();
     let root_key = KeyPair::from_pem(&root_key).expect("upstream root key should parse");
     let issuer = Issuer::from_ca_cert_pem(&root_certificate, root_key)
         .expect("upstream root should create an issuer");
@@ -156,6 +155,7 @@ pub(super) async fn start_runtime_limited(
         max_connections,
         timeout,
         Arc::new(crate::telemetry::Metrics::default()),
+        TestUpstreamTrust::from_der(upstream_root().2),
         events_tx,
     )
     .await?;

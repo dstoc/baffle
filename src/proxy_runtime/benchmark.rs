@@ -28,8 +28,8 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, TlsConnector, rustls};
 
 use super::{
-    ProxyRuntime, ProxyRuntimeEvent, RuntimeId, benchmark_tcp_nodelay_enabled,
-    benchmark_tcp_nodelay_mode, set_test_upstream_trust_anchor,
+    ProxyRuntime, ProxyRuntimeEvent, RuntimeId, TestUpstreamTrust, benchmark_tcp_nodelay_enabled,
+    benchmark_tcp_nodelay_mode,
 };
 use crate::{
     ca::ManagedCa,
@@ -84,7 +84,7 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
     let ca_dir = tempfile::tempdir()?;
     let ca = managed_ca(ca_dir.path())?;
     let (baffle_ca_der, origin_material) = tls_material(&ca)?;
-    set_test_upstream_trust_anchor(origin_material.root_der.clone());
+    let test_upstream_trust = TestUpstreamTrust::from_der(origin_material.root_der.clone());
     let origin = start_http1_origin(origin_material.tls.clone(), RESPONSE_BODY_BYTES).await?;
     let authority = format!("localhost:{}", origin.address.port());
     let session = intercept_session(origin.address.port());
@@ -99,6 +99,7 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
             session.clone(),
             Arc::clone(&ca),
             socket_path.clone(),
+            test_upstream_trust.clone(),
         )
         .await?;
         let start_elapsed = started.elapsed();
@@ -143,6 +144,7 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
                         ca_dir
                             .path()
                             .join(format!("idle-{session_count}-{trial}-{index}.sock")),
+                        test_upstream_trust.clone(),
                     )
                     .await?,
                 );
@@ -187,12 +189,14 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
                 let socket_path = ca_dir
                     .path()
                     .join(format!("concurrent-{session_count}-{trial}-{index}.sock"));
+                let test_upstream_trust = test_upstream_trust.clone();
                 creates.spawn(async move {
                     start_runtime(
                         format!("bench-concurrent-{session_count}-{trial}-{index}"),
                         session,
                         ca,
                         socket_path,
+                        test_upstream_trust,
                     )
                     .await
                 });
@@ -262,6 +266,7 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
         session,
         Arc::clone(&ca),
         ca_dir.path().join("http1.sock"),
+        test_upstream_trust.clone(),
     )
     .await?;
     let (cpu_before, rss_before) = (cpu_time_us()?, read_rss_kib()?);
@@ -409,6 +414,7 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
         tunnel_session(origin.address.port()),
         Arc::clone(&ca),
         ca_dir.path().join("tunnel.sock"),
+        test_upstream_trust.clone(),
     )
     .await?;
     let mut tunnel_latencies = Vec::with_capacity(TRIALS * MEASURED_REQUESTS);
@@ -483,6 +489,7 @@ async fn runtime_benchmark() -> Result<(), BenchError> {
         intercept_session(h2_origin.address.port()),
         Arc::clone(&ca),
         ca_dir.path().join("http2.sock"),
+        test_upstream_trust.clone(),
     )
     .await?;
     let h2_latencies = benchmark_http2(
@@ -590,7 +597,7 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
     let ca_dir = tempfile::tempdir()?;
     let ca = managed_ca(ca_dir.path())?;
     let (baffle_ca_der, origin_material) = tls_material(&ca)?;
-    set_test_upstream_trust_anchor(origin_material.root_der.clone());
+    let test_upstream_trust = TestUpstreamTrust::from_der(origin_material.root_der.clone());
 
     let (origin_address, embedded_origin) = match external_origin {
         Some(address) => {
@@ -612,6 +619,7 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
         intercept_session(origin_address.port()),
         ca,
         ca_dir.path().join("http1-characterization.sock"),
+        test_upstream_trust,
     )
     .await?;
 
@@ -885,6 +893,7 @@ async fn start_runtime(
     session: SessionConfig,
     ca: Arc<ManagedCa>,
     socket_path: std::path::PathBuf,
+    test_upstream_trust: TestUpstreamTrust,
 ) -> Result<ProxyRuntime, BenchError> {
     let (events, _receiver) = mpsc::unbounded_channel::<ProxyRuntimeEvent>();
     Ok(ProxyRuntime::start_with_metrics(
@@ -899,6 +908,7 @@ async fn start_runtime(
         128,
         Duration::from_secs(30),
         Arc::new(Metrics::default()),
+        test_upstream_trust,
         events,
     )
     .await?)

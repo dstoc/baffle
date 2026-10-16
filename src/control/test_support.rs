@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use crate::{
     ca::ManagedCa,
     config::{CaConfig, DaemonSettings, SessionCreateMode},
+    proxy_runtime::TestUpstreamTrust,
     telemetry::Metrics,
 };
 
@@ -53,5 +54,11 @@ pub(super) fn session_manager(directory: &std::path::Path, max_sessions: usize) 
         session_config_dir: None,
         create_mode: SessionCreateMode::Inline,
     };
-    SessionManager::new(&settings, ca, runtime_events, Arc::new(Metrics::default()))
+    SessionManager::new(
+        &settings,
+        ca,
+        TestUpstreamTrust::default(),
+        runtime_events,
+        Arc::new(Metrics::default()),
+    )
 }

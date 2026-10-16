@@ -207,6 +207,7 @@ async fn startup_rejects_an_existing_socket_path_without_replacing_it() -> Resul
         4,
         Duration::from_secs(1),
         Arc::new(crate::telemetry::Metrics::default()),
+        crate::proxy_runtime::TestUpstreamTrust::default(),
         events,
     )
     .await;
