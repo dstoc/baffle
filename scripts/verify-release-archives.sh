@@ -34,6 +34,16 @@ for archive in "${expected_archives[@]}"; do
   tar -tzf "$dist_dir/$archive" | grep -Fx './LICENSE' >/dev/null
   tar -tzf "$dist_dir/$archive" | grep -Fx './share/doc/baffle/README.md' >/dev/null
   tar -tzf "$dist_dir/$archive" | grep -Fx './share/doc/baffle/docs/releasing.md' >/dev/null
+  while IFS= read -r document || [[ -n "$document" ]]; do
+    [[ -n "$document" ]] || continue
+    tar -tzf "$dist_dir/$archive" | \
+      grep -Fx "./share/doc/baffle/docs/$document" >/dev/null
+  done < "$tool_root/release-docs.txt"
+  if tar -tzf "$dist_dir/$archive" | \
+    grep -E 'share/doc/baffle/docs/(archive/|backend-comparison|runtime-migration|baffle-proposal|benchmark-report)' >/dev/null; then
+    echo "Release archive contains a historical design or benchmark document: $archive." >&2
+    exit 1
+  fi
   tar -tzf "$dist_dir/$archive" | grep -Fx './share/doc/baffle/examples/daemon.toml' >/dev/null
   tar -tzf "$dist_dir/$archive" | grep -Fx \
     './share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt' >/dev/null

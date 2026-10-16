@@ -92,7 +92,7 @@ esac
 asset="baffle-proxy-${release_tag}-${target}.tar.gz"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
-mkdir -p "$stage/share/doc/baffle/licenses"
+mkdir -p "$stage/share/doc/baffle/licenses" "$stage/share/doc/baffle/docs"
 install -m 0755 "$binary" "$stage/baffle"
 install -m 0644 LICENSE "$stage/LICENSE"
 install -m 0644 README.md "$stage/share/doc/baffle/README.md"
@@ -106,7 +106,15 @@ if [[ "$target" == aarch64-unknown-linux-gnu ]]; then
 fi
 install -m 0644 licenses/webpki-root-certs-CDLA-Permissive-2.0.txt \
   "$stage/share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt"
-cp -R docs "$stage/share/doc/baffle/docs"
+while IFS= read -r document || [[ -n "$document" ]]; do
+  [[ -n "$document" ]] || continue
+  if [[ "$document" == /* || "$document" == *..* ]]; then
+    echo "Invalid release documentation path '$document'." >&2
+    exit 1
+  fi
+  install -m 0644 "$repo_root/docs/$document" \
+    "$stage/share/doc/baffle/docs/$document"
+done < "$repo_root/scripts/release-docs.txt"
 cp -R examples "$stage/share/doc/baffle/examples"
 mkdir -p "$output_dir"
 python3 "$tool_root/scripts/create-release-archive.py" "$stage" "$output_dir/$asset"

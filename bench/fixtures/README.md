@@ -3,8 +3,7 @@
 These files provide deterministic test certificates for the Rama benchmarks.
 The private keys are public test data. Do not use them in a deployment.
 
-The fixtures also support historical Hudsucker comparisons. The pinned SHA-256
-fingerprints are:
+The pinned SHA-256 fingerprints are:
 
 | Certificate | SHA-256 fingerprint |
 | --- | --- |

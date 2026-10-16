@@ -118,7 +118,6 @@ def main() -> None:
         dependencies = unique_dependency_entries(graph)
         output.write(json.dumps({
             "kind": "dependency_graph",
-            "runtime": "rama",
             "entries": len(dependencies),
             "values": dependencies,
         }, sort_keys=True) + "\n")
@@ -130,7 +129,6 @@ def main() -> None:
                 incremental_seconds = timed_build(release)
                 row = {
                     "kind": "build_sample",
-                    "runtime": "rama",
                     "profile": profile,
                     "repeat": repeat,
                     "clean_seconds": round(clean_seconds, 6),

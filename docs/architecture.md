@@ -157,9 +157,8 @@ interception or authority checks fail. It disables TLS key logging and adapts
 Unix streams to Rama's TLS relay interface.
 
 Rama is the only runtime implementation. This boundary keeps Rama networking
-types out of daemon and control-protocol code. No backend selector is exposed
-in daemon configuration or the control protocol. See the [runtime migration
-note](runtime-migration.md) for the completed removal of Hudsucker.
+types out of daemon and control-protocol code. No runtime selector is exposed
+in daemon configuration or the control protocol.
 
 ## Failures and logging
 

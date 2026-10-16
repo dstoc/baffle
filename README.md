@@ -237,6 +237,8 @@ details.
 - [Consumer integration](docs/cladding-integration.md): connect a workload to
   its assigned socket, including an external `socat` adapter example.
 - [Architecture](docs/architecture.md): request flow and session lifecycle.
+- [Benchmarking](docs/benchmarking.md): run opt-in measurements for the
+  supported Rama runtime.
 - [Integration testing](docs/integration-testing.md): test coverage and the
   privileged Linux namespace test.
 - [Release process](docs/releasing.md): versioning, release review, and

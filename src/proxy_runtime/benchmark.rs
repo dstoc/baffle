@@ -57,8 +57,6 @@ const PROFILE: &str = "debug";
 #[cfg(not(debug_assertions))]
 const PROFILE: &str = "release";
 
-const BACKEND: &str = "rama";
-
 #[derive(Clone)]
 struct OriginMaterial {
     tls: Arc<rustls::ServerConfig>,
@@ -73,10 +71,9 @@ struct Origin {
 }
 
 #[tokio::test]
-#[ignore = "opt-in comparative runtime benchmark; see docs/benchmarking.md"]
+#[ignore = "opt-in Rama runtime benchmark; see docs/benchmarking.md"]
 async fn runtime_benchmark() -> Result<(), BenchError> {
     let output = BenchOutput::new()?;
-    output.row("meta", 0, 0, "backend", BACKEND)?;
     output.row("meta", 0, 0, "profile", PROFILE)?;
     output.row("meta", 0, 0, "rustc", &rustc_version())?;
     output.row("meta", 0, 0, "tcp_nodelay", &benchmark_tcp_nodelay_mode())?;
@@ -553,7 +550,6 @@ async fn runtime_http1_characterization() -> Result<(), BenchError> {
         "rust"
     };
 
-    output.row("meta", 0, 0, "backend", BACKEND)?;
     output.row("meta", 0, 0, "profile", PROFILE)?;
     output.row("meta", 0, 0, "rustc", &rustc_version())?;
     output.row("meta", 0, 0, "origin", origin_name)?;

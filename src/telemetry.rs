@@ -62,9 +62,6 @@ impl Metrics {
         self.upstream_failures.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    // The current fail-closed handler does not attempt TLS interception. Keep
-    // the counter ready for the interception hook added with policy enforcement.
-    #[allow(dead_code)]
     pub(crate) fn interception_error(&self) -> u64 {
         self.interception_errors.fetch_add(1, Ordering::Relaxed) + 1
     }

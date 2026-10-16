@@ -14,7 +14,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "bench" / "fixtures"
-RUNTIME = "rama"
 CONCURRENCY = (1, 4, 16)
 TRIALS = 5
 WARMUP_REQUESTS = 16
@@ -75,7 +74,7 @@ def run_case(
         "" if concurrency_levels == CONCURRENCY else "-c" + "-".join(map(str, concurrency_levels))
     )
     output = ROOT / "bench" / "results" / (
-        f"{result_prefix}-{RUNTIME}-{origin_name}-nodelay-{nodelay_mode}"
+        f"{result_prefix}-{origin_name}-nodelay-{nodelay_mode}"
         f"-req{request_body_bytes}-resp{response_body_bytes}{concurrency_suffix}.csv"
     )
     output.unlink(missing_ok=True)
@@ -121,7 +120,7 @@ def run_case(
     )
 
     print(
-        f"\n=== {RUNTIME}: origin={origin_name}, TCP_NODELAY={nodelay_mode}, "
+        f"\n=== origin={origin_name}, TCP_NODELAY={nodelay_mode}, "
         f"request={request_body_bytes} bytes, response={response_body_bytes} bytes, "
         f"profile={profile} ===",
         flush=True,
