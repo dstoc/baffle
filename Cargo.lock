@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "baffle-client"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "baffle-proxy"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "anyhow",
  "baffle-client",
