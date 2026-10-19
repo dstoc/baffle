@@ -75,6 +75,10 @@ const ERR_CONFIG_FILE_UNAVAILABLE: (&str, &str) = (
     "session configuration file is unavailable",
 );
 const ERR_CONFIG_FILE_INVALID: (&str, &str) = ("config_file_invalid", SESSION_FILE_INVALID_MESSAGE);
+const ERR_EPHEMERAL_REQUIRED: (&str, &str) = (
+    "ephemeral_required",
+    "session configuration must be ephemeral",
+);
 
 pub struct ControlServer {
     listener: Option<UnixListener>,
@@ -887,7 +891,11 @@ pub(super) async fn handle_connection(mut stream: UnixStream, state: Arc<Control
                 }
             }
         }
-        ControlRequest::CreateFromFile { name, .. } => {
+        ControlRequest::CreateFromFile {
+            name,
+            require_ephemeral,
+            ..
+        } => {
             if state.create_mode != SessionCreateMode::FileOnly {
                 error_value(ERR_OPERATION_NOT_ALLOWED)
             } else {
@@ -924,7 +932,12 @@ pub(super) async fn handle_connection(mut stream: UnixStream, state: Arc<Control
                         return;
                     }
                 };
-                create_session_response(&state, session, Some(name), permit, &mut lease_id).await
+                if require_ephemeral && session.persistent {
+                    error_value(ERR_EPHEMERAL_REQUIRED)
+                } else {
+                    create_session_response(&state, session, Some(name), permit, &mut lease_id)
+                        .await
+                }
             }
         }
         ControlRequest::Stop { session_id, .. } => {

@@ -12,6 +12,7 @@ pub enum ControlRequest {
     CreateFromFile {
         version: u16,
         name: String,
+        require_ephemeral: bool,
     },
     Stop {
         version: u16,
@@ -67,10 +68,18 @@ impl ControlRequest {
                 })
             }
             RawControlRequest::ReloadAll { version } => Ok(Self::ReloadAll { version }),
-            RawControlRequest::CreateFromFile { version, name } => {
+            RawControlRequest::CreateFromFile {
+                version,
+                name,
+                require_ephemeral,
+            } => {
                 baffle_client::validate_session_config_name(&name)
                     .map_err(|error| ConfigError::new(error.to_string()))?;
-                Ok(Self::CreateFromFile { version, name })
+                Ok(Self::CreateFromFile {
+                    version,
+                    name,
+                    require_ephemeral,
+                })
             }
             RawControlRequest::List { version } => Ok(Self::List { version }),
         }
@@ -105,10 +114,28 @@ fn validate_session_id(id: &str) -> Result<(), ConfigError> {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum RawControlRequest {
-    Create { version: u16, session: toml::Value },
-    Stop { version: u16, session_id: String },
-    Reload { version: u16, session_id: String },
-    ReloadAll { version: u16 },
-    CreateFromFile { version: u16, name: String },
-    List { version: u16 },
+    Create {
+        version: u16,
+        session: toml::Value,
+    },
+    Stop {
+        version: u16,
+        session_id: String,
+    },
+    Reload {
+        version: u16,
+        session_id: String,
+    },
+    ReloadAll {
+        version: u16,
+    },
+    CreateFromFile {
+        version: u16,
+        name: String,
+        #[serde(default)]
+        require_ephemeral: bool,
+    },
+    List {
+        version: u16,
+    },
 }

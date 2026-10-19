@@ -108,17 +108,52 @@ impl Client {
     /// configuration directory. The returned handle owns the control
     /// connection while the session is ephemeral.
     pub async fn create_from_file(&self, name: impl AsRef<str>) -> Result<Session, ClientError> {
-        let name = name.as_ref();
+        self.create_from_file_with_requirement(name.as_ref(), false)
+            .await
+    }
+
+    /// Create an ephemeral proxy session from a TOML file provisioned by the daemon administrator.
+    ///
+    /// This asks the daemon to reject a persistent configuration before it
+    /// creates any session resources. The returned handle owns the lease until
+    /// it is dropped or closed. Older daemons may reject the request because
+    /// they do not support the `require_ephemeral` field.
+    pub async fn create_ephemeral_from_file(
+        &self,
+        name: impl AsRef<str>,
+    ) -> Result<Session, ClientError> {
+        self.create_from_file_with_requirement(name.as_ref(), true)
+            .await
+    }
+
+    async fn create_from_file_with_requirement(
+        &self,
+        name: &str,
+        require_ephemeral: bool,
+    ) -> Result<Session, ClientError> {
         validate_session_config_name(name)
             .map_err(|error| ClientError::InvalidPolicy(error.to_string()))?;
         let request = CreateFromFileRequest {
             version: PROTOCOL_VERSION,
             operation: "create_from_file",
             name,
+            require_ephemeral,
         };
         let mut stream = self.open_control().await?;
         let response = exchange(&mut stream, &request).await?;
         let created: CreateResult = success_result(response)?;
+
+        if require_ephemeral && created.persistent {
+            drop(stream);
+            let cleanup = self.stop(&created.id).await;
+            let message = match cleanup {
+                Ok(()) => "daemon returned a persistent session despite require_ephemeral; the session was stopped".into(),
+                Err(error) => format!(
+                    "daemon returned a persistent session despite require_ephemeral; stopping the session failed: {error}"
+                ),
+            };
+            return Err(ClientError::Protocol(message));
+        }
 
         Ok(Session {
             id: created.id,
@@ -600,6 +635,12 @@ struct CreateFromFileRequest<'a> {
     version: u16,
     operation: &'static str,
     name: &'a str,
+    #[serde(skip_serializing_if = "is_false")]
+    require_ephemeral: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Serialize)]
@@ -760,6 +801,7 @@ fn map_remote_error(error: RemoteError) -> ClientError {
         "config_file_not_found" => ClientError::SessionConfigNotFound(message),
         "config_file_unavailable" => ClientError::SessionConfigUnavailable(message),
         "config_file_invalid" => ClientError::SessionConfigInvalid(message),
+        "ephemeral_required" => ClientError::InvalidPolicy(message),
         "operation_not_allowed" => ClientError::OperationNotAllowed(message),
         "internal_error" | "shutting_down" => ClientError::Provisioning(message),
         _ => ClientError::Server { code, message },
@@ -895,10 +937,12 @@ mod tests {
             version: super::PROTOCOL_VERSION,
             operation: "create_from_file",
             name: "cladding/github.toml",
+            require_ephemeral: false,
         };
         let encoded = toml::to_string(&request).expect("file request should serialize");
         assert!(encoded.contains("operation = \"create_from_file\""));
         assert!(encoded.contains("name = \"cladding/github.toml\""));
+        assert!(!encoded.contains("require_ephemeral"));
         assert!(validate_session_config_name("cladding/github.toml").is_ok());
         for invalid in [
             "",
@@ -914,6 +958,18 @@ mod tests {
                 "{invalid:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn serializes_the_ephemeral_file_create_constraint() {
+        let request = CreateFromFileRequest {
+            version: super::PROTOCOL_VERSION,
+            operation: "create_from_file",
+            name: "cladding/github.toml",
+            require_ephemeral: true,
+        };
+        let encoded = toml::to_string(&request).expect("file request should serialize");
+        assert!(encoded.contains("require_ephemeral = true"));
     }
 
     #[test]

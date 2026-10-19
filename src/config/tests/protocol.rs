@@ -48,6 +48,18 @@ fn validates_nested_session_config_names_and_rejects_path_forms() {
         ControlRequest::CreateFromFile {
             version: PROTOCOL_VERSION,
             name: "cladding/github.toml".into(),
+            require_ephemeral: false,
+        }
+    );
+    assert_eq!(
+        ControlRequest::from_toml(
+            "version = 2\noperation = \"create_from_file\"\nname = \"cladding/github.toml\"\nrequire_ephemeral = true\n"
+        )
+        .expect("ephemeral requirement should parse"),
+        ControlRequest::CreateFromFile {
+            version: PROTOCOL_VERSION,
+            name: "cladding/github.toml".into(),
+            require_ephemeral: true,
         }
     );
     for name in [
