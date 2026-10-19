@@ -23,6 +23,10 @@ open or update a release pull request and to write `CHANGELOG.md`.
 - Use `feat:` for a feature and `fix:` for a bug fix. Use `feat!:` or `fix!:`
   when the change is breaking. Use another Conventional Commit type when the
   change should not trigger a release.
+- Treat a change to `PROTOCOL_VERSION` as breaking, even when the implementation
+  commit uses a type such as `refactor`. Include the client and daemon upgrade
+  requirement in the breaking-change note. If the change is already on `main`
+  without a release-triggering commit, use the `Release-As` footer below.
 - Review the generated pull request's changelog and Cargo version updates.
   Release Please calculates one version from its root package. Its Rust
   updater writes that version to both workspace package manifests, the root

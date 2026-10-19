@@ -115,6 +115,16 @@ const scenarios = [
     message: 'feat!: change the shared session contract\n\nBREAKING CHANGE: both crates now use the v2 contract.',
     paths: ['src/lib.rs', 'crates/baffle-client/src/lib.rs'],
   },
+  {
+    name: 'protocol-v2 release override',
+    version: '2.0.0',
+    message:
+      'fix(release)!: mark protocol v2 as breaking\n\n' +
+      'BREAKING CHANGE: Protocol v2 clients and daemons are not compatible with version 1. ' +
+      'Upgrade baffle-client and baffle-proxy together.\n\n' +
+      'Release-As: 2.0.0',
+    paths: ['docs/control-protocol.md', 'docs/releasing.md'],
+  },
 ];
 
 function githubFileContents(content) {
