@@ -1,5 +1,28 @@
 # Changelog
 
+## [2.0.0](https://github.com/dstoc/baffle/compare/v1.1.1...v2.0.0) (2026-10-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **release:** Protocol v2 clients and daemons are not compatible with version 1. Upgrade baffle-client and baffle-proxy together to version 2.0.0.
+
+### Features
+
+* **control:** require ephemeral file-backed sessions ([#97](https://github.com/dstoc/baffle/issues/97)) ([291ed81](https://github.com/dstoc/baffle/commit/291ed81a22bd86a1d40f592f08ab9cbe551f9437))
+* **control:** return CA certificate with session creation ([#96](https://github.com/dstoc/baffle/issues/96)) ([0356b4c](https://github.com/dstoc/baffle/commit/0356b4cab1933a19110be96d3127cb824949733f))
+
+
+### Bug Fixes
+
+* **control:** clean stale nested session sockets ([#70](https://github.com/dstoc/baffle/issues/70)) ([27d0b36](https://github.com/dstoc/baffle/commit/27d0b360ae46bb9083c1b99d812158384bde9799))
+* **control:** validate session store before binding ([#69](https://github.com/dstoc/baffle/issues/69)) ([1a31844](https://github.com/dstoc/baffle/commit/1a31844ba9b186d632da8da32178638dca3a0469))
+* **paths:** support traversable directory ancestors ([#72](https://github.com/dstoc/baffle/issues/72)) ([52ad4a1](https://github.com/dstoc/baffle/commit/52ad4a11993e213d66366de7559318ffe4d38871))
+* **proxy:** buffer CONNECT headers and reject extra tokens ([#74](https://github.com/dstoc/baffle/issues/74)) ([fc7e87a](https://github.com/dstoc/baffle/commit/fc7e87adc0089a37c3fec1856a65424f3cfb9e64))
+* **proxy:** release zero-lease directory records ([#71](https://github.com/dstoc/baffle/issues/71)) ([a08310e](https://github.com/dstoc/baffle/commit/a08310ee9cca412ceae0f85053cccd4eeabfe25f))
+* **proxy:** reuse intercepted TLS leaf certificates ([#85](https://github.com/dstoc/baffle/issues/85)) ([c77d0c7](https://github.com/dstoc/baffle/commit/c77d0c79369388547ddf6e199f68d78ad081e417))
+* **release:** publish protocol v2 as a breaking release ([3dcbf35](https://github.com/dstoc/baffle/commit/3dcbf358db32c098d572682a176df809363caad1))
+
 ## [1.1.1](https://github.com/dstoc/baffle/compare/v1.1.0...v1.1.1) (2026-10-13)
 
 
