@@ -46,6 +46,11 @@ The orchestrator must retain the returned session while its workload runs. The
 workload uses the session's Unix data socket with an HTTPS client that supports
 CONNECT. It must not fall back to direct egress or plaintext HTTP.
 
+When the daemon uses `create_mode = "file_only"`, use
+`Client::create_ephemeral_from_file(name)` to require an ephemeral
+administrator-managed policy. The daemon checks this before session
+provisioning. Older protocol-v2 daemons reject the unsupported request field.
+
 `Session::ca_certificate_pem()` returns the public certificate PEM included
 with session creation, or `None` when an older protocol-v2 daemon omits the
 additive field. Callers that need the certificate for trust setup must treat

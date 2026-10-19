@@ -104,6 +104,25 @@ operation = "create_from_file"
 name = "cladding/github.toml"
 ```
 
+`require_ephemeral` is optional and defaults to `false`. Set it to `true` when
+the caller requires an ephemeral session:
+
+```toml
+version = 2
+operation = "create_from_file"
+name = "cladding/github.toml"
+require_ephemeral = true
+```
+
+When this field is `true`, Baffle rejects a file with `persistent = true`
+using `ephemeral_required`. It makes this check before secret resolution or
+session provisioning, so the rejected request creates no session, listener,
+data socket, or lease. Protocol-v2 daemons that predate this field reject it as
+an unsupported request field. `baffle-client` exposes
+`Client::create_ephemeral_from_file` for this request. The client also rejects
+and attempts to stop any persistent session returned by a daemon that does
+not enforce the constraint.
+
 The path is relative to `daemon.session_config_dir`. It must end in `.toml`,
 use `/` between components, and contain no empty, `.` or `..` components.
 Backslashes, colons, control characters, absolute paths, and components over
@@ -113,11 +132,13 @@ file must contain a valid version 2 session file. The daemon reads at most
 [configuration](configuration.md) for the session schema and directory
 ownership, permissions, and symlink rules.
 
-The Rust client exposes `Client::create_from_file`; its returned `Session`
-holds the ephemeral lease in the same way as `Client::create`. Inline `create`
-is rejected in `file_only` mode. `create_from_file` is rejected in `inline`
-mode. Both modes permit authorized `list` and `stop` requests. `reload` is
-available only for sessions created from a daemon-managed file.
+The Rust client exposes `Client::create_from_file`, which preserves the
+file's persistence setting. For an ephemeral file, its returned `Session`
+holds the lease in the same way as `Client::create`. Use
+`Client::create_ephemeral_from_file` to require an ephemeral file. Inline
+`create` is rejected in `file_only` mode. `create_from_file` is rejected in
+`inline` mode. Both modes permit authorized `list` and `stop` requests.
+`reload` is available only for sessions created from a daemon-managed file.
 
 Reload one session by its opaque ID:
 
@@ -303,6 +324,7 @@ not the message.
 | `config_file_not_found` | The named session configuration file does not exist. |
 | `config_file_unavailable` | The file cannot be read safely, including because of a symlink, unsafe owner, unsafe permissions, or inaccessible path. |
 | `config_file_invalid` | The file exceeds the size limit, is not UTF-8, or does not contain a valid version 2 session file. |
+| `ephemeral_required` | The request requires an ephemeral session, but the file configuration is persistent. |
 | `internal_error` | The daemon could not complete the request. |
 | `shutting_down` | The daemon is shutting down and does not accept new sessions. |
 

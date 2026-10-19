@@ -264,6 +264,31 @@ fn create_responses_include_the_public_ca_for_inline_and_file_sessions() {
     assert_public_ca_create_response(&file_daemon, &file_backed, CREDENTIAL);
 }
 
+#[test]
+fn file_create_rejects_persistent_policy_before_allocating_session_resources() {
+    let daemon = start_file_only_daemon(250);
+    write_session_policy(&daemon, "persistent.toml", "persistent.example.test", true);
+
+    let rejected = request(
+        &daemon.socket,
+        "version = 2\noperation = \"create_from_file\"\nname = \"persistent.toml\"\nrequire_ephemeral = true\n",
+    );
+    assert_eq!(rejected["ok"], false);
+    assert_eq!(rejected["error"]["code"], "ephemeral_required");
+    assert_eq!(
+        rejected["error"]["message"],
+        "session configuration must be ephemeral"
+    );
+    assert!(list_sessions(&daemon.socket).is_empty());
+    assert_eq!(
+        fs::read_dir(&daemon.socket_dir)
+            .expect("session socket directory should remain available")
+            .count(),
+        0,
+        "rejected file creation must not allocate a listener socket"
+    );
+}
+
 fn assert_public_ca_create_response(daemon: &DaemonProcess, response: &Value, credential: &str) {
     assert_eq!(response["ok"], true);
     let ca_pem = fs::read_to_string(daemon._directory.path().join("ca.pem"))

@@ -63,8 +63,23 @@ let session = client.create_from_file("cladding/github.toml").await?;
 ```
 
 The daemon resolves this relative name beneath `daemon.session_config_dir`.
-The returned `Session` keeps the ephemeral lease open until it is dropped or
-closed.
+When the file is ephemeral, the returned `Session` keeps its lease open until
+it is dropped or closed. The regular method preserves persistent files.
+
+Use `create_ephemeral_from_file` when the caller requires an ephemeral
+configuration:
+
+```rust
+let session = client
+    .create_ephemeral_from_file("cladding/github.toml")
+    .await?;
+```
+
+This method sends `require_ephemeral = true`, so the daemon rejects a
+persistent file before it provisions a session. Older protocol-v2 daemons
+reject the unsupported request field. If a daemon returns a persistent
+session anyway, the client attempts to stop it and returns a protocol error
+instead of a `Session`.
 
 Reload a file-backed session by ID or reload all active file-backed sessions:
 

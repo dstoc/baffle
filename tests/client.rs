@@ -7,10 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use baffle_client::{Client, HostRule, ReloadStatus, SessionConfig, SessionState};
+use baffle_client::{Client, ClientError, HostRule, ReloadStatus, SessionConfig, SessionState};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixStream,
+    net::{UnixListener, UnixStream},
     time::{sleep, timeout},
 };
 
@@ -250,6 +250,180 @@ async fn typed_client_creates_from_a_daemon_managed_file_and_holds_the_lease() {
     session.close();
     wait_for_count(&client, 0).await;
     assert!(!socket_path.exists());
+}
+
+#[tokio::test]
+async fn typed_file_create_can_require_ephemeral_and_omission_keeps_existing_behavior() {
+    let daemon = start_file_only_daemon(4);
+    let config_dir = daemon
+        .session_config_dir
+        .as_ref()
+        .expect("file-only daemon should have a config directory");
+    let policy_path = config_dir.join("managed.toml");
+    fs::write(
+        &policy_path,
+        "version = 2\npersistent = true\n\n[rules.\"example.com\"]\n",
+    )
+    .expect("persistent session config should be written");
+    fs::set_permissions(&policy_path, fs::Permissions::from_mode(0o600))
+        .expect("session config should be private");
+
+    let client = Client::new(&daemon.control_socket);
+    let rejected = client
+        .create_ephemeral_from_file("managed.toml")
+        .await
+        .expect_err("persistent policy must be rejected");
+    assert!(matches!(
+        rejected,
+        ClientError::InvalidPolicy(ref message)
+            if message == "session configuration must be ephemeral"
+    ));
+    assert!(
+        client
+            .list()
+            .await
+            .expect("sessions should list")
+            .is_empty()
+    );
+    assert_eq!(
+        fs::read_dir(&daemon.socket_dir)
+            .expect("proxy socket directory should remain available")
+            .count(),
+        0,
+        "persistent policy rejection must leave no session socket"
+    );
+
+    fs::write(
+        &policy_path,
+        "version = 2\npersistent = false\n\n[rules.\"example.com\"]\n",
+    )
+    .expect("ephemeral session config should be written");
+    fs::set_permissions(&policy_path, fs::Permissions::from_mode(0o600))
+        .expect("session config should remain private");
+    let session = client
+        .create_ephemeral_from_file("managed.toml")
+        .await
+        .expect("ephemeral policy should be created");
+    assert!(!session.is_persistent());
+    assert_ca_certificate(session.ca_certificate_pem(), &daemon.ca_certificate);
+    let socket_path = session.socket_path().to_path_buf();
+    assert!(socket_path.exists());
+    session.close();
+    wait_for_count(&client, 0).await;
+    assert!(
+        !socket_path.exists(),
+        "closing the lease should remove its socket"
+    );
+
+    fs::write(
+        &policy_path,
+        "version = 2\npersistent = true\n\n[rules.\"example.com\"]\n",
+    )
+    .expect("persistent session config should be restored");
+    fs::set_permissions(&policy_path, fs::Permissions::from_mode(0o600))
+        .expect("session config should remain private");
+    let persistent = client
+        .create_from_file("managed.toml")
+        .await
+        .expect("omitting the constraint should preserve persistent creation");
+    assert!(persistent.is_persistent());
+    let persistent_id = persistent.id().to_owned();
+    let persistent_path = persistent.socket_path().to_path_buf();
+    drop(persistent);
+    assert!(persistent_path.exists());
+    client
+        .stop(&persistent_id)
+        .await
+        .expect("persistent session should be explicitly stopped");
+    assert!(!persistent_path.exists());
+}
+
+#[tokio::test]
+async fn ephemeral_file_create_rejects_persistent_responses_from_older_daemons() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let control_socket = directory.path().join("control.sock");
+    let listener = UnixListener::bind(&control_socket).expect("fake daemon should bind");
+    let fake_daemon = tokio::spawn(async move {
+        let (mut create, _) = listener
+            .accept()
+            .await
+            .expect("client should request file creation");
+        let request = read_request_frame(&mut create).await;
+        assert!(request.contains("operation = \"create_from_file\""));
+        assert!(request.contains("require_ephemeral = true"));
+        write_response_frame(
+            &mut create,
+            serde_json::json!({
+                "version": 2,
+                "ok": true,
+                "result": {
+                    "id": "legacy-persistent",
+                    "socket": "/tmp/legacy-persistent.sock",
+                    "persistent": true
+                }
+            }),
+        )
+        .await;
+        drop(create);
+
+        let (mut stop, _) = listener
+            .accept()
+            .await
+            .expect("client should clean up the unexpected persistent session");
+        let request = read_request_frame(&mut stop).await;
+        assert!(request.contains("operation = \"stop\""));
+        assert!(request.contains("session_id = \"legacy-persistent\""));
+        write_response_frame(
+            &mut stop,
+            serde_json::json!({
+                "version": 2,
+                "ok": true,
+                "result": { "stopped": true }
+            }),
+        )
+        .await;
+    });
+
+    let client = Client::new(&control_socket);
+    let error = client
+        .create_ephemeral_from_file("managed.toml")
+        .await
+        .expect_err("a persistent response must not become a Session");
+    assert!(matches!(
+        error,
+        ClientError::Protocol(ref message)
+            if message.contains("persistent session despite require_ephemeral")
+                && message.contains("session was stopped")
+    ));
+    fake_daemon
+        .await
+        .expect("fake daemon should verify the request and cleanup");
+}
+
+async fn read_request_frame(stream: &mut UnixStream) -> String {
+    let mut header = [0; 4];
+    stream
+        .read_exact(&mut header)
+        .await
+        .expect("request header should be read");
+    let mut body = vec![0; u32::from_be_bytes(header) as usize];
+    stream
+        .read_exact(&mut body)
+        .await
+        .expect("request body should be read");
+    String::from_utf8(body).expect("request should be UTF-8")
+}
+
+async fn write_response_frame(stream: &mut UnixStream, response: serde_json::Value) {
+    let body = serde_json::to_vec(&response).expect("response should serialize");
+    stream
+        .write_all(&(body.len() as u32).to_be_bytes())
+        .await
+        .expect("response length should be written");
+    stream
+        .write_all(&body)
+        .await
+        .expect("response body should be written");
 }
 
 async fn request_through_proxy(socket_path: &std::path::Path) {
