@@ -11,6 +11,8 @@ version by setting `version = 2` in each request. Version 2 changes the inline
 does not perform a separate capability handshake or negotiate a version
 range. It returns `unsupported_version` when the request has a valid integer
 version other than 2. Version 1 clients are not compatible with this protocol.
+Upgrade the daemon and `baffle-client` together. A version 2 client cannot use
+a version 1 daemon, and a version 1 client cannot use a version 2 daemon.
 The integer version field is a 16-bit unsigned value. A missing, malformed,
 or out-of-range field is `invalid_request`.
 
