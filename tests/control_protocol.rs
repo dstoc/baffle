@@ -227,6 +227,74 @@ fn control_listener_handles_requests_and_rejects_bad_connections() {
 }
 
 #[test]
+fn create_responses_include_the_public_ca_for_inline_and_file_sessions() {
+    const CREDENTIAL: &str = "credential-that-must-not-be-in-create-response";
+
+    #[derive(serde::Deserialize)]
+    struct ExistingV2CreateResult {
+        id: String,
+        socket: String,
+        persistent: bool,
+    }
+
+    let inline_daemon = start_daemon(250);
+    write_api_token(&inline_daemon, CREDENTIAL);
+    let inline = request(
+        &inline_daemon.socket,
+        "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\npersistent = true\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n",
+    );
+    assert_public_ca_create_response(&inline_daemon, &inline, CREDENTIAL);
+    let old_client: ExistingV2CreateResult = serde_json::from_value(inline["result"].clone())
+        .expect("an existing protocol-v2 client should ignore the additive field");
+    assert!(old_client.persistent);
+    assert!(!old_client.id.is_empty());
+    assert!(old_client.socket.ends_with(".sock"));
+
+    let file_daemon = start_file_only_daemon(250);
+    write_api_token(&file_daemon, CREDENTIAL);
+    write_session_policy_contents(
+        &file_daemon,
+        "managed.toml",
+        "version = 2\npersistent = true\n\n[rules.\"example.com\"]\nmode = \"intercept\"\n\n[[rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n",
+    );
+    let file_backed = request(
+        &file_daemon.socket,
+        "version = 2\noperation = \"create_from_file\"\nname = \"managed.toml\"\n",
+    );
+    assert_public_ca_create_response(&file_daemon, &file_backed, CREDENTIAL);
+}
+
+fn assert_public_ca_create_response(daemon: &DaemonProcess, response: &Value, credential: &str) {
+    assert_eq!(response["ok"], true);
+    let ca_pem = fs::read_to_string(daemon._directory.path().join("ca.pem"))
+        .expect("configured CA certificate should be valid UTF-8 PEM");
+    assert_eq!(response["result"]["ca_certificate_pem"], ca_pem);
+    let (_, pem) = x509_parser::pem::parse_x509_pem(
+        response["result"]["ca_certificate_pem"]
+            .as_str()
+            .expect("create response should include a CA PEM string")
+            .as_bytes(),
+    )
+    .expect("returned CA should be valid PEM");
+    x509_parser::parse_x509_certificate(&pem.contents)
+        .expect("returned CA should contain a valid X.509 certificate");
+
+    let encoded = serde_json::to_string(response).expect("create response should serialize");
+    let private_key = fs::read_to_string(daemon._directory.path().join("ca-key.pem"))
+        .expect("configured CA private key should be readable by the test");
+    assert!(!encoded.contains(&private_key));
+    assert!(!encoded.contains("PRIVATE KEY"));
+    assert!(!encoded.contains(credential));
+}
+
+fn write_api_token(daemon: &DaemonProcess, credential: &str) {
+    let path = daemon.secret_dir.join("api-token");
+    fs::write(&path, credential).expect("test credential should be written");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .expect("test credential should be private");
+}
+
+#[test]
 fn file_only_creates_nested_sessions_from_fresh_policy_snapshots_and_keeps_ephemeral_leases() {
     let daemon = start_file_only_daemon(250);
     let name = "cladding/github.toml";

@@ -1,6 +1,6 @@
 # Rust client and direct protocol use
 
-The `baffle-client` package provides a typed asynchronous client for the v1
+The `baffle-client` package provides a typed asynchronous client for the v2
 Unix control protocol. It depends on Tokio, Serde, JSON, and TOML. It does not
 depend on Baffle's proxy runtime. The daemon package also re-exports it as
 `baffle_proxy::client`.
@@ -25,9 +25,24 @@ let session = client.create(policy).await?;
 // Make the session data socket available to the workload. Keep `session`
 // alive until the workload exits, then drop it or call `session.close()`.
 println!("proxy {} uses {}", session.id(), session.socket_path().display());
+if let Some(ca_certificate_pem) = session.ca_certificate_pem() {
+    // Use this public certificate when the workload must trust Baffle's
+    // intercepted TLS connections.
+    println!("session CA certificate is {} bytes", ca_certificate_pem.len());
+}
 Ok(())
 }
 ```
+
+`Session::ca_certificate_pem()` returns the public PEM certificate included
+in the create response for the session's TLS interception CA. Both inline and
+file-backed creation return it. The certificate is part of creation so a
+separate lookup cannot race CA rotation. It does not contain the CA private
+key.
+
+An older protocol-v2 daemon may omit this additive response field. The client
+then returns `None` from `ca_certificate_pem()`. Callers that need the CA to
+establish trust must treat `None` as unavailable trust material.
 
 The [client example](../examples/client.rs) sends CONNECT for
 `example.com:443`, reads the tunnel response, and closes the lease. It does not

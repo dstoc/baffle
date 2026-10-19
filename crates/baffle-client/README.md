@@ -1,6 +1,6 @@
 # baffle-client
 
-`baffle-client` is a typed asynchronous Rust client for the Baffle daemon's v1
+`baffle-client` is a typed asynchronous Rust client for the Baffle daemon's v2
 Unix control protocol. It creates, lists, and stops proxy sessions. It does not
 implement HTTP proxying or connect to a session's data socket.
 
@@ -26,6 +26,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = client.create(policy).await?;
 
     println!("proxy {} uses {}", session.id(), session.socket_path().display());
+    if let Some(ca_certificate_pem) = session.ca_certificate_pem() {
+        // The create response includes the public certificate for this
+        // session's TLS interception CA.
+        println!("session CA certificate is {} bytes", ca_certificate_pem.len());
+    }
     // Keep the session alive while its workload runs. Closing the handle
     // releases an ephemeral session.
     session.close();
@@ -40,6 +45,11 @@ The default policy denies unmatched hosts.
 The orchestrator must retain the returned session while its workload runs. The
 workload uses the session's Unix data socket with an HTTPS client that supports
 CONNECT. It must not fall back to direct egress or plaintext HTTP.
+
+`Session::ca_certificate_pem()` returns the public certificate PEM included
+with session creation, or `None` when an older protocol-v2 daemon omits the
+additive field. Callers that need the certificate for trust setup must treat
+`None` as unavailable trust material. The response contains no private key.
 
 See the [Baffle client and protocol guide](https://github.com/dstoc/baffle/blob/main/docs/client.md)
 for session lifetimes, file-backed policies, compatibility requirements, and

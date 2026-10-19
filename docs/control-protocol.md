@@ -235,8 +235,19 @@ successful response has a `result` object.
 Create response:
 
 ```json
-{"version":2,"ok":true,"result":{"id":"session_example_01","socket":"/run/baffle/proxies/session_example_01.sock","persistent":false}}
+{"version":2,"ok":true,"result":{"id":"session_example_01","socket":"/run/baffle/proxies/session_example_01.sock","persistent":false,"ca_certificate_pem":"<public CA certificate in PEM format>"}}
 ```
+
+Successful `create` and `create_from_file` responses include
+`ca_certificate_pem`, the public certificate used by the session runtime for
+TLS interception. It contains no private key. Baffle returns the certificate
+with creation so callers do not need a separate lookup that could race CA
+rotation. The response field is additive and does not change protocol version
+2. Existing protocol-v2 clients that ignore unknown result fields remain
+compatible. A newer `baffle-client` can also use an older protocol-v2 daemon;
+`Session::ca_certificate_pem()` returns `None` when that daemon omits the
+field. Callers that need this certificate for trust setup must treat `None` as
+unavailable trust material.
 
 List response:
 

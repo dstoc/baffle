@@ -993,13 +993,14 @@ async fn create_session_response(
     drop(permit);
     match result {
         Ok(created) => {
-            if !created.persistent {
-                *lease_id = Some(created.id.clone());
+            if !created.info.persistent {
+                *lease_id = Some(created.info.id.clone());
             }
             success(json!({
-                "id": created.id,
-                "socket": created.socket,
-                "persistent": created.persistent,
+                "id": created.info.id,
+                "socket": created.info.socket,
+                "persistent": created.info.persistent,
+                "ca_certificate_pem": created.ca_certificate_pem,
             }))
         }
         Err(SessionError::AtCapacity) => error_value(ERR_SESSION_LIMIT),
