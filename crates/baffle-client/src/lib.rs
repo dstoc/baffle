@@ -97,6 +97,7 @@ impl Client {
             id: created.id,
             socket_path: PathBuf::from(created.socket),
             persistent: created.persistent,
+            ca_certificate_pem: created.ca_certificate_pem,
             lease: (!created.persistent).then_some(stream),
         })
     }
@@ -123,6 +124,7 @@ impl Client {
             id: created.id,
             socket_path: PathBuf::from(created.socket),
             persistent: created.persistent,
+            ca_certificate_pem: created.ca_certificate_pem,
             lease: (!created.persistent).then_some(stream),
         })
     }
@@ -381,6 +383,7 @@ pub struct Session {
     id: String,
     socket_path: PathBuf,
     persistent: bool,
+    ca_certificate_pem: Option<String>,
     lease: Option<UnixStream>,
 }
 
@@ -398,6 +401,15 @@ impl Session {
     /// Return whether the session survives control-client disconnects.
     pub fn is_persistent(&self) -> bool {
         self.persistent
+    }
+
+    /// Return the public CA certificate PEM used by this session's daemon.
+    ///
+    /// Older protocol-v2 daemons do not include this response field, so this
+    /// returns `None` when the daemon did not provide certificate data. Do not
+    /// use a missing certificate as trust material.
+    pub fn ca_certificate_pem(&self) -> Option<&str> {
+        self.ca_certificate_pem.as_deref()
     }
 
     /// Explicitly release an ephemeral session lease.
@@ -661,6 +673,8 @@ struct CreateResult {
     id: String,
     socket: String,
     persistent: bool,
+    #[serde(default)]
+    ca_certificate_pem: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -755,9 +769,10 @@ fn map_remote_error(error: RemoteError) -> ClientError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientError, CreateFromFileRequest, CreateRequest, HostRule, InjectionFormat,
+        ClientError, CreateFromFileRequest, CreateRequest, CreateResult, HostRule, InjectionFormat,
         SessionConfig, UnmatchedHostPolicy, linux_default_control_socket,
-        macos_default_control_socket, map_remote_error, validate_session_config_name,
+        macos_default_control_socket, map_remote_error, success_result,
+        validate_session_config_name,
     };
 
     #[test]
@@ -899,5 +914,42 @@ mod tests {
                 "{invalid:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn create_response_accepts_a_public_ca_and_older_daemons_without_one() {
+        let with_ca: CreateResult = success_result(serde_json::json!({
+            "id": "session_example_01",
+            "socket": "/run/baffle/proxies/session_example_01.sock",
+            "persistent": false,
+            "ca_certificate_pem": "-----BEGIN CERTIFICATE-----\\npublic-certificate\\n-----END CERTIFICATE-----\\n",
+            "future_field": true
+        }))
+        .expect("the additive certificate field should deserialize");
+        assert_eq!(
+            with_ca.ca_certificate_pem.as_deref(),
+            Some("-----BEGIN CERTIFICATE-----\\npublic-certificate\\n-----END CERTIFICATE-----\\n")
+        );
+
+        let older_daemon: CreateResult = success_result(serde_json::json!({
+            "id": "session_example_02",
+            "socket": "/run/baffle/proxies/session_example_02.sock",
+            "persistent": true
+        }))
+        .expect("protocol-v2 create responses without the additive field remain valid");
+        assert_eq!(older_daemon.ca_certificate_pem, None);
+    }
+
+    #[test]
+    fn create_response_rejects_a_malformed_certificate_field_type() {
+        let error = success_result::<CreateResult>(serde_json::json!({
+            "id": "session_example_01",
+            "socket": "/run/baffle/proxies/session_example_01.sock",
+            "persistent": false,
+            "ca_certificate_pem": 7
+        }))
+        .err()
+        .expect("a non-string certificate field is an invalid response");
+        assert!(matches!(error, ClientError::Protocol(_)));
     }
 }

@@ -55,7 +55,7 @@ async fn concurrent_provisioning_reservations_enforce_the_session_limit() {
             .await,
         Err(SessionError::AtCapacity)
     ));
-    assert!(manager.stop(&created.id).await);
+    assert!(manager.stop(&created.info.id).await);
 }
 
 #[tokio::test]
@@ -100,7 +100,7 @@ async fn socket_directory_registry_is_scoped_to_each_session_manager() {
     assert!(first_nested.is_dir());
     assert!(second_nested.is_dir());
 
-    assert!(first_manager.stop(&first.id).await);
+    assert!(first_manager.stop(&first.info.id).await);
     assert!(
         first_nested.is_dir(),
         "the sibling lease keeps the parent alive"
@@ -110,7 +110,7 @@ async fn socket_directory_registry_is_scoped_to_each_session_manager() {
         "the other manager keeps its own parent"
     );
 
-    assert!(first_manager.stop(&second.id).await);
+    assert!(first_manager.stop(&second.info.id).await);
     assert!(
         !first_nested.exists(),
         "the last same-manager lease removes the parent"
@@ -120,6 +120,6 @@ async fn socket_directory_registry_is_scoped_to_each_session_manager() {
         "cleanup must not touch another manager"
     );
 
-    assert!(second_manager.stop(&independent.id).await);
+    assert!(second_manager.stop(&independent.info.id).await);
     assert!(!second_nested.exists());
 }

@@ -77,7 +77,13 @@ impl SessionManager {
         session: SessionConfig,
         secrets: ResolvedSecrets,
         config_source: Option<String>,
-    ) -> std::result::Result<SessionInfo, SessionError> {
+    ) -> std::result::Result<CreatedSession, SessionError> {
+        // Capture the same immutable CA used by this runtime so the create
+        // response cannot report a certificate from a later CA rotation.
+        let ca = Arc::clone(&self.ca);
+        let ca_certificate_pem = std::str::from_utf8(ca.public_certificate_pem())
+            .map_err(|_| SessionError::Internal)?
+            .to_owned();
         let secrets = Arc::new(secrets);
         let id = new_session_id().map_err(|_| SessionError::Internal)?;
         let persistent = session.persistent;
@@ -110,7 +116,7 @@ impl SessionManager {
             runtime_id: RuntimeId::new(id.clone()),
             session: session.clone(),
             secrets: Arc::clone(&secrets),
-            ca: Arc::clone(&self.ca),
+            ca: Arc::clone(&ca),
             socket_path,
             connection_permits: Arc::new(Semaphore::new(self.max_connections_per_session)),
             io_timeout: self.io_timeout,
@@ -166,7 +172,10 @@ impl SessionManager {
             active_sessions,
             "proxy session started"
         );
-        Ok(info)
+        Ok(CreatedSession {
+            info,
+            ca_certificate_pem,
+        })
     }
 
     pub(super) async fn reject_new_sessions(&self) {
@@ -390,6 +399,11 @@ pub(super) struct SessionInfo {
     pub(super) state: SessionLifecycle,
     pub(super) generation: u64,
     pub(super) draining_generations: usize,
+}
+
+pub(super) struct CreatedSession {
+    pub(super) info: SessionInfo,
+    pub(super) ca_certificate_pem: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -3,6 +3,7 @@
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -28,6 +29,7 @@ async fn client_manages_ephemeral_leases_and_persistent_sessions() {
         .await
         .expect("ephemeral session should be created");
     assert!(!explicit.is_persistent());
+    assert_ca_certificate(explicit.ca_certificate_pem(), &daemon.ca_certificate);
     let explicit_path = explicit.socket_path().to_path_buf();
     assert!(explicit_path.exists());
     let sessions = client.list().await.expect("sessions should be listed");
@@ -214,6 +216,7 @@ async fn typed_client_creates_from_a_daemon_managed_file_and_holds_the_lease() {
         .await
         .expect("typed file create should succeed");
     assert!(!session.is_persistent());
+    assert_ca_certificate(session.ca_certificate_pem(), &daemon.ca_certificate);
     let socket_path = session.socket_path().to_path_buf();
     assert!(socket_path.exists());
     assert_eq!(client.list().await.expect("list should succeed").len(), 1);
@@ -283,6 +286,20 @@ async fn wait_for_count(client: &Client, expected: usize) {
         );
         sleep(Duration::from_millis(10)).await;
     }
+}
+
+fn assert_ca_certificate(actual: Option<&str>, configured_path: &Path) {
+    let configured = fs::read_to_string(configured_path)
+        .expect("configured CA certificate should be valid UTF-8 PEM");
+    assert_eq!(actual, Some(configured.as_str()));
+    let (_, pem) = x509_parser::pem::parse_x509_pem(
+        actual
+            .expect("new daemon should return its public CA certificate")
+            .as_bytes(),
+    )
+    .expect("returned CA should be valid PEM");
+    x509_parser::parse_x509_certificate(&pem.contents)
+        .expect("returned CA should contain a valid X.509 certificate");
 }
 
 fn start_daemon(max_sessions: usize) -> DaemonProcess {
