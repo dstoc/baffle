@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    file_config::{SessionConfigFileError, SessionConfigStore},
+    file_config::SessionConfigStore,
     session::{SessionLifecycle, SessionManager, absolute_socket_path},
 };
 
@@ -109,26 +109,15 @@ impl SessionManager {
         let Some(configs) = configs else {
             return SessionReloadResult::failed(id, current_socket, "configuration_unavailable");
         };
-        let text = match configs.read_snapshot(&config_source) {
-            Ok(text) => text,
-            Err(SessionConfigFileError::NotFound) => {
-                return SessionReloadResult::failed(id, current_socket, "configuration_not_found");
-            }
-            Err(SessionConfigFileError::Unavailable) => {
-                return SessionReloadResult::failed(
+        let mut candidate = match configs.read_session(&config_source) {
+            Ok(session) => session,
+            Err(error) => {
+                return SessionReloadResult::failed_with_detail(
                     id,
                     current_socket,
-                    "configuration_unavailable",
+                    error.reload_reason(),
+                    error.detail,
                 );
-            }
-            Err(SessionConfigFileError::Invalid) => {
-                return SessionReloadResult::failed(id, current_socket, "configuration_invalid");
-            }
-        };
-        let mut candidate = match crate::config::SessionFile::from_toml(&text) {
-            Ok(session) => session,
-            Err(_) => {
-                return SessionReloadResult::failed(id, current_socket, "configuration_invalid");
             }
         };
         // Persistence is the lifetime chosen at creation. A file edit cannot
@@ -292,6 +281,8 @@ pub(super) struct SessionReloadResult {
     socket: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 impl SessionReloadResult {
@@ -301,6 +292,7 @@ impl SessionReloadResult {
             status: ReloadStatus::Reloaded,
             socket,
             reason: None,
+            detail: None,
         }
     }
 
@@ -310,6 +302,7 @@ impl SessionReloadResult {
             status: ReloadStatus::Unchanged,
             socket,
             reason: None,
+            detail: None,
         }
     }
 
@@ -319,6 +312,22 @@ impl SessionReloadResult {
             status: ReloadStatus::Failed,
             socket,
             reason: Some(reason),
+            detail: None,
+        }
+    }
+
+    pub(super) fn failed_with_detail(
+        id: &str,
+        socket: String,
+        reason: &'static str,
+        detail: String,
+    ) -> Self {
+        Self {
+            id: id.to_owned(),
+            status: ReloadStatus::Failed,
+            socket,
+            reason: Some(reason),
+            detail: Some(detail),
         }
     }
 }

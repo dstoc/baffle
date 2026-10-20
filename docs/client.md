@@ -97,8 +97,11 @@ These calls use short-lived control connections. They do not replace the
 control connection held by an ephemeral `Session`, so the creator must keep
 that handle open until the workload ends. Each result reports `reloaded`,
 `unchanged`, or `failed`, with the current socket path and a safe failure
-reason when needed. `reload_all` returns one result per active file-backed
-session; callers should treat each result independently.
+reason when needed. The additive `reload_with_diagnostics` and
+`reload_all_with_diagnostics` methods also return a safe configuration
+diagnostic in `ReloadResultWithDiagnostics::detail`. Existing `reload` methods
+retain their original result type. `reload_all` returns one result per active
+file-backed session; callers should treat each result independently.
 
 A reload rereads the original administrator-managed file. Equivalent
 validated configuration, including resolved credential values and the

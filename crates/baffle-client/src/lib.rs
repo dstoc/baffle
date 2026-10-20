@@ -187,6 +187,14 @@ impl Client {
     /// This operation uses a short-lived control connection and does not
     /// acquire, release, or replace the session's creator lease.
     pub async fn reload(&self, session_id: impl AsRef<str>) -> Result<ReloadResult, ClientError> {
+        Ok(self.reload_with_diagnostics(session_id).await?.result)
+    }
+
+    /// Reload one file-backed session and retain any safe failure diagnostic.
+    pub async fn reload_with_diagnostics(
+        &self,
+        session_id: impl AsRef<str>,
+    ) -> Result<ReloadResultWithDiagnostics, ClientError> {
         let request = ReloadRequest {
             version: PROTOCOL_VERSION,
             operation: "reload",
@@ -194,7 +202,7 @@ impl Client {
         };
         let mut stream = self.open_control().await?;
         let response = exchange(&mut stream, &request).await?;
-        success_result(response)
+        success_result::<ReloadResultWire>(response).map(Into::into)
     }
 
     /// Reload every active file-backed session owned by the caller.
@@ -202,14 +210,26 @@ impl Client {
     /// Results are returned in stable session-ID order. Each result is
     /// independent and may report `failed` while other sessions succeed.
     pub async fn reload_all(&self) -> Result<Vec<ReloadResult>, ClientError> {
+        Ok(self
+            .reload_all_with_diagnostics()
+            .await?
+            .into_iter()
+            .map(|result| result.result)
+            .collect())
+    }
+
+    /// Reload every active file-backed session and retain safe diagnostics.
+    pub async fn reload_all_with_diagnostics(
+        &self,
+    ) -> Result<Vec<ReloadResultWithDiagnostics>, ClientError> {
         let request = ReloadAllRequest {
             version: PROTOCOL_VERSION,
             operation: "reload_all",
         };
         let mut stream = self.open_control().await?;
         let response = exchange(&mut stream, &request).await?;
-        let result: ReloadAllResult = success_result(response)?;
-        Ok(result.results)
+        let result: ReloadAllResultWire = success_result(response)?;
+        Ok(result.results.into_iter().map(Into::into).collect())
     }
 
     /// List sessions owned by the authenticated control-socket user.
@@ -502,6 +522,15 @@ pub struct ReloadResult {
     pub reason: Option<String>,
 }
 
+/// Reload result plus an optional safe failure diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReloadResultWithDiagnostics {
+    /// Stable reload outcome and failure category.
+    pub result: ReloadResult,
+    /// Safe diagnostic for a failed configuration read or composition.
+    pub detail: Option<String>,
+}
+
 /// Reload status for one file-backed session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -691,8 +720,32 @@ struct ReloadAllRequest {
 }
 
 #[derive(Deserialize)]
-struct ReloadAllResult {
-    results: Vec<ReloadResult>,
+struct ReloadResultWire {
+    id: String,
+    status: ReloadStatus,
+    #[serde(rename = "socket")]
+    socket_path: PathBuf,
+    reason: Option<String>,
+    detail: Option<String>,
+}
+
+impl From<ReloadResultWire> for ReloadResultWithDiagnostics {
+    fn from(wire: ReloadResultWire) -> Self {
+        Self {
+            result: ReloadResult {
+                id: wire.id,
+                status: wire.status,
+                socket_path: wire.socket_path,
+                reason: wire.reason,
+            },
+            detail: wire.detail,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ReloadAllResultWire {
+    results: Vec<ReloadResultWire>,
 }
 
 #[derive(Deserialize)]

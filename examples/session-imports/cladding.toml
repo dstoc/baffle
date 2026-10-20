@@ -1,0 +1,8 @@
+version = 2
+persistent = true
+unmatched = "deny"
+imports = ["shared/nested/api.toml"]
+
+[rules."cladding.example.com"]
+mode = "intercept"
+paths = ["/v1/**"]
