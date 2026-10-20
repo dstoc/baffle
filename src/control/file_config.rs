@@ -118,7 +118,7 @@ impl SessionConfigStore {
                 "session configuration import depth exceeds {MAX_SESSION_IMPORT_DEPTH} files"
             )));
         }
-        if composition.loaded.len() >= MAX_SESSION_IMPORT_FILES {
+        if composition.stack.len() + composition.loaded.len() >= MAX_SESSION_IMPORT_FILES {
             return Err(SessionConfigFileError::invalid(format!(
                 "session configuration imports exceed {MAX_SESSION_IMPORT_FILES} unique files"
             )));

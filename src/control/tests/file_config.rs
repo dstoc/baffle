@@ -62,6 +62,83 @@ fn composes_nested_imports_relative_to_each_declaring_file() {
 }
 
 #[test]
+fn counts_root_and_imported_files_toward_the_unique_file_limit() {
+    let (directory, store) = session_store();
+
+    let imports = (0..127)
+        .map(|index| format!("\"accepted-{index}.toml\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    write_session_file(
+        &directory,
+        "accepted.toml",
+        &format!("version = 2\nimports = [{imports}]\n"),
+    );
+    for index in 0..127 {
+        write_session_file(
+            &directory,
+            &format!("accepted-{index}.toml"),
+            "version = 2\n",
+        );
+    }
+    store
+        .read_session("accepted.toml")
+        .expect("the root and 127 imports should fit the 128-file limit");
+
+    let imports = (0..128)
+        .map(|index| format!("\"rejected-{index}.toml\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    write_session_file(
+        &directory,
+        "rejected.toml",
+        &format!("version = 2\nimports = [{imports}]\n"),
+    );
+    for index in 0..128 {
+        write_session_file(
+            &directory,
+            &format!("rejected-{index}.toml"),
+            "version = 2\n",
+        );
+    }
+    let too_many = store
+        .read_session("rejected.toml")
+        .expect_err("the root and 128 imports must exceed the 128-file limit");
+    assert!(too_many.detail.contains("exceed 128 unique files"));
+}
+
+#[test]
+fn counts_active_ancestors_toward_the_unique_file_limit() {
+    let (directory, store) = session_store();
+    let imports = (0..127)
+        .map(|index| format!("\"leaf-{index}.toml\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    write_session_file(
+        &directory,
+        "root.toml",
+        "version = 2\nimports = [\"nested/branch.toml\"]\n",
+    );
+    write_session_file(
+        &directory,
+        "nested/branch.toml",
+        &format!("version = 2\nimports = [{imports}]\n"),
+    );
+    for index in 0..127 {
+        write_session_file(
+            &directory,
+            &format!("nested/leaf-{index}.toml"),
+            "version = 2\n",
+        );
+    }
+
+    let too_many = store
+        .read_session("root.toml")
+        .expect_err("the nested graph has 129 unique files");
+    assert!(too_many.detail.contains("exceed 128 unique files"));
+}
+
+#[test]
 fn rejects_conflicting_rules_unmatched_settings_and_imported_lifecycle_fields() {
     let (directory, store) = session_store();
     write_session_file(
