@@ -26,9 +26,7 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::config::{
-    ControlRequest, DaemonConfig, PROTOCOL_VERSION, SESSION_FILE_INVALID_MESSAGE, SessionCreateMode,
-};
+use crate::config::{ControlRequest, DaemonConfig, PROTOCOL_VERSION, SessionCreateMode};
 use crate::secrets::{SecretStore, SecretStoreError};
 use crate::{
     ca::ManagedCa,
@@ -39,7 +37,7 @@ use crate::{
 };
 
 use super::{
-    file_config::{SessionConfigFileError, SessionConfigStore},
+    file_config::SessionConfigStore,
     session::{SessionError, SessionManager},
 };
 
@@ -66,15 +64,6 @@ const ERR_OPERATION_NOT_ALLOWED: (&str, &str) = (
     "operation_not_allowed",
     "session creation operation is not allowed by daemon configuration",
 );
-const ERR_CONFIG_FILE_NOT_FOUND: (&str, &str) = (
-    "config_file_not_found",
-    "session configuration file was not found",
-);
-const ERR_CONFIG_FILE_UNAVAILABLE: (&str, &str) = (
-    "config_file_unavailable",
-    "session configuration file is unavailable",
-);
-const ERR_CONFIG_FILE_INVALID: (&str, &str) = ("config_file_invalid", SESSION_FILE_INVALID_MESSAGE);
 const ERR_EPHEMERAL_REQUIRED: (&str, &str) = (
     "ephemeral_required",
     "session configuration must be ephemeral",
@@ -910,25 +899,11 @@ pub(super) async fn handle_connection(mut stream: UnixStream, state: Arc<Control
                     let _ = write_error(&mut stream, ERR_INTERNAL).await;
                     return;
                 };
-                let text = match store.read_snapshot(&name) {
-                    Ok(text) => text,
-                    Err(SessionConfigFileError::NotFound) => {
-                        let _ = write_error(&mut stream, ERR_CONFIG_FILE_NOT_FOUND).await;
-                        return;
-                    }
-                    Err(SessionConfigFileError::Unavailable) => {
-                        let _ = write_error(&mut stream, ERR_CONFIG_FILE_UNAVAILABLE).await;
-                        return;
-                    }
-                    Err(SessionConfigFileError::Invalid) => {
-                        let _ = write_error(&mut stream, ERR_CONFIG_FILE_INVALID).await;
-                        return;
-                    }
-                };
-                let session = match crate::config::SessionFile::from_toml(&text) {
+                let session = match store.read_session(&name) {
                     Ok(session) => session,
-                    Err(_) => {
-                        let _ = write_error(&mut stream, ERR_CONFIG_FILE_INVALID).await;
+                    Err(error) => {
+                        let response = error_value_with_message(error.create_code(), &error.detail);
+                        let _ = write_value(&mut stream, response).await;
                         return;
                     }
                 };
@@ -1072,6 +1047,10 @@ async fn write_error(
 }
 
 fn error_value((code, message): (&'static str, &'static str)) -> Value {
+    error_value_with_message(code, message)
+}
+
+fn error_value_with_message(code: &str, message: &str) -> Value {
     json!({
         "version": PROTOCOL_VERSION,
         "ok": false,

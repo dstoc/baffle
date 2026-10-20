@@ -1,0 +1,6 @@
+version = 2
+imports = ["../github.toml"]
+
+[rules."api.github.com"]
+mode = "intercept"
+paths = ["/repos/**"]

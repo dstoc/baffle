@@ -191,6 +191,73 @@ command's lease.
 Session files use schema version 2. They describe one session policy. They do
 not contain a control-protocol `operation` field or a `[session]` table.
 
+### Importing session files
+
+Daemon-managed session files in `file_only` mode can reuse other session files
+with a top-level `imports` array. Each entry is a relative path to another TOML
+session file. The example at `examples/session-imports/cladding.toml` imports a
+nested policy, which imports a shared GitHub policy:
+
+```toml
+version = 2
+persistent = true
+imports = ["shared/nested/api.toml"]
+
+[rules."cladding.example.com"]
+mode = "intercept"
+paths = ["/v1/**"]
+```
+
+For a daemon whose `session_config_dir` contains the example directory, create
+this session with:
+
+```sh
+baffle create cladding.toml
+```
+
+All imported files must use session schema version 2. Imports are processed in
+array order. Baffle processes each imported file and its imports before it
+processes the importing file. It loads each normalized file path once. This
+gives nested imports deterministic depth-first ordering and permits shared files
+in a diamond-shaped import graph. A cycle fails.
+
+Each import path is relative to the directory of the file that declares it.
+For example, `../github.toml` in
+`shared/nested/api.toml` resolves to `shared/github.toml`. Absolute paths and
+paths that escape `session_config_dir` fail. The daemon reads every imported
+file through the same file-only security checks as the root file. It rejects
+symlinks, unsafe ownership or permissions, and unreadable files.
+
+Imports compose policy with strict conflict rules:
+
+* A normalized hostname can have one rule across the complete import graph.
+  Duplicate rules fail, even if their values match. There is no rule override.
+* The root file controls the effective `unmatched` setting. It defaults to
+  `deny`. Every imported file that sets `unmatched` must match that root value.
+  The root must set `unmatched = "tunnel"` to use an imported file that declares
+  `unmatched = "tunnel"`. Conflicting imported values also fail.
+* Only the root file can set `persistent` or `socket_name`. An imported file
+  that sets either field fails, even when its value matches the root file.
+  These fields describe the created session, not reusable policy.
+* Every file must pass normal schema and policy validation. Baffle validates
+  secret references after it composes the complete policy.
+
+Imports are available only for daemon-managed files in `file_only` mode. A
+local file passed to `baffle create --config` cannot import files. This keeps
+imports inside the daemon's configured security boundary.
+
+The daemon limits an import chain to 32 files and an import graph to 128 unique
+files. Each file retains the existing 256 KiB size limit. Missing files report
+`config_file_not_found`; unreadable or unsafe files report
+`config_file_unavailable`. Invalid syntax, cycles, conflicting settings, and
+unsupported composition report `config_file_invalid` with a safe diagnostic.
+
+Reload reads and validates the full import graph again. It applies the new
+policy only after every file passes validation. A failed reload leaves the
+active policy generation and listener unchanged. The root file still controls
+`socket_name`; the session's persistence lifetime remains the value selected
+when it was created.
+
 This minimal session allows an opaque HTTPS tunnel to `example.com`:
 
 ```toml

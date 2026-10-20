@@ -545,7 +545,7 @@ fn reload_cli_reports_per_session_results_and_fails_when_any_all_result_fails() 
         "failed result should be printed: {output}"
     );
     assert!(
-        output.contains("configuration file was not found"),
+        output.contains("second.toml") && output.contains("was not found"),
         "failure reason should be safe and specific: {output}"
     );
 

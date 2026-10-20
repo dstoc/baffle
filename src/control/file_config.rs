@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::{self, File},
     io::{self, Read},
     os::{
@@ -14,9 +15,14 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
+use crate::config::{
+    MAX_SESSION_CONFIG_NAME_BYTES, SessionConfig, SessionFile, UnmatchedHostPolicy,
+};
 use crate::platform::{directory_open_flags, normalize_system_path};
 
 const MAX_SESSION_CONFIG_BYTES: usize = 256 * 1024;
+const MAX_SESSION_IMPORT_DEPTH: usize = 32;
+const MAX_SESSION_IMPORT_FILES: usize = 128;
 
 #[derive(Clone)]
 pub(super) struct SessionConfigStore {
@@ -25,10 +31,45 @@ pub(super) struct SessionConfigStore {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SessionConfigFileError {
+pub(super) enum SessionConfigFileErrorKind {
     NotFound,
     Unavailable,
     Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SessionConfigFileError {
+    pub(super) kind: SessionConfigFileErrorKind,
+    pub(super) detail: String,
+}
+
+impl SessionConfigFileError {
+    fn new(kind: SessionConfigFileErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+
+    fn invalid(detail: impl Into<String>) -> Self {
+        Self::new(SessionConfigFileErrorKind::Invalid, detail)
+    }
+
+    pub(super) fn create_code(&self) -> &'static str {
+        match self.kind {
+            SessionConfigFileErrorKind::NotFound => "config_file_not_found",
+            SessionConfigFileErrorKind::Unavailable => "config_file_unavailable",
+            SessionConfigFileErrorKind::Invalid => "config_file_invalid",
+        }
+    }
+
+    pub(super) fn reload_reason(&self) -> &'static str {
+        match self.kind {
+            SessionConfigFileErrorKind::NotFound => "configuration_not_found",
+            SessionConfigFileErrorKind::Unavailable => "configuration_unavailable",
+            SessionConfigFileErrorKind::Invalid => "configuration_invalid",
+        }
+    }
 }
 
 impl SessionConfigStore {
@@ -41,64 +82,279 @@ impl SessionConfigStore {
         })
     }
 
-    pub(super) fn read_snapshot(
+    pub(super) fn read_session(
         &self,
         name: &str,
-    ) -> std::result::Result<String, SessionConfigFileError> {
+    ) -> std::result::Result<SessionConfig, SessionConfigFileError> {
+        let mut composition = Composition::default();
+        self.compose_file(name, true, &mut composition)?;
+        let root = composition.root.ok_or_else(|| {
+            SessionConfigFileError::invalid("the root session configuration was not loaded")
+        })?;
+        Ok(SessionConfig {
+            persistent: root.persistent,
+            socket_name: root.socket_name,
+            unmatched: composition.root_unmatched.unwrap_or_default(),
+            rules: composition.rules,
+        })
+    }
+
+    fn compose_file(
+        &self,
+        name: &str,
+        is_root: bool,
+        composition: &mut Composition,
+    ) -> std::result::Result<(), SessionConfigFileError> {
+        if composition.stack.iter().any(|path| path == name) {
+            return Err(SessionConfigFileError::invalid(format!(
+                "session configuration import cycle includes `{name}`"
+            )));
+        }
+        if composition.loaded.contains(name) {
+            return Ok(());
+        }
+        if composition.stack.len() >= MAX_SESSION_IMPORT_DEPTH {
+            return Err(SessionConfigFileError::invalid(format!(
+                "session configuration import depth exceeds {MAX_SESSION_IMPORT_DEPTH} files"
+            )));
+        }
+        if composition.loaded.len() >= MAX_SESSION_IMPORT_FILES {
+            return Err(SessionConfigFileError::invalid(format!(
+                "session configuration imports exceed {MAX_SESSION_IMPORT_FILES} unique files"
+            )));
+        }
+
+        composition.stack.push(name.to_owned());
+        let result = self.compose_file_contents(name, is_root, composition);
+        composition.stack.pop();
+        if result.is_ok() {
+            composition.loaded.insert(name.to_owned());
+        }
+        result
+    }
+
+    fn compose_file_contents(
+        &self,
+        name: &str,
+        is_root: bool,
+        composition: &mut Composition,
+    ) -> std::result::Result<(), SessionConfigFileError> {
+        let text = self.read_snapshot(name)?;
+        let mut document: toml::Value = toml::from_str(&text).map_err(|_| {
+            SessionConfigFileError::invalid(format!(
+                "session configuration `{name}` has invalid TOML syntax or values"
+            ))
+        })?;
+        let table = document.as_table_mut().ok_or_else(|| {
+            SessionConfigFileError::invalid(format!(
+                "session configuration `{name}` must contain a TOML table"
+            ))
+        })?;
+
+        if !is_root && (table.contains_key("persistent") || table.contains_key("socket_name")) {
+            return Err(SessionConfigFileError::invalid(format!(
+                "imported session configuration `{name}` cannot set `persistent` or `socket_name`; set lifecycle and identity fields in the root file"
+            )));
+        }
+
+        let imports = match table.remove("imports") {
+            None => Vec::new(),
+            Some(toml::Value::Array(imports)) => imports
+                .into_iter()
+                .map(|import| {
+                    import.as_str().map(str::to_owned).ok_or_else(|| {
+                        SessionConfigFileError::invalid(format!(
+                            "`imports` in `{name}` must contain only relative path strings"
+                        ))
+                    })
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            Some(_) => {
+                return Err(SessionConfigFileError::invalid(format!(
+                    "`imports` in `{name}` must be an array of relative path strings"
+                )));
+            }
+        };
+
+        for import in imports {
+            let imported_name = resolve_import_name(name, &import)?;
+            self.compose_file(&imported_name, false, composition)?;
+        }
+
+        let explicit_unmatched = table.contains_key("unmatched");
+        let policy_text = toml::to_string(&document).map_err(|_| {
+            SessionConfigFileError::invalid(format!(
+                "session configuration `{name}` could not be decoded"
+            ))
+        })?;
+        let policy = SessionFile::from_toml(&policy_text).map_err(|error| {
+            SessionConfigFileError::invalid(format!("session configuration `{name}`: {error}"))
+        })?;
+
+        if explicit_unmatched {
+            let current = if is_root {
+                &mut composition.root_unmatched
+            } else {
+                &mut composition.imported_unmatched
+            };
+            if current.is_some_and(|current| current != policy.unmatched) {
+                return Err(SessionConfigFileError::invalid(format!(
+                    "conflicting `unmatched` settings in the import graph at `{name}`; imported values must agree"
+                )));
+            }
+            *current = Some(policy.unmatched);
+        }
+
+        for rule in policy.rules {
+            if !composition.hosts.insert(rule.host.clone()) {
+                return Err(SessionConfigFileError::invalid(format!(
+                    "host rule `{}` is defined more than once in the import graph; define it in one file only",
+                    rule.host
+                )));
+            }
+            composition.rules.push(rule);
+        }
+
+        if is_root {
+            let root_unmatched = composition.root_unmatched.unwrap_or_default();
+            if composition
+                .imported_unmatched
+                .is_some_and(|imported| imported != root_unmatched)
+            {
+                return Err(SessionConfigFileError::invalid(format!(
+                    "imported `unmatched` settings conflict with the root file's effective value `{}`; set the same value in the root file",
+                    match root_unmatched {
+                        UnmatchedHostPolicy::Deny => "deny",
+                        UnmatchedHostPolicy::Tunnel => "tunnel",
+                    }
+                )));
+            }
+            composition.root = Some(RootSettings {
+                persistent: policy.persistent,
+                socket_name: policy.socket_name,
+            });
+        }
+        Ok(())
+    }
+
+    fn read_snapshot(&self, name: &str) -> std::result::Result<String, SessionConfigFileError> {
         let mut components = name.split('/').peekable();
         let mut directory = self
             .directory
             .try_clone()
-            .map_err(|_| SessionConfigFileError::Unavailable)?;
+            .map_err(|_| unavailable_file(name))?;
 
         while let Some(component) = components.next() {
             let component = std::ffi::CString::new(component.as_bytes())
-                .map_err(|_| SessionConfigFileError::Unavailable)?;
+                .map_err(|_| invalid_file(name, "contains an invalid path component"))?;
             if components.peek().is_some() {
                 directory = openat_file(
                     directory.as_raw_fd(),
                     &component,
                     directory_open_flags() | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 )
-                .map_err(classify_config_file_io)?;
-                let metadata = directory
-                    .metadata()
-                    .map_err(|_| SessionConfigFileError::Unavailable)?;
+                .map_err(|error| classify_config_file_io(error, name))?;
+                let metadata = directory.metadata().map_err(|_| unavailable_file(name))?;
                 validate_config_directory_metadata(&metadata, self.trusted_uid, false)
-                    .map_err(|_| SessionConfigFileError::Unavailable)?;
+                    .map_err(|_| unavailable_file(name))?;
             } else {
                 let file = openat_file(
                     directory.as_raw_fd(),
                     &component,
                     libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
                 )
-                .map_err(classify_config_file_io)?;
-                let metadata = file
-                    .metadata()
-                    .map_err(|_| SessionConfigFileError::Unavailable)?;
+                .map_err(|error| classify_config_file_io(error, name))?;
+                let metadata = file.metadata().map_err(|_| unavailable_file(name))?;
                 let mode = metadata.permissions().mode();
                 if !metadata.is_file()
                     || !trusted_owner(metadata.uid(), self.trusted_uid)
                     || mode & 0o7022 != 0
                     || mode & 0o444 == 0
                 {
-                    return Err(SessionConfigFileError::Unavailable);
+                    return Err(unavailable_file(name));
                 }
                 if metadata.len() > MAX_SESSION_CONFIG_BYTES as u64 {
-                    return Err(SessionConfigFileError::Invalid);
+                    return Err(invalid_file(name, "exceeds the 256 KiB size limit"));
                 }
                 let mut bytes = Vec::with_capacity(metadata.len() as usize);
                 file.take((MAX_SESSION_CONFIG_BYTES + 1) as u64)
                     .read_to_end(&mut bytes)
-                    .map_err(|_| SessionConfigFileError::Unavailable)?;
+                    .map_err(|_| unavailable_file(name))?;
                 if bytes.len() > MAX_SESSION_CONFIG_BYTES {
-                    return Err(SessionConfigFileError::Invalid);
+                    return Err(invalid_file(name, "exceeds the 256 KiB size limit"));
                 }
-                return String::from_utf8(bytes).map_err(|_| SessionConfigFileError::Invalid);
+                return String::from_utf8(bytes)
+                    .map_err(|_| invalid_file(name, "must contain UTF-8 text"));
             }
         }
-        Err(SessionConfigFileError::Invalid)
+        Err(invalid_file(name, "has an empty path"))
     }
+}
+
+#[derive(Default)]
+struct Composition {
+    stack: Vec<String>,
+    loaded: HashSet<String>,
+    hosts: HashSet<String>,
+    rules: Vec<crate::config::HostRule>,
+    imported_unmatched: Option<UnmatchedHostPolicy>,
+    root_unmatched: Option<UnmatchedHostPolicy>,
+    root: Option<RootSettings>,
+}
+
+struct RootSettings {
+    persistent: bool,
+    socket_name: Option<String>,
+}
+
+fn resolve_import_name(
+    importing_name: &str,
+    import: &str,
+) -> std::result::Result<String, SessionConfigFileError> {
+    let invalid = || {
+        SessionConfigFileError::invalid(format!(
+            "`imports` in `{importing_name}` must contain relative TOML file paths within the session configuration directory"
+        ))
+    };
+    if import.is_empty()
+        || import.len() > MAX_SESSION_CONFIG_NAME_BYTES
+        || import.starts_with('/')
+        || import.contains(['\\', ':'])
+        || import.chars().any(char::is_control)
+    {
+        return Err(invalid());
+    }
+
+    let mut components = importing_name
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.split('/').map(str::to_owned).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for component in import.split('/') {
+        match component {
+            "" => return Err(invalid()),
+            "." => {}
+            ".." => {
+                if components.pop().is_none() {
+                    return Err(invalid());
+                }
+            }
+            component => components.push(component.to_owned()),
+        }
+    }
+    let name = components.join("/");
+    baffle_client::validate_session_config_name(&name).map_err(|_| invalid())?;
+    Ok(name)
+}
+
+fn invalid_file(name: &str, detail: &str) -> SessionConfigFileError {
+    SessionConfigFileError::invalid(format!("session configuration `{name}` {detail}"))
+}
+
+fn unavailable_file(name: &str) -> SessionConfigFileError {
+    SessionConfigFileError::new(
+        SessionConfigFileErrorKind::Unavailable,
+        format!("session configuration `{name}` could not be read safely"),
+    )
 }
 
 fn open_trusted_directory_tree(path: &Path, trusted_uid: u32) -> Result<File> {
@@ -196,10 +452,13 @@ fn openat_file(parent_fd: i32, name: &std::ffi::CStr, flags: i32) -> io::Result<
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn classify_config_file_io(error: io::Error) -> SessionConfigFileError {
+fn classify_config_file_io(error: io::Error, name: &str) -> SessionConfigFileError {
     if error.kind() == io::ErrorKind::NotFound {
-        SessionConfigFileError::NotFound
+        SessionConfigFileError::new(
+            SessionConfigFileErrorKind::NotFound,
+            format!("session configuration `{name}` was not found"),
+        )
     } else {
-        SessionConfigFileError::Unavailable
+        unavailable_file(name)
     }
 }

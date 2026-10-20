@@ -6,8 +6,8 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use baffle_client::{
-    Client, ClientError, ReloadResult, ReloadStatus, Session, SessionConfig, SessionInfo,
-    default_control_socket,
+    Client, ClientError, ReloadResultWithDiagnostics, ReloadStatus, Session, SessionConfig,
+    SessionInfo, default_control_socket,
 };
 use clap::{ArgGroup, Args, Parser, Subcommand};
 
@@ -166,7 +166,7 @@ pub async fn reload(control_socket: PathBuf, args: ReloadArgs) -> Result<()> {
     let client = Client::new(control_socket);
     let results = if args.all {
         client
-            .reload_all()
+            .reload_all_with_diagnostics()
             .await
             .map_err(|error| client_error(error, client.control_socket(), false))?
     } else {
@@ -176,7 +176,7 @@ pub async fn reload(control_socket: PathBuf, args: ReloadArgs) -> Result<()> {
             .expect("clap requires one reload target");
         vec![
             client
-                .reload(session_id)
+                .reload_with_diagnostics(session_id)
                 .await
                 .map_err(|error| client_error(error, client.control_socket(), false))?,
         ]
@@ -184,15 +184,16 @@ pub async fn reload(control_socket: PathBuf, args: ReloadArgs) -> Result<()> {
     print_reload_results(&results)?;
     if results
         .iter()
-        .any(|result| result.status == ReloadStatus::Failed)
+        .any(|entry| entry.result.status == ReloadStatus::Failed)
     {
         return Err(anyhow!("one or more sessions failed to reload"));
     }
     Ok(())
 }
 
-fn print_reload_results(results: &[ReloadResult]) -> Result<()> {
-    for result in results {
+fn print_reload_results(results: &[ReloadResultWithDiagnostics]) -> Result<()> {
+    for entry in results {
+        let result = &entry.result;
         match result.status {
             ReloadStatus::Reloaded => println!(
                 "Session {}: reloaded (socket {}).",
@@ -207,7 +208,10 @@ fn print_reload_results(results: &[ReloadResult]) -> Result<()> {
             ReloadStatus::Failed => println!(
                 "Session {}: failed ({}) (socket {}).",
                 result.id,
-                reload_failure_text(result.reason.as_deref()),
+                entry
+                    .detail
+                    .as_deref()
+                    .unwrap_or_else(|| reload_failure_text(result.reason.as_deref())),
                 result.socket_path.display()
             ),
         }

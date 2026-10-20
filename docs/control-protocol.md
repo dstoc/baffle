@@ -130,7 +130,7 @@ Backslashes, colons, control characters, absolute paths, and components over
 file must contain a valid version 2 session file. The daemon reads at most
 262,144 bytes and uses that snapshot for this create. See
 [configuration](configuration.md) for the session schema and directory
-ownership, permissions, and symlink rules.
+ownership, permissions, symlink rules, and session-file import composition.
 
 The Rust client exposes `Client::create_from_file`, which preserves the
 file's persistence setting. For an ephemeral file, its returned `Session`
@@ -157,11 +157,12 @@ operation = "reload_all"
 
 The daemon remembers the relative file name used at creation. A reload does
 not accept a replacement file name. The daemon reads and validates that file
-with the same directory-confined, no-symlink checks used by create, then
-resolves its authorized credentials again. It compares the unmatched-host
-policy, validated rules, effective socket path, and resolved credential values.
-TOML comments and formatting do not cause a reload. The session's persistence
-lifetime remains the lifetime selected at creation.
+and its complete import graph with the same directory-confined, no-symlink
+checks used by create, then resolves its authorized credentials again. It
+compares the unmatched-host policy, validated rules, effective socket path, and
+resolved credential values. TOML comments and formatting do not cause a
+reload. The session's persistence lifetime remains the lifetime selected at
+creation.
 
 A changed policy becomes active for connections accepted after the atomic
 generation switch. Connections already accepted keep their original policy
@@ -283,11 +284,17 @@ credentials. `stop` returns
 
 `reload` returns one result with `id`, `status`, and the current `socket`.
 `status` is `reloaded`, `unchanged`, or `failed`. A failed result has a safe
-`reason`:
+`reason` category. A configuration read or composition failure can also have a
+safe `detail` that names the failing file or conflict:
 
 ```json
-{"version":2,"ok":true,"result":{"id":"session_example_01","status":"unchanged","socket":"/run/baffle/proxies/session_example_01.sock"}}
+{"version":2,"ok":true,"result":{"id":"session_example_01","status":"failed","socket":"/run/baffle/proxies/session_example_01.sock","reason":"configuration_invalid","detail":"host rule `api.example.com` is defined more than once in the import graph; define it in one file only"}}
 ```
+
+For `create_from_file`, the error message gives the same safe import diagnostic.
+Missing imported files use `config_file_not_found`; unreadable or unsafe files
+use `config_file_unavailable`; invalid syntax, cycles, and conflicts use
+`config_file_invalid`. A failed reload does not change the active configuration.
 
 `reload_all` returns these entries in `result.results`:
 

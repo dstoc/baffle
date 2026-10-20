@@ -782,6 +782,92 @@ fn reload_failures_preserve_active_socket_and_reload_all_reports_each_file_sessi
 }
 
 #[test]
+fn imported_session_files_reload_as_one_fail_closed_configuration() {
+    let daemon = start_file_only_daemon(250);
+    write_session_policy_contents(
+        &daemon,
+        "shared/base.toml",
+        "version = 2\n\n[rules.\"base.example\"]\n",
+    );
+    write_session_policy_contents(
+        &daemon,
+        "shared/nested/policy.toml",
+        "version = 2\nimports = [\"../base.toml\"]\n\n[rules.\"nested.example\"]\n",
+    );
+    write_session_policy_contents(
+        &daemon,
+        "apps/service.toml",
+        "version = 2\npersistent = true\nimports = [\"../shared/nested/policy.toml\"]\n\n[rules.\"service.example\"]\n",
+    );
+
+    write_session_policy_contents(
+        &daemon,
+        "invalid.toml",
+        "version = 2\nimports = [\"missing.toml\"]\n",
+    );
+    let invalid_create = request(
+        &daemon.socket,
+        "version = 2\noperation = \"create_from_file\"\nname = \"invalid.toml\"\n",
+    );
+    assert_eq!(invalid_create["error"]["code"], "config_file_not_found");
+    assert!(
+        invalid_create["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing.toml")
+    );
+    assert!(list_sessions(&daemon.socket).is_empty());
+
+    let (_creator, created) = create_from_file(&daemon.socket, "apps/service.toml");
+    assert_eq!(
+        created["ok"], true,
+        "nested imports should create a session"
+    );
+    let id = created["result"]["id"].as_str().unwrap().to_owned();
+    let socket = PathBuf::from(created["result"]["socket"].as_str().unwrap());
+    assert!(created["result"]["persistent"].as_bool().unwrap());
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 1);
+
+    write_session_policy_contents(
+        &daemon,
+        "shared/nested/policy.toml",
+        "version = 2\nimports = [\"../base.toml\"]\n\n[rules.\"nested.example\"]\n\n[rules.\"new.nested.example\"]\n",
+    );
+    let reloaded = reload_session(&daemon.socket, &id);
+    assert_eq!(reloaded["result"]["status"], "reloaded");
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 2);
+
+    write_session_policy_contents(
+        &daemon,
+        "shared/base.toml",
+        "version = 2\nimports = [\"missing-from-import.toml\"]\n\n[rules.\"base.example\"]\n",
+    );
+    let failed = reload_session(&daemon.socket, &id);
+    assert_eq!(failed["result"]["status"], "failed");
+    assert_eq!(failed["result"]["reason"], "configuration_not_found");
+    assert!(
+        failed["result"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("missing-from-import.toml")
+    );
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 2);
+    assert!(
+        socket.exists(),
+        "failed import reload must keep the active listener"
+    );
+
+    write_session_policy_contents(
+        &daemon,
+        "shared/base.toml",
+        "version = 2\n\n[rules.\"base.example\"]\n",
+    );
+    let recovered = reload_session(&daemon.socket, &id);
+    assert_eq!(recovered["result"]["status"], "unchanged");
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 2);
+}
+
+#[test]
 fn inline_session_reload_is_rejected_with_a_safe_reason() {
     let daemon = start_daemon(250);
     let (_creator, created) = create_session(&daemon.socket, true, "inline.example");
