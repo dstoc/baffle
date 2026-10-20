@@ -612,6 +612,69 @@ fn cli_reports_unavailable_control_socket_and_sigterm_releases_lease() {
 }
 
 #[test]
+fn ca_init_resolves_daemon_paths_from_the_config_directory() {
+    let workspace = tempfile::tempdir().expect("temporary directory should be created");
+    let config_directory = workspace.path().join("config");
+    let other_working_directory = workspace.path().join("elsewhere");
+    fs::create_dir(&config_directory).expect("config directory should be created");
+    fs::create_dir(&other_working_directory).expect("other working directory should be created");
+    fs::create_dir(config_directory.join("state")).expect("CA directory should be created");
+    std::os::unix::fs::symlink(&other_working_directory, config_directory.join("linked"))
+        .expect("socket directory symlink should be created");
+    let config_path = config_directory.join("daemon.toml");
+    fs::write(
+        &config_path,
+        r#"
+[daemon]
+control_socket = "linked/control.sock"
+socket_dir = "run/proxies"
+trusted_operator_uid = 1000
+
+[ca]
+certificate = "state/ca.pem"
+private_key = "state/ca-key.pem"
+
+[secrets]
+directory = "state/secrets"
+"#,
+    )
+    .expect("daemon config should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .current_dir(&other_working_directory)
+        .args(["ca", "init", "--config"])
+        .arg(&config_path)
+        .output()
+        .expect("CA initialization command should run");
+    assert!(
+        output.status.success(),
+        "CA initialization failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(config_directory.join("state/ca.pem").is_file());
+    assert!(config_directory.join("state/ca-key.pem").is_file());
+    assert!(!other_working_directory.join("state/ca.pem").exists());
+
+    let daemon = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .current_dir(&other_working_directory)
+        .args(["daemon", "--config"])
+        .arg(&config_path)
+        .output()
+        .expect("daemon command should run");
+    assert!(
+        !daemon.status.success(),
+        "daemon must reject a socket path through a symlink"
+    );
+    assert!(
+        String::from_utf8_lossy(&daemon.stderr)
+            .contains("control socket directory path contains a non-directory component"),
+        "unexpected daemon error: {}",
+        String::from_utf8_lossy(&daemon.stderr)
+    );
+    assert!(!other_working_directory.join("control.sock").exists());
+}
+
+#[test]
 fn malformed_server_filename_is_rejected_before_control_io() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let output = Command::new(env!("CARGO_BIN_EXE_baffle"))

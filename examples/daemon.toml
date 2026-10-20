@@ -1,7 +1,8 @@
-# Change the UID and paths for the account that runs Baffle.
+# Relative paths resolve from this file's directory. Change the UID for the
+# account that runs Baffle, and create state/ before initializing the CA.
 [daemon]
-control_socket = "/run/baffle/control.sock"
-socket_dir = "/run/baffle/proxies"
+control_socket = "run/control.sock"
+socket_dir = "run/proxies"
 trusted_operator_uid = 1000
 max_sessions = 64
 max_connections_per_session = 128
@@ -11,9 +12,9 @@ max_provisioning_requests = 8
 io_timeout_ms = 30000
 
 [ca]
-certificate = "/var/lib/baffle/ca.pem"
-private_key = "/var/lib/baffle/ca-key.pem"
+certificate = "state/ca.pem"
+private_key = "state/ca-key.pem"
 
 [secrets]
-directory = "/var/lib/baffle/secrets"
+directory = "state/secrets"
 allowed = ["example-api"]
