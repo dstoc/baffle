@@ -7,8 +7,8 @@ use baffle_proxy::config::{
 
 #[test]
 fn daemon_configuration_example_parses_and_defaults_match_the_reference() {
-    let example = DaemonConfig::from_toml(include_str!("../examples/daemon.toml"))
-        .expect("daemon example should parse");
+    let example_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/daemon.toml");
+    let example = DaemonConfig::load(&example_path).expect("daemon example should load");
     assert_eq!(example.daemon.max_sessions, 64);
     assert_eq!(example.daemon.max_connections_per_session, 128);
     assert_eq!(example.daemon.shutdown_grace_seconds, 5);
@@ -16,6 +16,29 @@ fn daemon_configuration_example_parses_and_defaults_match_the_reference() {
     assert_eq!(example.daemon.max_provisioning_requests, 8);
     assert_eq!(example.daemon.io_timeout_ms, 30_000);
     assert_eq!(example.daemon.create_mode, SessionCreateMode::Inline);
+    let example_directory = example_path
+        .parent()
+        .expect("example should have a parent directory");
+    assert_eq!(
+        example.daemon.control_socket,
+        example_directory.join("run/control.sock")
+    );
+    assert_eq!(
+        example.daemon.socket_dir,
+        example_directory.join("run/proxies")
+    );
+    assert_eq!(
+        example.ca.certificate,
+        example_directory.join("state/ca.pem")
+    );
+    assert_eq!(
+        example.ca.private_key,
+        example_directory.join("state/ca-key.pem")
+    );
+    assert_eq!(
+        example.secrets.directory,
+        example_directory.join("state/secrets")
+    );
 
     let minimal = DaemonConfig::from_toml(
         r#"

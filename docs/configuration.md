@@ -9,11 +9,20 @@ required. Existing session policies that contain the removed
 Baffle reads one daemon TOML file at startup. A client sends a separate session
 TOML document in each `create` request. Both schemas reject unknown fields.
 TOML values are parsed as written; Baffle does not expand environment
-variables. Use absolute file paths for service deployments.
+variables. In a daemon TOML file, each relative filesystem path resolves from
+the directory containing that file. This includes the control socket, session
+socket directory, optional file-only session directory, CA files, and secret
+directory. Absolute paths keep their existing meaning. The daemon's working
+directory does not affect these paths. Paths in imported session files resolve
+from the declaring session file, within the configured file-only session
+directory. A session's optional `socket_name` remains a name beneath
+`daemon.socket_dir`, and a file-only create argument remains a name beneath
+`daemon.session_config_dir`.
 
-The checked-in [`examples/daemon.toml`](../examples/daemon.toml) uses Linux
-runtime paths. On macOS, use private paths under the daemon user's home
-directory, as shown below. The other checked-in examples are
+The checked-in [`examples/daemon.toml`](../examples/daemon.toml) shows
+config-relative paths for a local setup. Use absolute paths in private runtime
+directories for service deployments. On macOS, use private paths under the
+daemon user's home directory, as shown below. The other checked-in examples are
 [`examples/daemon-file-only.toml`](../examples/daemon-file-only.toml),
 [`examples/session.toml`](../examples/session.toml),
 [`examples/session-credentials.toml`](../examples/session-credentials.toml),
@@ -81,7 +90,7 @@ directory = "/Users/alice/Library/Application Support/Baffle/secrets"
 | `daemon.max_provisioning_requests` | positive integer | `8` | Maximum concurrent session creation requests. Additional requests receive `busy`. Zero is invalid. |
 | `daemon.io_timeout_ms` | positive integer | `30000` | Maximum time for CONNECT request parsing, outbound TCP connection attempts, and TLS ClientHello inspection. It does not set an idle timeout on established tunnel traffic. Zero is invalid. |
 | `daemon.create_mode` | `inline` or `file_only` | `inline` | Selects how clients create sessions. `inline` accepts validated version 2 session files from the client. `file_only` accepts daemon-managed version 2 files. |
-| `daemon.session_config_dir` | absolute path | required in `file_only` mode | Directory containing administrator-managed version 2 session TOML files. It is invalid in `inline` mode. The daemon refuses symlinks, unsafe ownership, and group- or other-writable directories and files. |
+| `daemon.session_config_dir` | path | required in `file_only` mode | Directory containing administrator-managed version 2 session TOML files. A relative path resolves from the daemon TOML file. The resolved path must be absolute and contain no dot components. It is invalid in `inline` mode. The daemon refuses symlinks, unsafe ownership, and group- or other-writable directories and files. |
 | `ca.certificate` | path | required | One current PEM CA certificate with `CA:TRUE` and `keyCertSign`. |
 | `ca.private_key` | path | required | Matching PEM private key. It must be a regular, non-symlink file. Only the owner may access it, and the owner must have read permission. Use mode `0400` or `0600`. |
 | `secrets.directory` | path | required | Private directory containing secret files. It must be a real directory owned by the trusted UID, with mode `0700` or stricter. |

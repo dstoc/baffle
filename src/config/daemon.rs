@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     fs,
     os::unix::ffi::OsStrExt,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use serde::Deserialize;
@@ -64,7 +64,18 @@ pub struct SecretStoreConfig {
 impl DaemonConfig {
     /// Parse and validate a daemon TOML document.
     pub fn from_toml(input: &str) -> Result<Self, ConfigError> {
+        Self::from_toml_in_directory(input, None)
+    }
+
+    fn from_toml_in_directory(
+        input: &str,
+        config_directory: Option<&Path>,
+    ) -> Result<Self, ConfigError> {
         let raw: RawDaemonConfig = deserialize(input)?;
+        let raw = match config_directory {
+            Some(directory) => raw.resolve_paths(directory),
+            None => raw,
+        };
 
         let session_config_dir = match (raw.daemon.create_mode, raw.daemon.session_config_dir) {
             (SessionCreateMode::Inline, None) => None,
@@ -140,7 +151,50 @@ impl DaemonConfig {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let input = fs::read_to_string(path)
             .map_err(|_| ConfigError::new("could not read daemon configuration file"))?;
-        Self::from_toml(&input)
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let absolute_parent = if parent.is_absolute() {
+            parent.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|_| ConfigError::new("could not resolve daemon configuration directory"))?
+                .join(parent)
+        };
+        // Drop `.` components without resolving `..` or symlinks. Later path
+        // validation must still see those components in configured paths.
+        let config_directory = absolute_parent
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .fold(PathBuf::new(), |mut path, component| {
+                path.push(component.as_os_str());
+                path
+            });
+        Self::from_toml_in_directory(&input, Some(&config_directory))
+    }
+}
+
+impl RawDaemonConfig {
+    fn resolve_paths(mut self, directory: &Path) -> Self {
+        self.daemon.control_socket = resolve_config_path(self.daemon.control_socket, directory);
+        self.daemon.socket_dir = resolve_config_path(self.daemon.socket_dir, directory);
+        self.daemon.session_config_dir = self
+            .daemon
+            .session_config_dir
+            .map(|path| resolve_config_path(path, directory));
+        self.ca.certificate = resolve_config_path(self.ca.certificate, directory);
+        self.ca.private_key = resolve_config_path(self.ca.private_key, directory);
+        self.secrets.directory = resolve_config_path(self.secrets.directory, directory);
+        self
+    }
+}
+
+fn resolve_config_path(path: PathBuf, directory: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        path
+    } else {
+        directory.join(path)
     }
 }
 

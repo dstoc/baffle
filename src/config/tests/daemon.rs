@@ -185,3 +185,85 @@ fn ca_example_values_remain_path_data() {
         }
     );
 }
+
+#[test]
+fn daemon_file_paths_resolve_from_the_declaring_directory() {
+    let workspace = tempfile::tempdir().expect("temporary directory should be created");
+    let config_directory = workspace.path().join("config");
+    std::fs::create_dir(&config_directory).expect("config directory should be created");
+    let absolute_certificate = workspace.path().join("absolute-ca.pem");
+    let config_path = config_directory.join(".").join("daemon.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[daemon]
+control_socket = "run/control.sock"
+socket_dir = "run/proxies"
+trusted_operator_uid = 1000
+create_mode = "file_only"
+session_config_dir = "sessions"
+
+[ca]
+certificate = {:?}
+private_key = "keys/ca-key.pem"
+
+[secrets]
+directory = "secrets"
+"#,
+            absolute_certificate.display().to_string()
+        ),
+    )
+    .expect("daemon config should be written");
+
+    let config = DaemonConfig::load(&config_path).expect("daemon config should load");
+    assert_eq!(
+        config.daemon.control_socket,
+        config_directory.join("run/control.sock")
+    );
+    assert_eq!(
+        config.daemon.socket_dir,
+        config_directory.join("run/proxies")
+    );
+    assert_eq!(
+        config.daemon.session_config_dir,
+        Some(config_directory.join("sessions"))
+    );
+    assert_eq!(config.ca.certificate, absolute_certificate);
+    assert_eq!(
+        config.ca.private_key,
+        config_directory.join("keys/ca-key.pem")
+    );
+    assert_eq!(config.secrets.directory, config_directory.join("secrets"));
+}
+
+#[test]
+fn relative_file_only_directory_keeps_dot_component_validation() {
+    let workspace = tempfile::tempdir().expect("temporary directory should be created");
+    let config_directory = workspace.path().join("config");
+    std::fs::create_dir(&config_directory).expect("config directory should be created");
+    let config_path = config_directory.join("daemon.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[daemon]
+control_socket = "run/control.sock"
+socket_dir = "run/proxies"
+trusted_operator_uid = 1000
+create_mode = "file_only"
+session_config_dir = "../sessions"
+
+[ca]
+certificate = "ca.pem"
+private_key = "ca-key.pem"
+
+[secrets]
+directory = "secrets"
+"#,
+    )
+    .expect("daemon config should be written");
+
+    let error = DaemonConfig::load(&config_path)
+        .expect_err("relative file-only directory must retain dot-component validation");
+    assert!(error.to_string().contains("absolute directory path"));
+}
