@@ -104,10 +104,13 @@ fn credential_modes_follow_override_default_then_inject_precedence() {
 [credentials]
 default_mode = "substitute"
 
-[credentials.github-api]
+[credentials.overrides.github-api]
 mode = "inject"
 
-[credentials.openai]
+[credentials.overrides.openai]
+mode = "disabled"
+
+[credentials.overrides.default_mode]
 mode = "disabled"
 "#,
     )
@@ -125,6 +128,10 @@ mode = "disabled"
         session.effective_credential_mode("openai"),
         CredentialMode::Disabled
     );
+    assert_eq!(
+        session.effective_credential_mode("default_mode"),
+        CredentialMode::Disabled
+    );
 
     let legacy = SessionFile::from_toml("version = 2\n")
         .expect("existing session configuration should parse");
@@ -138,9 +145,10 @@ mode = "disabled"
 fn rejects_invalid_credential_mode_identifiers_and_values() {
     for credentials in [
         "[credentials]\ndefault_mode = \"replace\"",
-        "[credentials]\n[credentials.\"../secret\"]\nmode = \"substitute\"",
-        "[credentials]\n[credentials.github]\nmode = \"replace\"",
-        "[credentials]\n[credentials.github]\nunknown = \"substitute\"",
+        "[credentials.overrides.\"../secret\"]\nmode = \"substitute\"",
+        "[credentials.overrides.github]\nmode = \"replace\"",
+        "[credentials.overrides.github]\nunknown = \"substitute\"",
+        "[credentials.github]\nmode = \"inject\"",
     ] {
         let input = format!("version = 2\n\n{credentials}\n");
         assert!(

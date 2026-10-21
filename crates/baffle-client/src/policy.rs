@@ -575,10 +575,11 @@ struct RawSessionConfig {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawCredentials {
     #[serde(default)]
     default_mode: Option<CredentialMode>,
-    #[serde(default, flatten)]
+    #[serde(default)]
     overrides: BTreeMap<String, RawCredentialModeOverride>,
 }
 

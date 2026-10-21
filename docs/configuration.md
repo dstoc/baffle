@@ -489,9 +489,10 @@ unentitled active references return the same safe protocol error.
 
 ### Credential handling modes
 
-The session root can set a default mode for all referenced credentials. A
-`[credentials.<secret-id>]` table can override that mode for one symbolic
-secret identifier:
+The session root can set a default mode for all referenced credentials.
+`[credentials.overrides.<secret-id>]` can override that mode for one symbolic
+secret identifier. The `overrides` table keeps secret identifiers separate
+from credential settings such as `default_mode`:
 
 ```toml
 version = 2
@@ -499,10 +500,13 @@ version = 2
 [credentials]
 default_mode = "substitute"
 
-[credentials.github-api]
+[credentials.overrides.github-api]
 mode = "inject"
 
-[credentials.github-git]
+[credentials.overrides.github-git]
+mode = "disabled"
+
+[credentials.overrides.default_mode]
 mode = "disabled"
 
 [rules."api.github.com"]

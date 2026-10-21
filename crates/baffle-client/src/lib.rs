@@ -756,7 +756,7 @@ struct SessionConfigWire {
 struct CredentialConfigWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     default_mode: Option<CredentialMode>,
-    #[serde(flatten)]
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     overrides: BTreeMap<String, CredentialModeOverrideWire>,
 }
 
@@ -1021,14 +1021,28 @@ mod tests {
     fn serializes_credential_default_and_per_secret_override() {
         let policy = SessionConfig::new()
             .default_credential_mode(CredentialMode::Substitute)
-            .credential_mode("github-api", CredentialMode::Inject);
+            .credential_mode("default_mode", CredentialMode::Inject);
         let encoded = toml::to_string(&CreateRequest::new(policy).expect("request should build"))
             .expect("request should serialize");
 
         assert!(encoded.contains("[session.credentials]"));
         assert!(encoded.contains("default_mode = \"substitute\""));
-        assert!(encoded.contains("credentials.github-api"));
+        assert!(encoded.contains("[session.credentials.overrides.default_mode]"));
         assert!(encoded.contains("mode = \"inject\""));
+
+        let request: toml::Value = toml::from_str(&encoded).expect("client request should parse");
+        let session = toml::to_string(
+            request
+                .get("session")
+                .expect("request should contain a session"),
+        )
+        .expect("session policy should serialize");
+        let parsed = SessionConfig::from_toml(&session)
+            .expect("client credential mode wire output should parse");
+        assert_eq!(
+            parsed.credential_modes.get("default_mode"),
+            Some(&CredentialMode::Inject)
+        );
     }
 
     #[test]

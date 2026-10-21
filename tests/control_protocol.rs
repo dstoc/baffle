@@ -937,6 +937,35 @@ fn credential_rotation_is_an_effective_change_and_unavailable_credentials_roll_b
 }
 
 #[test]
+fn credential_mode_only_reload_updates_default_and_per_secret_modes() {
+    let daemon = start_file_only_daemon(250);
+    let secret_path = daemon.secret_dir.join("api-token");
+    fs::write(&secret_path, "test-credential\n").expect("credential should be written");
+    fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o600))
+        .expect("credential should be private");
+
+    let initial = "version = 2\npersistent = true\n\n[credentials]\ndefault_mode = \"inject\"\n\n[rules.\"api.example\"]\nmode = \"intercept\"\n\n[[rules.\"api.example\".inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n";
+    write_session_policy_contents(&daemon, "credential-modes.toml", initial);
+    let (_creator, created) = create_from_file(&daemon.socket, "credential-modes.toml");
+    assert_eq!(created["ok"], true);
+    let id = created["result"]["id"].as_str().unwrap().to_owned();
+
+    let changed_default =
+        initial.replace("default_mode = \"inject\"", "default_mode = \"substitute\"");
+    write_session_policy_contents(&daemon, "credential-modes.toml", &changed_default);
+    let default_reload = reload_session(&daemon.socket, &id);
+    assert_eq!(default_reload["result"]["status"], "reloaded");
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 2);
+
+    let changed_override =
+        format!("{changed_default}\n[credentials.overrides.api-token]\nmode = \"inject\"\n");
+    write_session_policy_contents(&daemon, "credential-modes.toml", &changed_override);
+    let override_reload = reload_session(&daemon.socket, &id);
+    assert_eq!(override_reload["result"]["status"], "reloaded");
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 3);
+}
+
+#[test]
 fn reload_limits_pinned_policy_generations_without_closing_old_tunnels() {
     const GENERATIONS: usize = 8;
     let daemon = start_file_only_daemon(250);

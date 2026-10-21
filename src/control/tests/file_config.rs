@@ -67,7 +67,7 @@ fn composes_credential_modes_and_rejects_imported_default_broadening() {
     write_session_file(
         &directory,
         "shared/credentials.toml",
-        "version = 2\n\n[credentials.github-api]\nmode = \"disabled\"\n",
+        "version = 2\n\n[credentials.overrides.github-api]\nmode = \"disabled\"\n",
     );
     write_session_file(
         &directory,
