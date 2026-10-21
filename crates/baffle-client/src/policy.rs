@@ -9,7 +9,8 @@ use serde::Deserialize;
 use url::Host;
 
 use crate::{
-    HeaderInjection, HostRule, InjectionFormat, RuleMode, SessionConfig, UnmatchedHostPolicy,
+    CredentialMode, HeaderInjection, HostRule, InjectionFormat, RuleMode, SessionConfig,
+    UnmatchedHostPolicy,
 };
 
 /// The version of the session configuration document.
@@ -165,12 +166,35 @@ fn validate_session_document(raw: RawSessionConfig) -> Result<SessionConfig, Ses
 
     let rules = validate_named_rules(rules)?;
     let socket_name = raw.socket_name.map(validate_socket_name).transpose()?;
+    let (default_credential_mode, credential_modes) = validate_credentials(raw.credentials)?;
     Ok(SessionConfig {
         persistent: raw.persistent,
         socket_name,
         unmatched,
+        default_credential_mode,
+        credential_modes,
         rules,
     })
+}
+
+fn validate_credentials(
+    raw: Option<RawCredentials>,
+) -> Result<(Option<CredentialMode>, BTreeMap<String, CredentialMode>), SessionConfigError> {
+    let Some(raw) = raw else {
+        return Ok((None, BTreeMap::new()));
+    };
+    let mut modes = BTreeMap::new();
+    for (name, raw_mode) in raw.overrides {
+        validate_secret_id(&name).map_err(|_| {
+            SessionConfigError::new("credentials contains an invalid secret identifier")
+        })?;
+        if modes.insert(name, raw_mode.mode).is_some() {
+            return Err(SessionConfigError::new(
+                "credentials contains a duplicate secret identifier",
+            ));
+        }
+    }
+    Ok((raw.default_mode, modes))
 }
 
 fn validate_named_rules(
@@ -544,8 +568,25 @@ struct RawSessionConfig {
     unmatched: Option<String>,
     #[serde(default)]
     rules: Option<RawRules>,
+    #[serde(default)]
+    credentials: Option<RawCredentials>,
     #[serde(default, flatten)]
     unsupported_fields: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCredentials {
+    #[serde(default)]
+    default_mode: Option<CredentialMode>,
+    #[serde(default)]
+    overrides: BTreeMap<String, RawCredentialModeOverride>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCredentialModeOverride {
+    mode: CredentialMode,
 }
 
 #[derive(Deserialize)]

@@ -138,6 +138,7 @@ pub(super) async fn start_runtime_limited(
             "proxy-token".to_owned(),
             "test-credential".to_owned(),
         )])),
+        credential_seed: CredentialSeed::from_test_bytes([0; 32]),
         ca,
         socket_path: directory.join(format!("{name}.sock")),
         connection_permits: Arc::new(tokio::sync::Semaphore::new(max_connections)),

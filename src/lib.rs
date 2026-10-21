@@ -3,6 +3,7 @@ pub mod cli;
 pub use baffle_client as client;
 pub mod config;
 pub mod control;
+mod credentials;
 pub mod daemon;
 mod dns;
 mod platform;

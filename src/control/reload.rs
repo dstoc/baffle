@@ -144,7 +144,12 @@ impl SessionManager {
         };
         let current_path = PathBuf::from(&current_socket);
         let same_path = target_path == current_path;
-        let (current_unmatched, current_rules) = {
+        let (
+            current_unmatched,
+            current_rules,
+            current_default_credential_mode,
+            current_credential_modes,
+        ) = {
             let registry = self.registry.lock().await;
             let Some(session) = registry.sessions.get(id) else {
                 return SessionReloadResult::failed(id, current_socket, "session_unavailable");
@@ -152,10 +157,14 @@ impl SessionManager {
             (
                 session.configuration.unmatched,
                 session.configuration.rules.clone(),
+                session.configuration.default_credential_mode,
+                session.configuration.credential_modes.clone(),
             )
         };
         let configuration_unchanged = candidate.unmatched == current_unmatched
-            && same_effective_rules(&candidate.rules, &current_rules);
+            && same_effective_rules(&candidate.rules, &current_rules)
+            && candidate.default_credential_mode == current_default_credential_mode
+            && candidate.credential_modes == current_credential_modes;
         if configuration_unchanged
             && same_path
             && current_secrets.has_same_values(&candidate_secrets)
@@ -187,7 +196,7 @@ impl SessionManager {
             return SessionReloadResult::reloaded(id, current_socket);
         }
 
-        let (permits, listener_gate, next_listener_generation, can_retire) = {
+        let (permits, credential_seed, listener_gate, next_listener_generation, can_retire) = {
             let mut registry = self.registry.lock().await;
             if !registry.accepting_sessions {
                 return SessionReloadResult::failed(id, current_socket, "session_stopping");
@@ -206,6 +215,7 @@ impl SessionManager {
             };
             (
                 runtime.connection_permits(),
+                runtime.credential_seed().clone(),
                 Arc::clone(&session.listener_gate),
                 next_listener_generation,
                 session.retired_runtimes.len() < MAX_RETIRED_LISTENERS,
@@ -218,6 +228,7 @@ impl SessionManager {
             runtime_id: RuntimeId::new(id.to_owned()),
             session: candidate.clone(),
             secrets: Arc::clone(&candidate_secrets),
+            credential_seed,
             ca: Arc::clone(&self.ca),
             socket_path: target_path.clone(),
             connection_permits: permits,

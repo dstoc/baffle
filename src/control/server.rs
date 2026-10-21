@@ -989,6 +989,7 @@ async fn create_session_response(
                 "socket": created.info.socket,
                 "persistent": created.info.persistent,
                 "ca_certificate_pem": created.ca_certificate_pem,
+                "credential_seed_base64url": created.credential_seed_base64url,
             }))
         }
         Err(SessionError::AtCapacity) => error_value(ERR_SESSION_LIMIT),

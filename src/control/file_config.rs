@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs::{self, File},
     io::{self, Read},
     os::{
@@ -16,7 +16,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::config::{
-    MAX_SESSION_CONFIG_NAME_BYTES, SessionConfig, SessionFile, UnmatchedHostPolicy,
+    CredentialMode, MAX_SESSION_CONFIG_NAME_BYTES, SessionConfig, SessionFile, UnmatchedHostPolicy,
 };
 use crate::platform::{directory_open_flags, normalize_system_path};
 
@@ -95,6 +95,8 @@ impl SessionConfigStore {
             persistent: root.persistent,
             socket_name: root.socket_name,
             unmatched: composition.root_unmatched.unwrap_or_default(),
+            default_credential_mode: composition.root_credential_default,
+            credential_modes: composition.credential_modes,
             rules: composition.rules,
         })
     }
@@ -205,6 +207,32 @@ impl SessionConfigStore {
             *current = Some(policy.unmatched);
         }
 
+        if let Some(mode) = policy.default_credential_mode {
+            let current = if is_root {
+                &mut composition.root_credential_default
+            } else {
+                &mut composition.imported_credential_default
+            };
+            if current.is_some_and(|current| current != mode) {
+                return Err(SessionConfigFileError::invalid(format!(
+                    "conflicting credential default modes in the import graph at `{name}`; imported values must agree"
+                )));
+            }
+            *current = Some(mode);
+        }
+
+        for (secret, mode) in policy.credential_modes {
+            if composition
+                .credential_modes
+                .insert(secret.clone(), mode)
+                .is_some_and(|existing| existing != mode)
+            {
+                return Err(SessionConfigFileError::invalid(format!(
+                    "conflicting mode for credential `{secret}` in the import graph"
+                )));
+            }
+        }
+
         for rule in policy.rules {
             if !composition.hosts.insert(rule.host.clone()) {
                 return Err(SessionConfigFileError::invalid(format!(
@@ -227,6 +255,18 @@ impl SessionConfigStore {
                         UnmatchedHostPolicy::Deny => "deny",
                         UnmatchedHostPolicy::Tunnel => "tunnel",
                     }
+                )));
+            }
+            let root_credential_mode = composition
+                .root_credential_default
+                .unwrap_or(CredentialMode::Inject);
+            if composition
+                .imported_credential_default
+                .is_some_and(|imported| imported != root_credential_mode)
+            {
+                return Err(SessionConfigFileError::invalid(format!(
+                    "imported credential default modes conflict with the root file's effective value `{}`; set the same value in the root file",
+                    credential_mode_name(root_credential_mode)
                 )));
             }
             composition.root = Some(RootSettings {
@@ -291,6 +331,14 @@ impl SessionConfigStore {
     }
 }
 
+fn credential_mode_name(mode: CredentialMode) -> &'static str {
+    match mode {
+        CredentialMode::Inject => "inject",
+        CredentialMode::Substitute => "substitute",
+        CredentialMode::Disabled => "disabled",
+    }
+}
+
 #[derive(Default)]
 struct Composition {
     stack: Vec<String>,
@@ -299,6 +347,9 @@ struct Composition {
     rules: Vec<crate::config::HostRule>,
     imported_unmatched: Option<UnmatchedHostPolicy>,
     root_unmatched: Option<UnmatchedHostPolicy>,
+    imported_credential_default: Option<CredentialMode>,
+    root_credential_default: Option<CredentialMode>,
+    credential_modes: BTreeMap<String, CredentialMode>,
     root: Option<RootSettings>,
 }
 

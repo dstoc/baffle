@@ -257,7 +257,7 @@ successful response has a `result` object.
 Create response:
 
 ```json
-{"version":2,"ok":true,"result":{"id":"session_example_01","socket":"/run/baffle/proxies/session_example_01.sock","persistent":false,"ca_certificate_pem":"<public CA certificate in PEM format>"}}
+{"version":2,"ok":true,"result":{"id":"session_example_01","socket":"/run/baffle/proxies/session_example_01.sock","persistent":false,"ca_certificate_pem":"<public CA certificate in PEM format>","credential_seed_base64url":"<32-byte seed encoded as unpadded Base64URL>"}}
 ```
 
 Successful `create` and `create_from_file` responses include
@@ -270,6 +270,20 @@ compatible. A newer `baffle-client` can also use an older protocol-v2 daemon;
 `Session::ca_certificate_pem()` returns `None` when that daemon omits the
 field. Callers that need this certificate for trust setup must treat `None` as
 unavailable trust material.
+
+Successful `create` and `create_from_file` responses also include
+`credential_seed_base64url`, a fresh 32-byte session seed encoded as unpadded
+Base64URL. The field is additive and keeps protocol version 2. Existing
+protocol-v2 clients that ignore unknown result fields remain compatible. A
+newer `baffle-client` can use an older protocol-v2 daemon; the session seed
+accessor returns `None` when the daemon omits this field. New `credentials`
+session configuration fields require a daemon that supports credential modes,
+because older daemons reject unknown session fields.
+
+The seed lets a trusted integration derive fake values for the workload. It is
+secret derivation material. Keep it out of agent-visible output and routine
+logs. Do not give it to the workload. The derivation protocol and test vector
+are defined in the [configuration reference](configuration.md#fake-credential-derivation).
 
 List response:
 

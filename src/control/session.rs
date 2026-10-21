@@ -16,6 +16,7 @@ use tokio::{
 use crate::{
     ca::ManagedCa,
     config::{DaemonSettings, SessionConfig},
+    credentials::CredentialSeed,
     proxy_runtime::{
         ProxyRuntime, ProxyRuntimeError, ProxyRuntimeEvent, ProxyRuntimeOptions, RuntimeId,
         SocketDirectoryRegistry, TestUpstreamTrust,
@@ -85,6 +86,8 @@ impl SessionManager {
             .map_err(|_| SessionError::Internal)?
             .to_owned();
         let secrets = Arc::new(secrets);
+        let credential_seed = CredentialSeed::random().map_err(|_| SessionError::Internal)?;
+        let credential_seed_base64url = credential_seed.as_base64url();
         let id = new_session_id().map_err(|_| SessionError::Internal)?;
         let persistent = session.persistent;
         {
@@ -116,6 +119,7 @@ impl SessionManager {
             runtime_id: RuntimeId::new(id.clone()),
             session: session.clone(),
             secrets: Arc::clone(&secrets),
+            credential_seed,
             ca: Arc::clone(&ca),
             socket_path,
             connection_permits: Arc::new(Semaphore::new(self.max_connections_per_session)),
@@ -175,6 +179,7 @@ impl SessionManager {
         Ok(CreatedSession {
             info,
             ca_certificate_pem,
+            credential_seed_base64url,
         })
     }
 
@@ -404,6 +409,7 @@ pub(super) struct SessionInfo {
 pub(super) struct CreatedSession {
     pub(super) info: SessionInfo,
     pub(super) ca_certificate_pem: String,
+    pub(super) credential_seed_base64url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -18,7 +18,8 @@ mod tests;
 pub use baffle_client::PROTOCOL_VERSION;
 pub(crate) use baffle_client::SESSION_CONFIG_INVALID_MESSAGE as SESSION_FILE_INVALID_MESSAGE;
 pub use baffle_client::{
-    HeaderInjection, HostRule, InjectionFormat, RuleMode, SessionConfig, UnmatchedHostPolicy,
+    CredentialMode, HeaderInjection, HostRule, InjectionFormat, RuleMode, SessionConfig,
+    UnmatchedHostPolicy,
 };
 pub use baffle_client::{MAX_SESSION_CONFIG_COMPONENT_BYTES, MAX_SESSION_CONFIG_NAME_BYTES};
 pub use daemon::{CaConfig, DaemonConfig, DaemonSettings, SecretStoreConfig, SessionCreateMode};

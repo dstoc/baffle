@@ -291,6 +291,14 @@ fn file_create_rejects_persistent_policy_before_allocating_session_resources() {
 
 fn assert_public_ca_create_response(daemon: &DaemonProcess, response: &Value, credential: &str) {
     assert_eq!(response["ok"], true);
+    let seed = response["result"]["credential_seed_base64url"]
+        .as_str()
+        .expect("create response should include an encoded credential seed");
+    assert_eq!(seed.len(), 43);
+    assert!(
+        seed.bytes()
+            .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') })
+    );
     let ca_pem = fs::read_to_string(daemon._directory.path().join("ca.pem"))
         .expect("configured CA certificate should be valid UTF-8 PEM");
     assert_eq!(response["result"]["ca_certificate_pem"], ca_pem);
@@ -926,6 +934,35 @@ fn credential_rotation_is_an_effective_change_and_unavailable_credentials_roll_b
         &format!("version = 2\noperation = \"stop\"\nsession_id = {id:?}\n"),
     );
     assert_eq!(stopped["result"]["stopped"], true);
+}
+
+#[test]
+fn credential_mode_only_reload_updates_default_and_per_secret_modes() {
+    let daemon = start_file_only_daemon(250);
+    let secret_path = daemon.secret_dir.join("api-token");
+    fs::write(&secret_path, "test-credential\n").expect("credential should be written");
+    fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o600))
+        .expect("credential should be private");
+
+    let initial = "version = 2\npersistent = true\n\n[credentials]\ndefault_mode = \"inject\"\n\n[rules.\"api.example\"]\nmode = \"intercept\"\n\n[[rules.\"api.example\".inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n";
+    write_session_policy_contents(&daemon, "credential-modes.toml", initial);
+    let (_creator, created) = create_from_file(&daemon.socket, "credential-modes.toml");
+    assert_eq!(created["ok"], true);
+    let id = created["result"]["id"].as_str().unwrap().to_owned();
+
+    let changed_default =
+        initial.replace("default_mode = \"inject\"", "default_mode = \"substitute\"");
+    write_session_policy_contents(&daemon, "credential-modes.toml", &changed_default);
+    let default_reload = reload_session(&daemon.socket, &id);
+    assert_eq!(default_reload["result"]["status"], "reloaded");
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 2);
+
+    let changed_override =
+        format!("{changed_default}\n[credentials.overrides.api-token]\nmode = \"inject\"\n");
+    write_session_policy_contents(&daemon, "credential-modes.toml", &changed_override);
+    let override_reload = reload_session(&daemon.socket, &id);
+    assert_eq!(override_reload["result"]["status"], "reloaded");
+    assert_eq!(list_sessions(&daemon.socket)[0]["generation"], 3);
 }
 
 #[test]

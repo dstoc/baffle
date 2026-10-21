@@ -202,6 +202,7 @@ async fn startup_rejects_an_existing_socket_path_without_replacing_it() -> Resul
         runtime_id: RuntimeId::new("rama-startup-conflict"),
         session: tunnel_session(443),
         secrets: Arc::new(ResolvedSecrets::default()),
+        credential_seed: CredentialSeed::from_test_bytes([0; 32]),
         ca,
         socket_path: socket_path.clone(),
         connection_permits: Arc::new(tokio::sync::Semaphore::new(4)),

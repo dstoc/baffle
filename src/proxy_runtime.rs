@@ -47,6 +47,7 @@ impl RuntimeId {
 #[derive(Debug)]
 pub enum ProxyRuntimeError {
     BindSocket(io::Error),
+    CredentialSeed(io::Error),
     Build(String),
     Run(String),
     Task(String),
@@ -56,6 +57,7 @@ impl ProxyRuntimeError {
     pub fn class(&self) -> &'static str {
         match self {
             Self::BindSocket(_) => "socket_bind",
+            Self::CredentialSeed(_) => "credential_seed",
             Self::Build(_) => "proxy_build",
             Self::Run(_) => "proxy_run",
             Self::Task(_) => "task",
@@ -70,6 +72,7 @@ impl fmt::Display for ProxyRuntimeError {
                 formatter.write_str("proxy Unix socket path already exists")
             }
             Self::BindSocket(_) => formatter.write_str("could not bind proxy Unix socket"),
+            Self::CredentialSeed(_) => formatter.write_str("could not create credential seed"),
             Self::Build(_) => formatter.write_str("could not build proxy"),
             Self::Run(_) => formatter.write_str("proxy runtime failed"),
             Self::Task(_) => formatter.write_str("proxy runtime task failed"),

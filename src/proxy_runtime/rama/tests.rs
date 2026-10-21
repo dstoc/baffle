@@ -26,6 +26,7 @@ use super::{ProxyRuntime, ProxyRuntimeOptions, RuntimeId};
 use crate::{
     ca::ManagedCa,
     config::{ControlRequest, SessionConfig},
+    credentials::CredentialSeed,
     proxy_runtime::{ProxyRuntimeEvent, SocketDirectoryRegistry, TestUpstreamTrust},
     secrets::ResolvedSecrets,
 };
@@ -34,6 +35,7 @@ mod support;
 use support::*;
 
 mod connect;
+mod credential_substitution;
 mod http;
 mod ingress;
 mod interception;

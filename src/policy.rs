@@ -3,8 +3,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::{
-    HeaderInjection, RuleMode, SessionConfig, UnmatchedHostPolicy, canonicalize_request_path,
+    CredentialMode, HeaderInjection, RuleMode, SessionConfig, UnmatchedHostPolicy,
+    canonicalize_request_path,
 };
+use crate::credentials::{CredentialSeed, derive_fake_credential};
 use crate::dns::normalize_dns_name;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +36,14 @@ struct CompiledRule {
     mode: RuleMode,
     ports: HashSet<u16>,
     paths: Vec<String>,
-    injections: Vec<HeaderInjection>,
+    credentials: Vec<CompiledCredential>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledCredential {
+    pub(crate) injection: HeaderInjection,
+    pub(crate) mode: CredentialMode,
+    pub(crate) fake_value: Option<String>,
 }
 
 /// A read-only set of host and port rules for one proxy session.
@@ -47,7 +56,7 @@ pub(crate) struct SessionPolicy {
 }
 
 impl SessionPolicy {
-    pub(crate) fn compile(session: &SessionConfig) -> Self {
+    pub(crate) fn compile(session: &SessionConfig, seed: &CredentialSeed) -> Self {
         let rules = session
             .rules
             .iter()
@@ -58,7 +67,21 @@ impl SessionPolicy {
                         mode: rule.mode,
                         ports: rule.ports.iter().copied().collect(),
                         paths: rule.paths.clone(),
-                        injections: rule.inject.clone(),
+                        credentials: rule
+                            .inject
+                            .iter()
+                            .map(|injection| {
+                                let mode =
+                                    session.effective_credential_mode(injection.secret.as_str());
+                                CompiledCredential {
+                                    injection: injection.clone(),
+                                    mode,
+                                    fake_value: (mode == CredentialMode::Substitute).then(|| {
+                                        derive_fake_credential(seed, injection.secret.as_str())
+                                    }),
+                                }
+                            })
+                            .collect(),
                     },
                 )
             })
@@ -111,7 +134,7 @@ impl SessionPolicy {
         &'a self,
         facts: &RequestFacts<'_>,
         connect_authority: &str,
-    ) -> Result<(&'a [HeaderInjection], Option<String>), AuthorizationError> {
+    ) -> Result<(&'a [CompiledCredential], Option<String>), AuthorizationError> {
         if facts.method.eq_ignore_ascii_case("CONNECT")
             || facts
                 .scheme
@@ -150,7 +173,7 @@ impl SessionPolicy {
             .filter(|rule| rule.ports.contains(&connect.port))
             .ok_or(AuthorizationError::Denied)?;
         let path = canonical_authorized_path(rule, facts.path)?;
-        Ok((&rule.injections, path))
+        Ok((&rule.credentials, path))
     }
 }
 
@@ -237,7 +260,7 @@ mod tests {
         else {
             panic!("test request should create a session");
         };
-        SessionPolicy::compile(&session)
+        SessionPolicy::compile(&session, &CredentialSeed::from_test_bytes([0; 32]))
     }
 
     fn intercept_policy(paths: &str) -> SessionPolicy {
@@ -249,6 +272,7 @@ mod tests {
     fn session_file_policy(input: &str) -> SessionPolicy {
         SessionPolicy::compile(
             &SessionFile::from_toml(input).expect("test session file should be valid"),
+            &CredentialSeed::from_test_bytes([0; 32]),
         )
     }
 
@@ -328,10 +352,10 @@ mod tests {
             path: "/private",
             host_headers: &["api.example.com"],
         };
-        assert_eq!(
+        assert!(matches!(
             policy.authorize_intercepted_request(&facts, "api.example.com:443"),
             Err(AuthorizationError::Denied)
-        );
+        ));
     }
 
     #[test]
@@ -449,5 +473,37 @@ mod tests {
         )
         .expect_err("v2 tunnel rules cannot carry path restrictions");
         assert!(v2_error.to_string().contains("cannot use paths or inject"));
+    }
+
+    #[test]
+    fn substitution_credentials_are_compiled_only_for_authorized_session_rules() {
+        let policy = policy(
+            "version = 2\noperation = \"create\"\n\n[session]\nversion = 2\n\n[session.credentials]\ndefault_mode = \"substitute\"\n\n[session.rules.\"example.com\"]\nmode = \"intercept\"\npaths = [\"/allowed\"]\n\n[[session.rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"",
+        );
+        let allowed = RequestFacts {
+            method: "GET",
+            scheme: Some("https"),
+            uri_authority: Some("example.com:443"),
+            path: "/allowed",
+            host_headers: &["example.com"],
+        };
+        let (credentials, _) = policy
+            .authorize_intercepted_request(&allowed, "example.com:443")
+            .expect("the allowlisted destination and path should authorize the credential");
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].mode, CredentialMode::Substitute);
+        assert!(credentials[0].fake_value.is_some());
+
+        let denied_path = RequestFacts {
+            path: "/blocked",
+            ..allowed
+        };
+        assert!(
+            matches!(
+                policy.authorize_intercepted_request(&denied_path, "example.com:443"),
+                Err(AuthorizationError::Denied)
+            ),
+            "a disallowed path must not return credential substitution policy"
+        );
     }
 }

@@ -83,6 +83,50 @@ async fn intercepted_session_forwards_allowed_https_and_injects_daemon_secret()
 }
 
 #[tokio::test]
+async fn intercepted_session_substitutes_a_session_fake_after_policy_checks()
+-> Result<(), TestError> {
+    let directory = tempfile::tempdir()?;
+    let ca = write_managed_ca(directory.path());
+    let (seen_tx, seen_rx) = oneshot::channel();
+    let (origin_address, origin_task, _accepted) =
+        start_origin(upstream_tls_config("localhost"), seen_tx).await?;
+    let port = origin_address.port();
+    let mut session = intercept_session(port);
+    session.default_credential_mode = Some(crate::config::CredentialMode::Substitute);
+    let seed = CredentialSeed::from_test_bytes([0; 32]);
+    let fake = crate::credentials::derive_fake_credential(&seed, "proxy-token");
+    let (runtime, _events) = start_runtime(
+        directory.path(),
+        session,
+        Arc::clone(&ca),
+        Duration::from_secs(2),
+    )
+    .await?;
+
+    let mut tls = open_tls_client(runtime.socket_path(), &format!("localhost:{port}"), &ca).await?;
+    tls.write_all(
+        format!(
+            "GET /allowed HTTP/1.1\r\nHost: localhost:{port}\r\nAuthorization: Bearer {fake}\r\nConnection: close\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .await?;
+    let observed = timeout(Duration::from_secs(2), seen_rx).await??;
+    assert!(
+        observed.contains("Bearer test-credential"),
+        "the authorized origin should receive the real credential"
+    );
+    let mut reader = BufReader::new(tls);
+    let response = timeout(Duration::from_secs(3), read_http_response(&mut reader)).await??;
+    assert!(response.starts_with("HTTP/1.1 200 OKok"));
+
+    drop(reader);
+    origin_task.abort();
+    runtime.shutdown(Duration::from_secs(2)).await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn rejects_plaintext_forward_http_before_dialing_the_origin() -> Result<(), TestError> {
     let directory = tempfile::tempdir()?;
     let ca = write_managed_ca(directory.path());

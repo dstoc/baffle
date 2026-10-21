@@ -251,6 +251,7 @@ dependencies = [
  "libc",
  "rama",
  "rcgen",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",
