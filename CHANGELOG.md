@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/dstoc/baffle/compare/v2.1.0...v2.2.0) (2026-10-21)
+
+
+### Features
+
+* **cli:** standardize successful output as JSON ([#102](https://github.com/dstoc/baffle/issues/102)) ([1430cfe](https://github.com/dstoc/baffle/commit/1430cfea58259d182db66e9935b81f28d6a579e0))
+
 ## [2.1.0](https://github.com/dstoc/baffle/compare/v2.0.0...v2.1.0) (2026-10-21)
 
 
