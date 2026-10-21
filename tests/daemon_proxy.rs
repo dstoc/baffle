@@ -378,6 +378,20 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
     assert!(!listed.contains("daemon-only-token-42"));
     assert!(!listed.contains(seed), "list must not expose session seeds");
 
+    let stdout =
+        fs::read_to_string(&daemon.stdout_log_path).expect("daemon stdout should be readable");
+    assert!(
+        stdout.is_empty(),
+        "daemon logs must not go to stdout: {stdout}"
+    );
+    let logs = fs::read_to_string(&daemon.log_path).expect("daemon stderr log should be readable");
+    assert!(
+        !logs.contains(seed),
+        "daemon logs must not contain session seeds"
+    );
+    assert!(!logs.contains("daemon-only-token-42"));
+    assert!(!logs.contains("unentitled-secret-value"));
+
     if !cfg!(baffle_integration_test) {
         // The local upstream trust hook is compiled only for CI's integration
         // build. The regular developer test command still checks entitlement
@@ -463,10 +477,6 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
             .is_err(),
         "the denied path must not reach the upstream or receive a credential"
     );
-
-    let logs = fs::read_to_string(&daemon.log_path).expect("daemon log should be readable");
-    assert!(!logs.contains("daemon-only-token-42"));
-    assert!(!logs.contains("unentitled-secret-value"));
 
     let (_, stopped) = daemon.request(&format!(
         "version = 2\noperation = \"stop\"\nsession_id = \"{id}\"\n"

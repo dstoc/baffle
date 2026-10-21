@@ -28,6 +28,7 @@ pub struct DaemonProcess {
     pub secrets_dir: PathBuf,
     pub ca_certificate: PathBuf,
     pub log_path: PathBuf,
+    pub stdout_log_path: PathBuf,
     pub session_config_dir: Option<PathBuf>,
 }
 
@@ -113,6 +114,9 @@ impl DaemonProcess {
         let config_path = directory.path().join("daemon.toml");
         let log_path = directory.path().join("daemon.log");
         let log_file = fs::File::create(&log_path).expect("daemon log file should be created");
+        let stdout_log_path = directory.path().join("daemon.stdout");
+        let stdout_log_file =
+            fs::File::create(&stdout_log_path).expect("daemon stdout log should be created");
         let (certificate_path, private_key_path) = write_test_ca(directory.path());
         let trusted_uid = fs::metadata(directory.path())
             .expect("temporary directory should have metadata")
@@ -148,7 +152,8 @@ impl DaemonProcess {
             .arg("daemon")
             .arg("--config")
             .arg(&config_path)
-            .stdout(Stdio::null())
+            .env("RUST_LOG", "baffle_proxy=info")
+            .stdout(Stdio::from(stdout_log_file))
             .stderr(Stdio::from(log_file));
         if let Some(upstream_ca) = upstream_ca {
             command.env("BAFFLE_TEST_UPSTREAM_CA", upstream_ca);
@@ -163,6 +168,7 @@ impl DaemonProcess {
             secrets_dir,
             ca_certificate: certificate_path,
             log_path,
+            stdout_log_path,
             session_config_dir,
         };
 

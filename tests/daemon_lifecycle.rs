@@ -54,6 +54,9 @@ fn daemon_starts_and_stops_on_interrupt() {
     let socket_dir = socket_directory.path().join("proxies");
     let daemon_log = config_dir.path().join("daemon.log");
     let daemon_log_file = fs::File::create(&daemon_log).expect("daemon log should be created");
+    let daemon_stdout_path = config_dir.path().join("daemon.stdout");
+    let daemon_stdout_file =
+        fs::File::create(&daemon_stdout_path).expect("daemon stdout should be captured");
     let trusted_uid = fs::metadata(config_dir.path())
         .expect("temporary directory should have metadata")
         .uid();
@@ -143,7 +146,8 @@ directory = "{secrets}"
         .arg("daemon")
         .arg("--config")
         .arg(&config_path)
-        .stdout(Stdio::null())
+        .env("RUST_LOG", "baffle_proxy=info")
+        .stdout(Stdio::from(daemon_stdout_file))
         .stderr(Stdio::from(daemon_log_file))
         .spawn()
         .expect("daemon process should start");
@@ -196,6 +200,9 @@ directory = "{secrets}"
         fs::read_to_string(&daemon_log)
             .unwrap_or_else(|error| format!("could not read log: {error}"))
     );
+    let credential_seed = response["result"]["credential_seed_base64url"]
+        .as_str()
+        .expect("successful create should return the session credential seed");
     let proxy_socket = PathBuf::from(
         response["result"]["socket"]
             .as_str()
@@ -234,6 +241,21 @@ directory = "{secrets}"
     assert!(
         !proxy_socket.exists(),
         "daemon should remove every session socket during shutdown"
+    );
+
+    let daemon_stdout =
+        fs::read_to_string(&daemon_stdout_path).expect("captured daemon stdout should be readable");
+    assert!(
+        daemon_stdout.is_empty(),
+        "daemon operational logs must not go to stdout: {daemon_stdout}"
+    );
+    let daemon_stderr = fs::read_to_string(&daemon_log).expect("daemon stderr should be readable");
+    assert!(daemon_stderr.contains("daemon started"));
+    assert!(daemon_stderr.contains("proxy session started"));
+    assert!(daemon_stderr.contains("daemon shutting down"));
+    assert!(
+        !daemon_stderr.contains(credential_seed),
+        "daemon operational logs must not contain session credential seeds"
     );
 }
 
