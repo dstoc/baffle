@@ -352,27 +352,45 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
         "intercepted v2 CLI create failed: {}",
         String::from_utf8_lossy(&created.stderr)
     );
-    let create_output = String::from_utf8(created.stdout).expect("create output should be UTF-8");
+    assert!(created.stdout.ends_with(b"\n"));
+    let create_output: serde_json::Value =
+        serde_json::from_slice(&created.stdout).expect("create output should be JSON");
     assert!(
-        !create_output.contains("daemon-only-token-42"),
+        !String::from_utf8_lossy(&created.stdout).contains("daemon-only-token-42"),
         "v2 CLI create must not display a resolved credential"
     );
-    let id = create_output
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(3))
-        .expect("v2 CLI create should print a session ID")
+    let id = create_output["id"]
+        .as_str()
+        .expect("v2 CLI JSON should include a session ID")
         .to_owned();
-    let proxy_socket = create_output
-        .lines()
-        .find_map(|line| line.strip_prefix("Data socket: "))
-        .map(PathBuf::from)
-        .expect("v2 CLI create should print the proxy socket");
+    let proxy_socket = PathBuf::from(
+        create_output["socket"]
+            .as_str()
+            .expect("v2 CLI JSON should include the proxy socket"),
+    );
+    let seed = create_output["credential_seed_base64url"]
+        .as_str()
+        .expect("v2 CLI JSON should include the session seed");
 
     let (_, listed) = daemon.request("version = 2\noperation = \"list\"\n");
     let listed = serde_json::to_string(&listed).expect("session list should serialize");
     assert!(!listed.contains("api-token"));
     assert!(!listed.contains("daemon-only-token-42"));
+    assert!(!listed.contains(seed), "list must not expose session seeds");
+
+    let stdout =
+        fs::read_to_string(&daemon.stdout_log_path).expect("daemon stdout should be readable");
+    assert!(
+        stdout.is_empty(),
+        "daemon logs must not go to stdout: {stdout}"
+    );
+    let logs = fs::read_to_string(&daemon.log_path).expect("daemon stderr log should be readable");
+    assert!(
+        !logs.contains(seed),
+        "daemon logs must not contain session seeds"
+    );
+    assert!(!logs.contains("daemon-only-token-42"));
+    assert!(!logs.contains("unentitled-secret-value"));
 
     if !cfg!(baffle_integration_test) {
         // The local upstream trust hook is compiled only for CI's integration
@@ -459,10 +477,6 @@ async fn real_daemon_checks_secret_entitlement_paths_and_credential_redaction() 
             .is_err(),
         "the denied path must not reach the upstream or receive a credential"
     );
-
-    let logs = fs::read_to_string(&daemon.log_path).expect("daemon log should be readable");
-    assert!(!logs.contains("daemon-only-token-42"));
-    assert!(!logs.contains("unentitled-secret-value"));
 
     let (_, stopped) = daemon.request(&format!(
         "version = 2\noperation = \"stop\"\nsession_id = \"{id}\"\n"

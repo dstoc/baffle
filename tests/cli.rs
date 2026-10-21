@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+use serde_json::Value;
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
@@ -50,6 +51,7 @@ struct AttachedCreate {
     _stdout: BufReader<ChildStdout>,
     id: String,
     socket_path: PathBuf,
+    credential_seed: String,
 }
 
 impl AttachedCreate {
@@ -83,10 +85,28 @@ impl AttachedCreate {
         let stdout = child.stdout.take().expect("create stdout should be piped");
         let mut stdout = BufReader::new(stdout);
         let mut created = String::new();
-        let mut socket = String::new();
         stdout
             .read_line(&mut created)
-            .expect("create status should be printed");
+            .expect("create JSON response should be written");
+        assert!(
+            created.ends_with('\n'),
+            "create JSON should be newline-terminated"
+        );
+        let response = parse_json_line(&created);
+        let id = response["id"]
+            .as_str()
+            .expect("create JSON should include the session ID")
+            .to_owned();
+        let socket_path = PathBuf::from(
+            response["socket"]
+                .as_str()
+                .expect("create JSON should include the data socket"),
+        );
+        assert_eq!(response["persistent"], false);
+        let credential_seed = response["credential_seed_base64url"]
+            .as_str()
+            .expect("create JSON should include the credential seed")
+            .to_owned();
         let status = readiness_signal.map(|signal| {
             let sent = Command::new("kill")
                 .arg(format!("-{signal}"))
@@ -96,20 +116,6 @@ impl AttachedCreate {
             assert!(sent.success(), "could not send {signal}");
             wait_for_exit(&mut child)
         });
-        stdout
-            .read_line(&mut socket)
-            .expect("data socket should be printed");
-        let id = created
-            .split_whitespace()
-            .nth(3)
-            .expect("create output should include the ID")
-            .to_owned();
-        let socket_path = PathBuf::from(
-            socket
-                .strip_prefix("Data socket: ")
-                .expect("create output should label its data socket")
-                .trim(),
-        );
         if readiness_signal.is_none() {
             assert!(
                 child
@@ -125,6 +131,7 @@ impl AttachedCreate {
                 _stdout: stdout,
                 id,
                 socket_path,
+                credential_seed,
             },
             status,
         )
@@ -141,6 +148,24 @@ impl AttachedCreate {
     }
 }
 
+fn parse_json_line(line: &str) -> Value {
+    assert!(
+        line.ends_with('\n'),
+        "JSON response should end with a newline"
+    );
+    assert_eq!(
+        line.matches('\n').count(),
+        1,
+        "stdout should contain one JSON line"
+    );
+    serde_json::from_str(line).expect("stdout should contain one valid JSON object")
+}
+
+fn parse_json_stdout(stdout: &[u8]) -> Value {
+    let text = std::str::from_utf8(stdout).expect("stdout should be UTF-8");
+    parse_json_line(text)
+}
+
 fn wait_for_exit(child: &mut Child) -> ExitStatus {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -153,9 +178,11 @@ fn wait_for_exit(child: &mut Child) -> ExitStatus {
 }
 
 fn session_is_listed(listed: &str, session_id: &str) -> bool {
-    listed
-        .lines()
-        .any(|line| line.split('\t').next() == Some(session_id))
+    parse_json_stdout(listed.as_bytes())["sessions"]
+        .as_array()
+        .expect("list JSON should contain session entries")
+        .iter()
+        .any(|session| session["id"] == session_id)
 }
 
 fn wait_for_session_release(
@@ -210,12 +237,27 @@ fn inline_create_lists_sessions_and_independent_stop_preserves_other_lease() {
     assert!(second.socket_path.exists());
 
     let listed = daemon.list();
-    assert!(listed.contains("ID\tSTATUS\tTYPE\tDATA SOCKET"));
-    assert!(listed.contains(&first.id));
-    assert!(listed.contains(&second.id));
-    assert!(listed.contains("\trunning\tleased\t"));
-    assert!(listed.contains(&first.socket_path.display().to_string()));
-    assert!(listed.contains(&second.socket_path.display().to_string()));
+    let list_json = parse_json_stdout(listed.as_bytes());
+    let sessions = list_json["sessions"]
+        .as_array()
+        .expect("list JSON should contain session entries");
+    assert_eq!(sessions.len(), 2);
+    for create in [&first, &second] {
+        let session = sessions
+            .iter()
+            .find(|session| session["id"] == create.id)
+            .expect("created session should appear in list JSON");
+        assert_eq!(session["id"], create.id);
+        assert_eq!(session["socket"], create.socket_path.display().to_string());
+        assert_eq!(session["state"], "running");
+        assert_eq!(session["persistent"], false);
+        assert!(!listed.contains(&create.credential_seed));
+    }
+    assert!(
+        list_json["sessions"][0]
+            .get("credential_seed_base64url")
+            .is_none()
+    );
 
     let stopped = daemon
         .cli()
@@ -228,7 +270,9 @@ fn inline_create_lists_sessions_and_independent_stop_preserves_other_lease() {
         "stop failed: {}",
         String::from_utf8_lossy(&stopped.stderr)
     );
-    assert!(String::from_utf8_lossy(&stopped.stdout).contains(&first.id));
+    let stop_json = parse_json_stdout(&stopped.stdout);
+    assert_eq!(stop_json["stopped"], true);
+    assert_eq!(stop_json["id"], first.id);
     let listed = daemon.list();
     assert!(!listed.contains(&first.id));
     assert!(listed.contains(&second.id));
@@ -249,9 +293,9 @@ fn inline_create_lists_sessions_and_independent_stop_preserves_other_lease() {
         "second CLI failed: {second_status}"
     );
     let listed = wait_for_session_release(&daemon, &second, &[]);
-    assert!(
-        listed.contains("No active sessions."),
-        "all sessions should be released after both CLI processes exit:\n{listed}"
+    assert_eq!(
+        parse_json_stdout(listed.as_bytes())["sessions"],
+        serde_json::json!([])
     );
 }
 
@@ -278,17 +322,13 @@ fn inline_create_accepts_empty_deny_and_unmatched_tunnel_policies() {
             "empty {name} policy should be accepted: {}",
             String::from_utf8_lossy(&created.stderr)
         );
-        let stdout = String::from_utf8(created.stdout).expect("create output should be UTF-8");
-        let mut lines = stdout.lines();
-        let created_line = lines.next().expect("create output should include a status");
-        let id = created_line
-            .split_whitespace()
-            .nth(3)
-            .expect("create output should include the session ID");
-        let socket_path = lines
-            .next()
-            .and_then(|line| line.strip_prefix("Data socket: "))
-            .expect("create output should include the data socket");
+        let response = parse_json_stdout(&created.stdout);
+        let id = response["id"]
+            .as_str()
+            .expect("create JSON should include the session ID");
+        let socket_path = response["socket"]
+            .as_str()
+            .expect("create JSON should include the data socket");
         let mut stream = UnixStream::connect(socket_path)
             .expect("created proxy should accept an unmatched CONNECT request");
         stream
@@ -359,9 +399,9 @@ fn inline_create_cli_exit_releases_only_its_own_lease() {
     let first_status = first.signal_and_wait("INT");
     assert!(first_status.success(), "first CLI failed: {first_status}");
     let listed = wait_for_session_release(&daemon, &first, &[]);
-    assert!(
-        listed.contains("No active sessions."),
-        "all sessions should be released after the first CLI exits:\n{listed}"
+    assert_eq!(
+        parse_json_stdout(listed.as_bytes())["sessions"],
+        serde_json::json!([])
     );
 }
 
@@ -383,7 +423,7 @@ fn inline_create_forwards_named_socket_and_prints_daemon_assigned_path() {
         let request = String::from_utf8(request).expect("request should be UTF-8 TOML");
         assert!(request.contains("socket_name = \"cladding/github.sock\""));
 
-        let response = br#"{"version":2,"ok":true,"result":{"id":"named_session","socket":"/run/baffle/proxies/cladding/github.sock","persistent":true}}"#;
+        let response = br#"{"version":2,"ok":true,"result":{"id":"named_session","socket":"/run/baffle/proxies/cladding/github.sock","persistent":true,"ca_certificate_pem":"test-ca-pem","credential_seed_base64url":"exact-client-api-seed"}}"#;
         stream
             .write_all(&(response.len() as u32).to_be_bytes())
             .expect("response frame header should be sent");
@@ -413,9 +453,19 @@ fn inline_create_forwards_named_socket_and_prints_daemon_assigned_path() {
         "create failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8(output.stdout).expect("create output should be UTF-8");
-    assert!(stdout.contains("Created persistent session named_session"));
-    assert!(stdout.contains("Data socket: /run/baffle/proxies/cladding/github.sock"));
+    let response = parse_json_stdout(&output.stdout);
+    assert_eq!(response["id"], "named_session");
+    assert_eq!(
+        response["socket"],
+        "/run/baffle/proxies/cladding/github.sock"
+    );
+    assert_eq!(response["persistent"], true);
+    assert_eq!(response["ca_certificate_pem"], "test-ca-pem");
+    assert_eq!(
+        response["credential_seed_base64url"],
+        "exact-client-api-seed"
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("exact-client-api-seed"));
 }
 
 #[test]
@@ -456,19 +506,31 @@ fn file_only_create_uses_nested_server_file_and_rejects_inline_config() {
         "file-backed create failed: {}",
         String::from_utf8_lossy(&created.stderr)
     );
-    let stdout = String::from_utf8(created.stdout).expect("create output should be UTF-8");
-    assert!(stdout.contains("Created persistent session"));
-    assert!(stdout.contains("Data socket:"));
-    assert!(stdout.contains("/proxies/"));
-    assert!(!stdout.contains("github.toml"));
+    let create_json = parse_json_stdout(&created.stdout);
+    assert_eq!(create_json["persistent"], true);
+    assert!(
+        create_json["socket"]
+            .as_str()
+            .unwrap()
+            .contains("/proxies/")
+    );
+    assert!(!String::from_utf8_lossy(&created.stdout).contains("github.toml"));
+    let seed = create_json["credential_seed_base64url"]
+        .as_str()
+        .expect("create JSON should include the session seed");
 
     let listed = daemon.list();
-    assert!(listed.contains("persistent"));
-    let id = stdout
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(3))
-        .expect("persistent create should print session ID");
+    let list_json = parse_json_stdout(listed.as_bytes());
+    assert_eq!(list_json["sessions"][0]["persistent"], true);
+    assert!(!listed.contains(seed), "list must not expose session seeds");
+    assert!(
+        list_json["sessions"][0]
+            .get("credential_seed_base64url")
+            .is_none()
+    );
+    let id = create_json["id"]
+        .as_str()
+        .expect("create JSON should include ID");
     let stopped = daemon
         .cli()
         .arg("stop")
@@ -476,7 +538,10 @@ fn file_only_create_uses_nested_server_file_and_rejects_inline_config() {
         .output()
         .expect("persistent session should stop");
     assert!(stopped.status.success());
-    assert!(daemon.list().contains("No active sessions."));
+    assert_eq!(
+        parse_json_stdout(daemon.list().as_bytes())["sessions"],
+        serde_json::json!([])
+    );
 }
 
 #[test]
@@ -495,12 +560,14 @@ fn reload_cli_reports_per_session_results_and_fails_when_any_all_result_fails() 
         .output()
         .expect("first session should be created");
     assert!(first.status.success());
-    let first_id = String::from_utf8(first.stdout)
-        .expect("create output should be UTF-8")
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(3))
-        .expect("create output should include the session ID")
+    let first_json = parse_json_stdout(&first.stdout);
+    let first_id = first_json["id"]
+        .as_str()
+        .expect("create JSON should include ID")
+        .to_owned();
+    let first_seed = first_json["credential_seed_base64url"]
+        .as_str()
+        .expect("create JSON should include seed")
         .to_owned();
     let second = daemon
         .cli()
@@ -509,6 +576,15 @@ fn reload_cli_reports_per_session_results_and_fails_when_any_all_result_fails() 
         .output()
         .expect("second session should be created");
     assert!(second.status.success());
+    let second_json = parse_json_stdout(&second.stdout);
+    let second_id = second_json["id"]
+        .as_str()
+        .expect("create JSON should include ID")
+        .to_owned();
+    let second_seed = second_json["credential_seed_base64url"]
+        .as_str()
+        .expect("create JSON should include seed")
+        .to_owned();
 
     let one = daemon
         .cli()
@@ -521,8 +597,11 @@ fn reload_cli_reports_per_session_results_and_fails_when_any_all_result_fails() 
         "reload failed: {}",
         String::from_utf8_lossy(&one.stderr)
     );
-    assert!(String::from_utf8_lossy(&one.stdout).contains("unchanged"));
-    assert!(String::from_utf8_lossy(&one.stdout).contains(&first_id));
+    let one_json = parse_json_stdout(&one.stdout);
+    assert_eq!(one_json["results"][0]["status"], "unchanged");
+    assert_eq!(one_json["results"][0]["id"], first_id);
+    assert!(!String::from_utf8_lossy(&one.stdout).contains(&first_seed));
+    assert!(!String::from_utf8_lossy(&one.stdout).contains(&second_seed));
 
     fs::remove_file(&second_config).expect("second source file should be removed");
     let all = daemon
@@ -535,29 +614,28 @@ fn reload_cli_reports_per_session_results_and_fails_when_any_all_result_fails() 
         !all.status.success(),
         "one failed result should set failure status"
     );
-    let output = String::from_utf8_lossy(&all.stdout);
+    let all_json = parse_json_stdout(&all.stdout);
+    let all_results = all_json["results"]
+        .as_array()
+        .expect("reload JSON should contain result entries");
+    assert_eq!(all_results.len(), 2);
     assert!(
-        output.contains("unchanged"),
-        "successful result should be printed: {output}"
+        all_results
+            .iter()
+            .any(|result| result["status"] == "unchanged")
     );
-    assert!(
-        output.contains("failed"),
-        "failed result should be printed: {output}"
-    );
-    assert!(
-        output.contains("second.toml") && output.contains("was not found"),
-        "failure reason should be safe and specific: {output}"
-    );
+    let failed = all_results
+        .iter()
+        .find(|result| result["status"] == "failed")
+        .expect("reload JSON should include the failed result");
+    assert!(failed["detail"].as_str().unwrap().contains("second.toml"));
+    assert!(failed["detail"].as_str().unwrap().contains("not found"));
+    assert!(!String::from_utf8_lossy(&all.stdout).contains(&first_seed));
+    assert!(!String::from_utf8_lossy(&all.stdout).contains(&second_seed));
+    assert!(!String::from_utf8_lossy(&all.stderr).contains(&first_seed));
+    assert!(!String::from_utf8_lossy(&all.stderr).contains(&second_seed));
 
-    for id in [
-        first_id,
-        String::from_utf8_lossy(&second.stdout)
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(3))
-            .expect("second create should include the session ID")
-            .to_owned(),
-    ] {
+    for id in [first_id, second_id] {
         let stopped = daemon
             .cli()
             .arg("stop")
@@ -578,6 +656,10 @@ fn cli_reports_unavailable_control_socket_and_sigterm_releases_lease() {
         .output()
         .expect("list command should run");
     assert!(!unavailable.status.success());
+    assert!(
+        unavailable.stdout.is_empty(),
+        "errors must not write partial JSON"
+    );
     assert!(String::from_utf8_lossy(&unavailable.stderr).contains("control socket"));
     assert!(String::from_utf8_lossy(&unavailable.stderr).contains("unavailable"));
 
@@ -587,9 +669,9 @@ fn cli_reports_unavailable_control_socket_and_sigterm_releases_lease() {
     let status = create.signal_and_wait("TERM");
     assert!(status.success(), "SIGTERM should close the lease: {status}");
     let listed = wait_for_session_release(&daemon, &create, &[]);
-    assert!(
-        listed.contains("No active sessions."),
-        "SIGTERM should release all sessions:\n{listed}"
+    assert_eq!(
+        parse_json_stdout(listed.as_bytes())["sessions"],
+        serde_json::json!([])
     );
 
     let mut disconnected = AttachedCreate::start(&daemon, &config);
@@ -605,9 +687,9 @@ fn cli_reports_unavailable_control_socket_and_sigterm_releases_lease() {
         "SIGKILL should terminate the CLI process"
     );
     let listed = wait_for_session_release(&daemon, &disconnected, &[]);
-    assert!(
-        listed.contains("No active sessions."),
-        "SIGKILL should release all sessions:\n{listed}"
+    assert_eq!(
+        parse_json_stdout(listed.as_bytes())["sessions"],
+        serde_json::json!([])
     );
 }
 
@@ -651,9 +733,45 @@ directory = "state/secrets"
         "CA initialization failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let initialized = parse_json_stdout(&output.stdout);
+    assert_eq!(initialized["initialized"], true);
+    assert_eq!(
+        initialized["certificate"],
+        config_directory.join("state/ca.pem").display().to_string()
+    );
+    assert_eq!(
+        initialized["private_key"],
+        config_directory
+            .join("state/ca-key.pem")
+            .display()
+            .to_string()
+    );
+    assert_eq!(initialized["trust_store_installed"], false);
     assert!(config_directory.join("state/ca.pem").is_file());
     assert!(config_directory.join("state/ca-key.pem").is_file());
     assert!(!other_working_directory.join("state/ca.pem").exists());
+
+    let export_path = config_directory.join("state/exported-ca.pem");
+    let exported = Command::new(env!("CARGO_BIN_EXE_baffle"))
+        .current_dir(&other_working_directory)
+        .args(["ca", "export", "--config"])
+        .arg(&config_path)
+        .arg("--output")
+        .arg(&export_path)
+        .output()
+        .expect("CA export command should run");
+    assert!(
+        exported.status.success(),
+        "CA export failed: {}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let export_json = parse_json_stdout(&exported.stdout);
+    assert_eq!(export_json["exported"], true);
+    assert_eq!(export_json["output"], export_path.display().to_string());
+    assert_eq!(
+        fs::read(&export_path).expect("exported certificate should exist"),
+        fs::read(config_directory.join("state/ca.pem")).expect("CA certificate should exist")
+    );
 
     let daemon = Command::new(env!("CARGO_BIN_EXE_baffle"))
         .current_dir(&other_working_directory)
@@ -671,6 +789,7 @@ directory = "state/secrets"
         "unexpected daemon error: {}",
         String::from_utf8_lossy(&daemon.stderr)
     );
+    assert!(daemon.stdout.is_empty(), "daemon logs must not use stdout");
     assert!(!other_working_directory.join("control.sock").exists());
 }
 
@@ -685,6 +804,10 @@ fn malformed_server_filename_is_rejected_before_control_io() {
         .output()
         .expect("create command should run");
     assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "errors must not write partial JSON"
+    );
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("session configuration name is invalid"));
     assert!(!error.contains("unavailable"));
@@ -700,6 +823,10 @@ fn stop_reports_stale_ids_and_list_reports_protocol_mismatches() {
         .output()
         .expect("stop command should run");
     assert!(!stale.status.success());
+    assert!(
+        stale.stdout.is_empty(),
+        "errors must not write partial JSON"
+    );
     assert!(String::from_utf8_lossy(&stale.stderr).contains("session not found"));
 
     let directory = tempfile::tempdir().expect("temporary directory should be created");
@@ -731,6 +858,10 @@ fn stop_reports_stale_ids_and_list_reports_protocol_mismatches() {
         .expect("list command should run");
     server.join().expect("fake control server should finish");
     assert!(!mismatch.status.success());
+    assert!(
+        mismatch.stdout.is_empty(),
+        "errors must not write partial JSON"
+    );
     let error = String::from_utf8_lossy(&mismatch.stderr);
     assert!(
         error.contains("protocol mismatch"),

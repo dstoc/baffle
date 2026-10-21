@@ -217,14 +217,40 @@ checks. The client does not read the named file. Supplying both create forms
 is an argument error. Inline creation in `file_only` mode returns an explicit
 error that directs the operator to the server-side file form.
 
-The create command prints the ID and returned data-socket path. If the
-response is ephemeral, it labels the session `leased` and stays open until
-Ctrl+C, SIGTERM, or process termination closes its control connection. If the
-response is persistent, it labels the session `persistent` and exits; the
-session remains until `stop` or daemon shutdown. `list` prints ID, state,
-persistence type, and socket path, without policy contents. `stop SESSION_ID`
-uses its own short-lived connection and stops only the named authorized
-session. It does not close other clients' leases.
+Successful informational CLI commands write one newline-terminated JSON object
+to stdout. Errors and diagnostics go to stderr, and failed commands exit with a
+nonzero status. This is a breaking change from the previous human-readable CLI
+output. The daemon does not write a structured response to stdout; operational
+logs go to stderr.
+
+`create` returns the session fields from the control API, including `id`,
+`socket`, and `persistent`. It also includes `ca_certificate_pem` and
+`credential_seed_base64url` when the daemon provides them. For example:
+
+```json
+{"id":"session_example_01","socket":"/run/baffle/proxies/session_example_01.sock","persistent":false,"ca_certificate_pem":"<public CA certificate PEM>","credential_seed_base64url":"<sensitive session seed>"}
+```
+
+Capture create stdout securely. Do not log it, forward it to workload or
+container logs, or enable shell tracing while capturing it. The credential
+seed appears only in the successful response to `create`; `list`, `reload`,
+and other commands do not return it. For an ephemeral response, the CLI flushes
+the JSON object before it waits for Ctrl+C, SIGTERM, or process termination to
+close the control connection and release the lease. Persistent sessions exit
+after the response and remain active until `stop` or daemon shutdown.
+
+`list` returns an object with a `sessions` array. `stop SESSION_ID` returns a
+confirmation with `stopped` and the session `id`. `reload` returns a `results`
+array with each result's `id`, `status`, `socket`, and any safe failure
+diagnostic. `--all` exits unsuccessfully when any result has status `failed`,
+but still writes the complete JSON result object. `ca init` returns the
+certificate and private-key paths and confirms that the CA was not installed
+in a trust store. `ca export` returns the output path.
+
+Cladding currently collects proxy startup stdout in container logs. Before
+upgrading Cladding to this Baffle version, update its session creation flow to
+capture and parse the JSON securely. Do not send raw create stdout to those
+logs.
 
 Stop an owned session:
 

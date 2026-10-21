@@ -546,7 +546,7 @@ impl fmt::Debug for Session {
 }
 
 /// A session returned by the `list` operation.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SessionInfo {
     /// Opaque proxy ID.
     pub id: String,
@@ -566,7 +566,7 @@ pub struct SessionInfo {
 }
 
 /// Outcome for one session in a reload operation.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ReloadResult {
     /// Opaque session ID.
     pub id: String,
@@ -576,6 +576,7 @@ pub struct ReloadResult {
     #[serde(rename = "socket")]
     pub socket_path: PathBuf,
     /// Safe, non-secret failure category when `status` is `Failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
@@ -589,7 +590,7 @@ pub struct ReloadResultWithDiagnostics {
 }
 
 /// Reload status for one file-backed session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReloadStatus {
     Reloaded,
@@ -598,7 +599,7 @@ pub enum ReloadStatus {
 }
 
 /// Current lifecycle state of a proxy session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
     Running,

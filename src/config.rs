@@ -16,7 +16,6 @@ mod session_file;
 mod tests;
 
 pub use baffle_client::PROTOCOL_VERSION;
-pub(crate) use baffle_client::SESSION_CONFIG_INVALID_MESSAGE as SESSION_FILE_INVALID_MESSAGE;
 pub use baffle_client::{
     CredentialMode, HeaderInjection, HostRule, InjectionFormat, RuleMode, SessionConfig,
     UnmatchedHostPolicy,

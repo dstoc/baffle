@@ -6,10 +6,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use baffle_client::{
-    Client, ClientError, ReloadResultWithDiagnostics, ReloadStatus, Session, SessionConfig,
-    SessionInfo, default_control_socket,
+    Client, ClientError, ReloadStatus, Session, SessionConfig, SessionInfo, default_control_socket,
 };
 use clap::{ArgGroup, Args, Parser, Subcommand};
+use serde::Serialize;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -113,6 +113,55 @@ pub struct DaemonArgs {
     pub config: PathBuf,
 }
 
+#[derive(Serialize)]
+struct CreatedSessionOutput<'a> {
+    id: &'a str,
+    socket: String,
+    persistent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ca_certificate_pem: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_seed_base64url: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct SessionListOutput<'a> {
+    sessions: &'a [SessionInfo],
+}
+
+#[derive(Serialize)]
+struct StopOutput<'a> {
+    stopped: bool,
+    id: &'a str,
+}
+
+#[derive(Serialize)]
+struct ReloadOutput<'a> {
+    results: Vec<ReloadEntryOutput<'a>>,
+}
+
+#[derive(Serialize)]
+struct ReloadEntryOutput<'a> {
+    #[serde(flatten)]
+    result: &'a baffle_client::ReloadResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct CaInitOutput {
+    initialized: bool,
+    certificate: String,
+    private_key: String,
+    trust_store_installed: bool,
+}
+
+#[derive(Serialize)]
+struct CaExportOutput {
+    exported: bool,
+    output: String,
+}
+
 pub async fn create(control_socket: PathBuf, args: CreateArgs) -> Result<()> {
     let client = Client::new(control_socket);
     let session = if let Some(name) = args.file {
@@ -158,8 +207,10 @@ pub async fn stop(control_socket: PathBuf, args: StopArgs) -> Result<()> {
         .stop(args.session_id.as_str())
         .await
         .map_err(|error| client_error(error, client.control_socket(), false))?;
-    println!("Stopped session {}.", args.session_id);
-    Ok(())
+    write_json(&StopOutput {
+        stopped: true,
+        id: &args.session_id,
+    })
 }
 
 pub async fn reload(control_socket: PathBuf, args: ReloadArgs) -> Result<()> {
@@ -181,7 +232,16 @@ pub async fn reload(control_socket: PathBuf, args: ReloadArgs) -> Result<()> {
                 .map_err(|error| client_error(error, client.control_socket(), false))?,
         ]
     };
-    print_reload_results(&results)?;
+    let output = ReloadOutput {
+        results: results
+            .iter()
+            .map(|entry| ReloadEntryOutput {
+                result: &entry.result,
+                detail: entry.detail.as_deref(),
+            })
+            .collect(),
+    };
+    write_json(&output)?;
     if results
         .iter()
         .any(|entry| entry.result.status == ReloadStatus::Failed)
@@ -189,51 +249,6 @@ pub async fn reload(control_socket: PathBuf, args: ReloadArgs) -> Result<()> {
         return Err(anyhow!("one or more sessions failed to reload"));
     }
     Ok(())
-}
-
-fn print_reload_results(results: &[ReloadResultWithDiagnostics]) -> Result<()> {
-    for entry in results {
-        let result = &entry.result;
-        match result.status {
-            ReloadStatus::Reloaded => println!(
-                "Session {}: reloaded (socket {}).",
-                result.id,
-                result.socket_path.display()
-            ),
-            ReloadStatus::Unchanged => println!(
-                "Session {}: unchanged (socket {}).",
-                result.id,
-                result.socket_path.display()
-            ),
-            ReloadStatus::Failed => println!(
-                "Session {}: failed ({}) (socket {}).",
-                result.id,
-                entry
-                    .detail
-                    .as_deref()
-                    .unwrap_or_else(|| reload_failure_text(result.reason.as_deref())),
-                result.socket_path.display()
-            ),
-        }
-    }
-    io::stdout()
-        .flush()
-        .context("could not flush reload results")
-}
-
-fn reload_failure_text(reason: Option<&str>) -> &str {
-    match reason {
-        Some("inline_session") => "inline-configured sessions cannot be reloaded",
-        Some("configuration_not_found") => "configuration file was not found",
-        Some("configuration_unavailable") => "configuration file could not be read safely",
-        Some("configuration_invalid") => crate::config::SESSION_FILE_INVALID_MESSAGE,
-        Some("credentials_unavailable") => "credentials are unavailable",
-        Some("listener_unavailable") => "replacement listener could not be created",
-        Some("generation_limit") => "reload resource limit reached",
-        Some("session_stopping") => "session is stopping",
-        Some("session_unavailable") => "session is unavailable",
-        _ => "reload failed",
-    }
 }
 
 fn load_local_session_config(path: &std::path::Path) -> Result<SessionConfig> {
@@ -245,49 +260,45 @@ fn load_local_session_config(path: &std::path::Path) -> Result<SessionConfig> {
 }
 
 fn report_created_session(session: &Session) -> Result<()> {
-    if session.is_persistent() {
-        println!(
-            "Created persistent session {} (it remains active after this command exits).",
-            session.id()
-        );
-    } else {
-        println!(
-            "Created leased session {} (it stops when this command exits).",
-            session.id()
-        );
-    }
-    println!("Data socket: {}", session.socket_path().display());
-    io::stdout()
-        .flush()
-        .context("could not flush session details")
+    write_json(&CreatedSessionOutput {
+        id: session.id(),
+        socket: session.socket_path().display().to_string(),
+        persistent: session.is_persistent(),
+        ca_certificate_pem: session.ca_certificate_pem(),
+        credential_seed_base64url: session.credential_seed_base64url(),
+    })
 }
 
 fn print_sessions(sessions: &[SessionInfo]) -> Result<()> {
-    if sessions.is_empty() {
-        println!("No active sessions.");
-        return Ok(());
-    }
+    write_json(&SessionListOutput { sessions })
+}
 
-    println!("ID\tSTATUS\tTYPE\tDATA SOCKET");
-    for session in sessions {
-        let session_type = if session.persistent {
-            "persistent"
-        } else {
-            "leased"
-        };
-        let state = match session.state {
-            baffle_client::SessionState::Running => "running",
-            baffle_client::SessionState::Stopping => "stopping",
-        };
-        println!(
-            "{}\t{}\t{}\t{}",
-            session.id,
-            state,
-            session_type,
-            session.socket_path.display()
-        );
-    }
-    io::stdout().flush().context("could not flush session list")
+pub fn ca_init(config_path: &std::path::Path) -> Result<()> {
+    let ca = crate::daemon::initialize_ca(config_path)?;
+    write_json(&CaInitOutput {
+        initialized: true,
+        certificate: ca.certificate.display().to_string(),
+        private_key: ca.private_key.display().to_string(),
+        trust_store_installed: false,
+    })
+}
+
+pub fn ca_export(config_path: &std::path::Path, output: &std::path::Path) -> Result<()> {
+    crate::daemon::export_ca_certificate(config_path, output)?;
+    write_json(&CaExportOutput {
+        exported: true,
+        output: output.display().to_string(),
+    })
+}
+
+fn write_json<T: Serialize>(value: &T) -> Result<()> {
+    let mut response = serde_json::to_vec(value).context("could not serialize JSON response")?;
+    response.push(b'\n');
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(&response)
+        .context("could not write JSON response")?;
+    stdout.flush().context("could not flush JSON response")
 }
 
 fn client_error(

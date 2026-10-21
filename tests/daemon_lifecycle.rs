@@ -54,6 +54,9 @@ fn daemon_starts_and_stops_on_interrupt() {
     let socket_dir = socket_directory.path().join("proxies");
     let daemon_log = config_dir.path().join("daemon.log");
     let daemon_log_file = fs::File::create(&daemon_log).expect("daemon log should be created");
+    let daemon_stdout_path = config_dir.path().join("daemon.stdout");
+    let daemon_stdout_file =
+        fs::File::create(&daemon_stdout_path).expect("daemon stdout should be captured");
     let trusted_uid = fs::metadata(config_dir.path())
         .expect("temporary directory should have metadata")
         .uid();
@@ -91,13 +94,22 @@ directory = "{secrets}"
         "CA init should succeed: {}",
         String::from_utf8_lossy(&initialize.stderr)
     );
-    let initialize_stdout = String::from_utf8_lossy(&initialize.stdout);
-    assert!(initialize_stdout.contains("Created Baffle interception CA"));
-    assert!(initialize_stdout.contains(&certificate_path.display().to_string()));
-    assert!(initialize_stdout.contains(&private_key_path.display().to_string()));
+    assert!(initialize.stdout.ends_with(b"\n"));
+    let initialize_output: serde_json::Value =
+        serde_json::from_slice(&initialize.stdout).expect("CA init should return JSON");
+    assert_eq!(initialize_output["initialized"], true);
+    assert_eq!(
+        initialize_output["certificate"],
+        certificate_path.display().to_string()
+    );
+    assert_eq!(
+        initialize_output["private_key"],
+        private_key_path.display().to_string()
+    );
+    assert_eq!(initialize_output["trust_store_installed"], false);
     let initialize_output = format!(
         "{}{}",
-        initialize_stdout,
+        String::from_utf8_lossy(&initialize.stdout),
         String::from_utf8_lossy(&initialize.stderr)
     );
     assert!(!initialize_output.contains("PRIVATE KEY"));
@@ -117,6 +129,14 @@ directory = "{secrets}"
         "CA export should work after init: {}",
         String::from_utf8_lossy(&export.stderr)
     );
+    assert!(export.stdout.ends_with(b"\n"));
+    let export_output: serde_json::Value =
+        serde_json::from_slice(&export.stdout).expect("CA export should return JSON");
+    assert_eq!(export_output["exported"], true);
+    assert_eq!(
+        export_output["output"],
+        exported_certificate.display().to_string()
+    );
     assert_eq!(
         fs::read(&exported_certificate).expect("exported CA should be readable"),
         fs::read(&certificate_path).expect("initialized CA should be readable")
@@ -126,7 +146,8 @@ directory = "{secrets}"
         .arg("daemon")
         .arg("--config")
         .arg(&config_path)
-        .stdout(Stdio::null())
+        .env("RUST_LOG", "baffle_proxy=info")
+        .stdout(Stdio::from(daemon_stdout_file))
         .stderr(Stdio::from(daemon_log_file))
         .spawn()
         .expect("daemon process should start");
@@ -179,6 +200,9 @@ directory = "{secrets}"
         fs::read_to_string(&daemon_log)
             .unwrap_or_else(|error| format!("could not read log: {error}"))
     );
+    let credential_seed = response["result"]["credential_seed_base64url"]
+        .as_str()
+        .expect("successful create should return the session credential seed");
     let proxy_socket = PathBuf::from(
         response["result"]["socket"]
             .as_str()
@@ -217,6 +241,21 @@ directory = "{secrets}"
     assert!(
         !proxy_socket.exists(),
         "daemon should remove every session socket during shutdown"
+    );
+
+    let daemon_stdout =
+        fs::read_to_string(&daemon_stdout_path).expect("captured daemon stdout should be readable");
+    assert!(
+        daemon_stdout.is_empty(),
+        "daemon operational logs must not go to stdout: {daemon_stdout}"
+    );
+    let daemon_stderr = fs::read_to_string(&daemon_log).expect("daemon stderr should be readable");
+    assert!(daemon_stderr.contains("daemon started"));
+    assert!(daemon_stderr.contains("proxy session started"));
+    assert!(daemon_stderr.contains("daemon shutting down"));
+    assert!(
+        !daemon_stderr.contains(credential_seed),
+        "daemon operational logs must not contain session credential seeds"
     );
 }
 
