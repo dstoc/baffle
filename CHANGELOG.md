@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.1.0](https://github.com/dstoc/baffle/compare/v2.0.0...v2.1.0) (2026-10-21)
+
+
+### Features
+
+* **config:** resolve daemon paths relative to config ([#100](https://github.com/dstoc/baffle/issues/100)) ([fb83ea8](https://github.com/dstoc/baffle/commit/fb83ea81ec5223c481fc83a579888fac1675b9c7))
+* **config:** support importing session files ([#98](https://github.com/dstoc/baffle/issues/98)) ([5662396](https://github.com/dstoc/baffle/commit/5662396008cf1908ae949153288ef7f3ad84723f))
+* **credentials:** add per-session credential substitution ([#101](https://github.com/dstoc/baffle/issues/101)) ([c1eb8b2](https://github.com/dstoc/baffle/commit/c1eb8b23ded713980378ab1b23be155775b4b751))
+
 ## [2.0.0](https://github.com/dstoc/baffle/compare/v1.1.1...v2.0.0) (2026-10-19)
 
 

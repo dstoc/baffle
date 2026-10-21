@@ -1,6 +1,6 @@
 [package]
 name = "baffle-bench-tools"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 publish = false
 
@@ -10,7 +10,7 @@ path = "measure_sessions.rs"
 
 [dependencies]
 anyhow = "1.0.104"
-baffle-proxy = { path = "..", version = "2.0.0" }
+baffle-proxy = { path = "..", version = "2.1.0" }
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "time"] }
 
 [lints.rust]
