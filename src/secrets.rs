@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::config::SessionConfig;
+use crate::config::{CredentialMode, SessionConfig};
 
 const MAX_SECRET_BYTES: u64 = 64 * 1024;
 
@@ -86,6 +86,10 @@ impl SecretStore {
             .rules
             .iter()
             .flat_map(|rule| rule.inject.iter())
+            .filter(|injection| {
+                session.effective_credential_mode(injection.secret.as_str())
+                    != CredentialMode::Disabled
+            })
             .map(|injection| injection.secret.as_str())
             .collect::<HashSet<_>>();
 
@@ -245,6 +249,22 @@ mod tests {
         assert_eq!(value.as_str(), "credential-that-must-not-leak");
         assert_eq!(format!("{value:?}"), "SecretValue([REDACTED])");
         assert!(!format!("{value:?}").contains("credential-that-must-not-leak"));
+    }
+
+    #[test]
+    fn disabled_credentials_do_not_resolve_secret_files() {
+        let directory = tempfile::tempdir().expect("secret directory should be created");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("secret directory should be private");
+        let session = crate::config::SessionFile::from_toml(
+            "version = 2\n\n[credentials]\ndefault_mode = \"disabled\"\n\n[rules.\"example.com\"]\nmode = \"intercept\"\n\n[[rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"api-token\"\nformat = \"bearer\"\n",
+        )
+        .expect("disabled credential policy should parse");
+
+        let secrets = store(directory.path(), &[])
+            .resolve(&session)
+            .expect("disabled credentials should not require entitlements or files");
+        assert!(secrets.get("api-token").is_none());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use super::{MINIMAL_CREATE, SESSION_EXAMPLE, config_with};
 use crate::config::{
-    ControlRequest, InjectionFormat, PROTOCOL_VERSION, RuleMode, SessionConfig, SessionFile,
+    ControlRequest, CredentialMode, InjectionFormat, PROTOCOL_VERSION, RuleMode, SessionConfig,
+    SessionFile,
 };
 
 #[test]
@@ -93,6 +94,60 @@ fn defaults_create_persistence_and_destination_port() {
     assert!(!session.persistent);
     assert_eq!(session.rules[0].host, "example.com");
     assert_eq!(session.rules[0].ports, [443]);
+}
+
+#[test]
+fn credential_modes_follow_override_default_then_inject_precedence() {
+    let session = SessionFile::from_toml(
+        r#"version = 2
+
+[credentials]
+default_mode = "substitute"
+
+[credentials.github-api]
+mode = "inject"
+
+[credentials.openai]
+mode = "disabled"
+"#,
+    )
+    .expect("credential mode configuration should parse");
+
+    assert_eq!(
+        session.effective_credential_mode("github-api"),
+        CredentialMode::Inject
+    );
+    assert_eq!(
+        session.effective_credential_mode("another-api"),
+        CredentialMode::Substitute
+    );
+    assert_eq!(
+        session.effective_credential_mode("openai"),
+        CredentialMode::Disabled
+    );
+
+    let legacy = SessionFile::from_toml("version = 2\n")
+        .expect("existing session configuration should parse");
+    assert_eq!(
+        legacy.effective_credential_mode("github-api"),
+        CredentialMode::Inject
+    );
+}
+
+#[test]
+fn rejects_invalid_credential_mode_identifiers_and_values() {
+    for credentials in [
+        "[credentials]\ndefault_mode = \"replace\"",
+        "[credentials]\n[credentials.\"../secret\"]\nmode = \"substitute\"",
+        "[credentials]\n[credentials.github]\nmode = \"replace\"",
+        "[credentials]\n[credentials.github]\nunknown = \"substitute\"",
+    ] {
+        let input = format!("version = 2\n\n{credentials}\n");
+        assert!(
+            SessionFile::from_toml(&input).is_err(),
+            "invalid credential settings should fail"
+        );
+    }
 }
 
 #[test]

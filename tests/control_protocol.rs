@@ -291,6 +291,14 @@ fn file_create_rejects_persistent_policy_before_allocating_session_resources() {
 
 fn assert_public_ca_create_response(daemon: &DaemonProcess, response: &Value, credential: &str) {
     assert_eq!(response["ok"], true);
+    let seed = response["result"]["credential_seed_base64url"]
+        .as_str()
+        .expect("create response should include an encoded credential seed");
+    assert_eq!(seed.len(), 43);
+    assert!(
+        seed.bytes()
+            .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') })
+    );
     let ca_pem = fs::read_to_string(daemon._directory.path().join("ca.pem"))
         .expect("configured CA certificate should be valid UTF-8 PEM");
     assert_eq!(response["result"]["ca_certificate_pem"], ca_pem);

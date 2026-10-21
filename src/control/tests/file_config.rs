@@ -1,5 +1,5 @@
 use crate::{
-    config::{SessionFile, UnmatchedHostPolicy},
+    config::{CredentialMode, SessionFile, UnmatchedHostPolicy},
     control::file_config::{SessionConfigFileErrorKind, SessionConfigStore},
 };
 use std::{
@@ -59,6 +59,47 @@ fn composes_nested_imports_relative_to_each_declaring_file() {
             .collect::<Vec<_>>(),
         ["common.example", "nested.example", "root.example"]
     );
+}
+
+#[test]
+fn composes_credential_modes_and_rejects_imported_default_broadening() {
+    let (directory, store) = session_store();
+    write_session_file(
+        &directory,
+        "shared/credentials.toml",
+        "version = 2\n\n[credentials.github-api]\nmode = \"disabled\"\n",
+    );
+    write_session_file(
+        &directory,
+        "root.toml",
+        "version = 2\nimports = [\"shared/credentials.toml\"]\n\n[credentials]\ndefault_mode = \"substitute\"\n",
+    );
+    let session = store
+        .read_session("root.toml")
+        .expect("credential defaults and unique imported overrides should compose");
+    assert_eq!(
+        session.default_credential_mode,
+        Some(CredentialMode::Substitute)
+    );
+    assert_eq!(
+        session.effective_credential_mode("github-api"),
+        CredentialMode::Disabled
+    );
+
+    write_session_file(
+        &directory,
+        "broadening.toml",
+        "version = 2\nimports = [\"shared/default.toml\"]\n",
+    );
+    write_session_file(
+        &directory,
+        "shared/default.toml",
+        "version = 2\n\n[credentials]\ndefault_mode = \"substitute\"\n",
+    );
+    let error = store
+        .read_session("broadening.toml")
+        .expect_err("an imported default must not change the root's inject fallback");
+    assert!(error.detail.contains("effective value `inject`"));
 }
 
 #[test]

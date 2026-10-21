@@ -187,7 +187,7 @@ impl SessionManager {
             return SessionReloadResult::reloaded(id, current_socket);
         }
 
-        let (permits, listener_gate, next_listener_generation, can_retire) = {
+        let (permits, credential_seed, listener_gate, next_listener_generation, can_retire) = {
             let mut registry = self.registry.lock().await;
             if !registry.accepting_sessions {
                 return SessionReloadResult::failed(id, current_socket, "session_stopping");
@@ -206,6 +206,7 @@ impl SessionManager {
             };
             (
                 runtime.connection_permits(),
+                runtime.credential_seed().clone(),
                 Arc::clone(&session.listener_gate),
                 next_listener_generation,
                 session.retired_runtimes.len() < MAX_RETIRED_LISTENERS,
@@ -218,6 +219,7 @@ impl SessionManager {
             runtime_id: RuntimeId::new(id.to_owned()),
             session: candidate.clone(),
             secrets: Arc::clone(&candidate_secrets),
+            credential_seed,
             ca: Arc::clone(&self.ca),
             socket_path: target_path.clone(),
             connection_permits: permits,

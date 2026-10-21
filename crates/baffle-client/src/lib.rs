@@ -98,6 +98,7 @@ impl Client {
             socket_path: PathBuf::from(created.socket),
             persistent: created.persistent,
             ca_certificate_pem: created.ca_certificate_pem,
+            credential_seed_base64url: created.credential_seed_base64url,
             lease: (!created.persistent).then_some(stream),
         })
     }
@@ -160,6 +161,7 @@ impl Client {
             socket_path: PathBuf::from(created.socket),
             persistent: created.persistent,
             ca_certificate_pem: created.ca_certificate_pem,
+            credential_seed_base64url: created.credential_seed_base64url,
             lease: (!created.persistent).then_some(stream),
         })
     }
@@ -260,6 +262,10 @@ pub struct SessionConfig {
     pub socket_name: Option<String>,
     /// Action for CONNECT destinations that have no explicit host rule.
     pub unmatched: UnmatchedHostPolicy,
+    /// Optional default handling mode for referenced credentials.
+    pub default_credential_mode: Option<CredentialMode>,
+    /// Per-secret handling modes. These override `default_credential_mode`.
+    pub credential_modes: BTreeMap<String, CredentialMode>,
     /// Host allowlist rules for this proxy.
     pub rules: Vec<HostRule>,
 }
@@ -288,10 +294,46 @@ impl SessionConfig {
         self
     }
 
+    /// Set the default handling mode for credentials referenced by this session.
+    pub fn default_credential_mode(mut self, mode: CredentialMode) -> Self {
+        self.default_credential_mode = Some(mode);
+        self
+    }
+
+    /// Set the handling mode for one symbolic secret identifier.
+    pub fn credential_mode(mut self, secret: impl Into<String>, mode: CredentialMode) -> Self {
+        self.credential_modes.insert(secret.into(), mode);
+        self
+    }
+
     /// Add one host rule.
     pub fn with_rule(mut self, rule: HostRule) -> Self {
         self.rules.push(rule);
         self
+    }
+}
+
+/// How Baffle handles a credential referenced by a session policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialMode {
+    /// Replace the configured header with the real credential.
+    #[default]
+    Inject,
+    /// Replace a matching session fake in the configured header.
+    Substitute,
+    /// Do not inject or substitute this credential.
+    Disabled,
+}
+
+impl SessionConfig {
+    /// Return the effective mode for a symbolic secret identifier.
+    pub fn effective_credential_mode(&self, secret: &str) -> CredentialMode {
+        self.credential_modes
+            .get(secret)
+            .copied()
+            .or(self.default_credential_mode)
+            .unwrap_or_default()
     }
 }
 
@@ -439,6 +481,7 @@ pub struct Session {
     socket_path: PathBuf,
     persistent: bool,
     ca_certificate_pem: Option<String>,
+    credential_seed_base64url: Option<String>,
     lease: Option<UnixStream>,
 }
 
@@ -467,6 +510,16 @@ impl Session {
         self.ca_certificate_pem.as_deref()
     }
 
+    /// Return the session credential seed as unpadded Base64URL.
+    ///
+    /// Trusted integrations can use this value to derive session-scoped fake
+    /// credentials. Do not expose it to workloads or routine logs. Older
+    /// protocol-v2 daemons omit the field, so this returns `None` when the
+    /// daemon did not provide seed data.
+    pub fn credential_seed_base64url(&self) -> Option<&str> {
+        self.credential_seed_base64url.as_deref()
+    }
+
     /// Explicitly release an ephemeral session lease.
     ///
     /// For a persistent session this only discards the local handle; use
@@ -483,6 +536,10 @@ impl fmt::Debug for Session {
             .field("id", &self.id)
             .field("socket_path", &self.socket_path)
             .field("persistent", &self.persistent)
+            .field(
+                "has_credential_seed",
+                &self.credential_seed_base64url.is_some(),
+            )
             .field("has_lease", &self.lease.is_some())
             .finish()
     }
@@ -653,6 +710,16 @@ impl CreateRequest {
                 persistent: config.persistent,
                 socket_name: config.socket_name,
                 unmatched: config.unmatched,
+                credentials: (config.default_credential_mode.is_some()
+                    || !config.credential_modes.is_empty())
+                .then(|| CredentialConfigWire {
+                    default_mode: config.default_credential_mode,
+                    overrides: config
+                        .credential_modes
+                        .into_iter()
+                        .map(|(name, mode)| (name, CredentialModeOverrideWire { mode }))
+                        .collect(),
+                }),
                 rules,
             },
         })
@@ -680,7 +747,22 @@ struct SessionConfigWire {
     socket_name: Option<String>,
     #[serde(skip_serializing_if = "UnmatchedHostPolicy::is_deny")]
     unmatched: UnmatchedHostPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credentials: Option<CredentialConfigWire>,
     rules: BTreeMap<String, NamedHostRule>,
+}
+
+#[derive(Serialize)]
+struct CredentialConfigWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_mode: Option<CredentialMode>,
+    #[serde(flatten)]
+    overrides: BTreeMap<String, CredentialModeOverrideWire>,
+}
+
+#[derive(Serialize)]
+struct CredentialModeOverrideWire {
+    mode: CredentialMode,
 }
 
 #[derive(Serialize)]
@@ -769,6 +851,8 @@ struct CreateResult {
     persistent: bool,
     #[serde(default)]
     ca_certificate_pem: Option<String>,
+    #[serde(default)]
+    credential_seed_base64url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -864,8 +948,8 @@ fn map_remote_error(error: RemoteError) -> ClientError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientError, CreateFromFileRequest, CreateRequest, CreateResult, HostRule, InjectionFormat,
-        SessionConfig, UnmatchedHostPolicy, linux_default_control_socket,
+        ClientError, CreateFromFileRequest, CreateRequest, CreateResult, CredentialMode, HostRule,
+        InjectionFormat, SessionConfig, UnmatchedHostPolicy, linux_default_control_socket,
         macos_default_control_socket, map_remote_error, success_result,
         validate_session_config_name,
     };
@@ -931,6 +1015,43 @@ mod tests {
             .expect("request should serialize");
 
         assert!(encoded.contains("unmatched = \"tunnel\""));
+    }
+
+    #[test]
+    fn serializes_credential_default_and_per_secret_override() {
+        let policy = SessionConfig::new()
+            .default_credential_mode(CredentialMode::Substitute)
+            .credential_mode("github-api", CredentialMode::Inject);
+        let encoded = toml::to_string(&CreateRequest::new(policy).expect("request should build"))
+            .expect("request should serialize");
+
+        assert!(encoded.contains("[session.credentials]"));
+        assert!(encoded.contains("default_mode = \"substitute\""));
+        assert!(encoded.contains("credentials.github-api"));
+        assert!(encoded.contains("mode = \"inject\""));
+    }
+
+    #[test]
+    fn parses_create_results_with_or_without_the_additive_seed_field() {
+        let old: CreateResult = serde_json::from_value(serde_json::json!({
+            "id": "session",
+            "socket": "/run/baffle.sock",
+            "persistent": false,
+        }))
+        .expect("older daemon responses should remain valid");
+        assert!(old.credential_seed_base64url.is_none());
+
+        let current: CreateResult = serde_json::from_value(serde_json::json!({
+            "id": "session",
+            "socket": "/run/baffle.sock",
+            "persistent": false,
+            "credential_seed_base64url": "encoded-seed",
+        }))
+        .expect("current daemon response should parse");
+        assert_eq!(
+            current.credential_seed_base64url.as_deref(),
+            Some("encoded-seed")
+        );
     }
 
     #[test]

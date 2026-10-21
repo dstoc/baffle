@@ -44,6 +44,22 @@ An older protocol-v2 daemon may omit this additive response field. The client
 then returns `None` from `ca_certificate_pem()`. Callers that need the CA to
 establish trust must treat `None` as unavailable trust material.
 
+`Session::credential_seed_base64url()` returns the per-session credential
+seed for a trusted integration. The value is 32 random bytes encoded as
+unpadded Base64URL. Use it to derive fake credentials as specified in the
+[configuration reference](configuration.md#fake-credential-derivation). Keep
+the seed in the trusted orchestrator. Do not print it or expose it to the
+workload. The `Session` debug output reports only whether a seed is present.
+An older protocol-v2 daemon may omit this additive field, in which case the
+method returns `None`.
+
+Use `SessionConfig::default_credential_mode` and
+`SessionConfig::credential_mode` to set the global mode and a per-secret
+override. `CredentialMode::Inject` is the fallback, so existing configurations
+keep their current behavior. An older protocol-v2 daemon rejects the new
+`credentials` session field; use credential modes only with a daemon that
+supports this feature.
+
 The [client example](../examples/client.rs) sends CONNECT for
 `example.com:443`, reads the tunnel response, and closes the lease. It does not
 send a TLS request. Use an HTTP proxy client that establishes HTTPS with

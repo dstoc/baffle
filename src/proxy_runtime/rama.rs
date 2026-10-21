@@ -15,8 +15,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ca::ManagedCa, config::SessionConfig, policy::SessionPolicy, proxy_runtime::TestUpstreamTrust,
-    secrets::ResolvedSecrets, telemetry::Metrics,
+    ca::ManagedCa, config::SessionConfig, credentials::CredentialSeed, policy::SessionPolicy,
+    proxy_runtime::TestUpstreamTrust, secrets::ResolvedSecrets, telemetry::Metrics,
 };
 
 pub(crate) const MAX_POLICY_GENERATIONS: usize = 8;
@@ -38,6 +38,7 @@ pub struct ProxyRuntime {
     generation: watch::Sender<Arc<ProxyGeneration>>,
     generations: Arc<Mutex<Vec<Weak<ProxyGeneration>>>>,
     permits: Arc<Semaphore>,
+    credential_seed: CredentialSeed,
     socket_guard: Arc<Mutex<Option<ingress::UnixSocketGuard>>>,
 }
 
@@ -51,6 +52,7 @@ pub(crate) struct ProxyRuntimeOptions {
     pub(crate) runtime_id: RuntimeId,
     pub(crate) session: SessionConfig,
     pub(crate) secrets: Arc<ResolvedSecrets>,
+    pub(crate) credential_seed: CredentialSeed,
     pub(crate) ca: Arc<ManagedCa>,
     pub(crate) socket_path: PathBuf,
     pub(crate) connection_permits: Arc<Semaphore>,
@@ -76,10 +78,13 @@ impl ProxyRuntime {
         max_connections: usize,
         events: tokio::sync::mpsc::UnboundedSender<ProxyRuntimeEvent>,
     ) -> Result<Self, ProxyRuntimeError> {
+        let credential_seed =
+            CredentialSeed::random().map_err(ProxyRuntimeError::CredentialSeed)?;
         Self::start_with_options(ProxyRuntimeOptions {
             runtime_id,
             session,
             secrets: Arc::new(ResolvedSecrets::default()),
+            credential_seed,
             ca,
             socket_path,
             connection_permits: Arc::new(Semaphore::new(max_connections)),
@@ -101,6 +106,7 @@ impl ProxyRuntime {
             runtime_id,
             session,
             secrets,
+            credential_seed,
             ca,
             socket_path,
             connection_permits: permits,
@@ -118,7 +124,7 @@ impl ProxyRuntime {
         let socket_guard = Arc::new(Mutex::new(Some(socket_guard)));
 
         let generation = Arc::new(ProxyGeneration {
-            policy: Arc::new(SessionPolicy::compile(&session)),
+            policy: Arc::new(SessionPolicy::compile(&session, &credential_seed)),
             secrets,
         });
         let (generation_sender, generation_receiver) = watch::channel(Arc::clone(&generation));
@@ -181,6 +187,7 @@ impl ProxyRuntime {
             generation: generation_sender,
             generations,
             permits,
+            credential_seed,
             socket_guard,
         })
     }
@@ -204,7 +211,7 @@ impl ProxyRuntime {
         secrets: Arc<ResolvedSecrets>,
     ) -> Result<(), RuntimeGenerationLimit> {
         let generation = Arc::new(ProxyGeneration {
-            policy: Arc::new(SessionPolicy::compile(session)),
+            policy: Arc::new(SessionPolicy::compile(session, &self.credential_seed)),
             secrets,
         });
         let mut generations = self.generations.lock().expect("generation lock poisoned");
@@ -234,6 +241,10 @@ impl ProxyRuntime {
 
     pub(crate) fn connection_permits(&self) -> Arc<Semaphore> {
         Arc::clone(&self.permits)
+    }
+
+    pub(crate) fn credential_seed(&self) -> &CredentialSeed {
+        &self.credential_seed
     }
 
     pub(crate) fn is_finished(&self) -> bool {

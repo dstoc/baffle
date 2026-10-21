@@ -7,7 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use baffle_client::{Client, ClientError, HostRule, ReloadStatus, SessionConfig, SessionState};
+use baffle_client::{
+    Client, ClientError, CredentialMode, HeaderInjection, HostRule, ReloadStatus, SessionConfig,
+    SessionState,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
@@ -30,6 +33,20 @@ async fn client_manages_ephemeral_leases_and_persistent_sessions() {
         .expect("ephemeral session should be created");
     assert!(!explicit.is_persistent());
     assert_ca_certificate(explicit.ca_certificate_pem(), &daemon.ca_certificate);
+    let explicit_seed = explicit
+        .credential_seed_base64url()
+        .expect("new daemon should return the session credential seed")
+        .to_owned();
+    assert_eq!(explicit_seed.len(), 43);
+    assert!(
+        explicit_seed
+            .bytes()
+            .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') })
+    );
+    assert!(
+        !format!("{explicit:?}").contains(&explicit_seed),
+        "Session debug output must not expose the credential seed"
+    );
     let explicit_path = explicit.socket_path().to_path_buf();
     assert!(explicit_path.exists());
     let sessions = client.list().await.expect("sessions should be listed");
@@ -46,6 +63,14 @@ async fn client_manages_ephemeral_leases_and_persistent_sessions() {
         .create(policy())
         .await
         .expect("second ephemeral session should be created");
+    let dropped_seed = dropped
+        .credential_seed_base64url()
+        .expect("new daemon should return the session credential seed")
+        .to_owned();
+    assert!(
+        explicit_seed != dropped_seed,
+        "each session must receive a fresh credential seed"
+    );
     let dropped_path = dropped.socket_path().to_path_buf();
     drop(dropped);
     wait_for_count(&client, 0).await;
@@ -60,6 +85,13 @@ async fn client_manages_ephemeral_leases_and_persistent_sessions() {
         .await
         .expect("persistent session should be created");
     assert!(persistent.is_persistent());
+    let persistent_seed = persistent
+        .credential_seed_base64url()
+        .expect("new daemon should return the session credential seed");
+    assert!(
+        persistent_seed != explicit_seed && persistent_seed != dropped_seed,
+        "each session must receive a fresh credential seed"
+    );
     let persistent_id = persistent.id().to_owned();
     let persistent_path = persistent.socket_path().to_path_buf();
     drop(persistent);
@@ -78,6 +110,28 @@ async fn client_manages_ephemeral_leases_and_persistent_sessions() {
         !persistent_path.exists(),
         "stop should remove the proxy socket"
     );
+}
+
+#[tokio::test]
+async fn disabled_client_credentials_need_no_secret_file() {
+    let daemon = start_daemon(2);
+    let client = Client::new(&daemon.control_socket);
+    let mut rule = HostRule::intercept("example.com");
+    rule.inject
+        .push(HeaderInjection::bearer("Authorization", "not-provisioned"));
+    let session = client
+        .create(
+            SessionConfig::new()
+                .default_credential_mode(CredentialMode::Substitute)
+                .credential_mode("not-provisioned", CredentialMode::Disabled)
+                .with_rule(rule),
+        )
+        .await
+        .expect("disabled credentials should not be loaded or entitled");
+
+    assert!(session.credential_seed_base64url().is_some());
+    session.close();
+    wait_for_count(&client, 0).await;
 }
 
 #[tokio::test]
@@ -217,6 +271,7 @@ async fn typed_client_creates_from_a_daemon_managed_file_and_holds_the_lease() {
         .expect("typed file create should succeed");
     assert!(!session.is_persistent());
     assert_ca_certificate(session.ca_certificate_pem(), &daemon.ca_certificate);
+    assert!(session.credential_seed_base64url().is_some());
     let socket_path = session.socket_path().to_path_buf();
     assert!(socket_path.exists());
     assert_eq!(client.list().await.expect("list should succeed").len(), 1);

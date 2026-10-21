@@ -245,6 +245,10 @@ Imports compose policy with strict conflict rules:
   `deny`. Every imported file that sets `unmatched` must match that root value.
   The root must set `unmatched = "tunnel"` to use an imported file that declares
   `unmatched = "tunnel"`. Conflicting imported values also fail.
+* Credential default modes follow the same rule. The root's effective default
+  is `inject` when it is omitted, and an imported `default_mode` must match it.
+  Per-secret overrides from imports combine when they name different secrets;
+  duplicate secret identifiers must use the same mode.
 * Only the root file can set `persistent` or `socket_name`. An imported file
   that sets either field fails, even when its value matches the root file.
   These fields describe the created session, not reusable policy.
@@ -478,9 +482,88 @@ as the password. Baffle removes a client-supplied header with the same name,
 then adds the daemon-managed value. It never injects into plaintext HTTP,
 CONNECT, tunnelled HTTPS, or an unsupported protocol upgrade.
 
-The daemon checks every secret entitlement and file before it creates a
-session. Missing, inaccessible, and unentitled secret references return the
-same safe protocol error.
+The daemon checks the entitlement and file for every credential whose
+effective mode is `inject` or `substitute` before it creates a session.
+`disabled` credentials are not resolved. Missing, inaccessible, and
+unentitled active references return the same safe protocol error.
+
+### Credential handling modes
+
+The session root can set a default mode for all referenced credentials. A
+`[credentials.<secret-id>]` table can override that mode for one symbolic
+secret identifier:
+
+```toml
+version = 2
+
+[credentials]
+default_mode = "substitute"
+
+[credentials.github-api]
+mode = "inject"
+
+[credentials.github-git]
+mode = "disabled"
+
+[rules."api.github.com"]
+mode = "intercept"
+
+[[rules."api.github.com".inject]]
+header = "Authorization"
+secret = "github-api"
+format = "bearer"
+```
+
+The effective mode is the per-secret override, then `default_mode`, then
+`inject`. This keeps existing session files unchanged. `inject` replaces the
+configured header with the real secret. `substitute` replaces a matching
+session fake with the real secret. If the request has no matching fake, Baffle
+leaves the header unchanged and does not inject the real secret. `disabled`
+does neither operation and does not resolve or require the secret file.
+
+The configured `format` identifies the secret part of the header. `raw`
+matches the complete header value. `bearer` matches the bearer token after the
+`Bearer` scheme. `basic_password` decodes HTTP Basic credentials and matches
+the password only when the decoded username matches the configured username.
+Baffle preserves the configured format when it substitutes the real value.
+
+Substitution runs only for a credential declared by the authorized host rule,
+after Baffle accepts the CONNECT authority, intercepted HTTP authority, port,
+and path. It applies only to HTTP request headers. It does not inspect URLs,
+bodies, responses, or environment variables. A fake value is a capability for
+the session that produced it. Do not expose the session seed to the workload.
+
+### Fake credential derivation
+
+Baffle creates a new random 32-byte seed for every session. It returns the
+seed in the create response as unpadded Base64URL. A trusted integration can
+derive one fake per canonical secret identifier with this versioned protocol:
+
+1. Decode the seed from Base64URL to exactly 32 bytes. Use those bytes as the
+   HMAC-SHA256 key.
+2. Build the message from the ASCII bytes
+   `baffle:credential-substitution:v1`, one zero byte, and the exact UTF-8
+   bytes of the secret identifier.
+3. Compute HMAC-SHA256 over that message.
+4. Encode the 32-byte digest as unpadded Base64URL and prepend `baffle_v1_`.
+
+Secret identifiers use the session schema's existing validation: 1 to 64
+ASCII letters, digits, dots, underscores, or hyphens; the first and last
+characters are alphanumeric; and `..` is not allowed. Identifiers are
+case-sensitive and Baffle does not normalize them.
+
+The deterministic test vector uses seed bytes `00` through `1f` and identifier
+`github-api`:
+
+```text
+seed (hex): 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+fake:       baffle_v1_Tamc3Pa1DyIVEIq8yK6rlwaPc_L-LdF8S9YHz-17h1I
+```
+
+The seed is secret derivation material. Keep it within the trusted
+orchestrator, and do not write it to logs or give it to the workload. Give the
+workload only the derived fake value it needs. A fake from another session
+does not match this session's expected value.
 
 ## Validation examples
 
