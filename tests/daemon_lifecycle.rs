@@ -91,13 +91,22 @@ directory = "{secrets}"
         "CA init should succeed: {}",
         String::from_utf8_lossy(&initialize.stderr)
     );
-    let initialize_stdout = String::from_utf8_lossy(&initialize.stdout);
-    assert!(initialize_stdout.contains("Created Baffle interception CA"));
-    assert!(initialize_stdout.contains(&certificate_path.display().to_string()));
-    assert!(initialize_stdout.contains(&private_key_path.display().to_string()));
+    assert!(initialize.stdout.ends_with(b"\n"));
+    let initialize_output: serde_json::Value =
+        serde_json::from_slice(&initialize.stdout).expect("CA init should return JSON");
+    assert_eq!(initialize_output["initialized"], true);
+    assert_eq!(
+        initialize_output["certificate"],
+        certificate_path.display().to_string()
+    );
+    assert_eq!(
+        initialize_output["private_key"],
+        private_key_path.display().to_string()
+    );
+    assert_eq!(initialize_output["trust_store_installed"], false);
     let initialize_output = format!(
         "{}{}",
-        initialize_stdout,
+        String::from_utf8_lossy(&initialize.stdout),
         String::from_utf8_lossy(&initialize.stderr)
     );
     assert!(!initialize_output.contains("PRIVATE KEY"));
@@ -116,6 +125,14 @@ directory = "{secrets}"
         export.status.success(),
         "CA export should work after init: {}",
         String::from_utf8_lossy(&export.stderr)
+    );
+    assert!(export.stdout.ends_with(b"\n"));
+    let export_output: serde_json::Value =
+        serde_json::from_slice(&export.stdout).expect("CA export should return JSON");
+    assert_eq!(export_output["exported"], true);
+    assert_eq!(
+        export_output["output"],
+        exported_certificate.display().to_string()
     );
     assert_eq!(
         fs::read(&exported_certificate).expect("exported CA should be readable"),

@@ -5,6 +5,15 @@ repository makes no Cladding changes. A trusted consumer creates a session
 over the Unix control socket, gives its workload access to the returned data
 socket, and owns the session lease for the workload's lifetime.
 
+## CLI JSON migration
+
+Successful informational CLI commands return one JSON object on stdout.
+`create` includes the session credential seed when the daemon provides it.
+Capture and parse that response securely. Do not write it to logs or forward it
+to workload output. Cladding currently collects proxy startup stdout in
+container logs, so its session creation flow must capture the JSON before it
+upgrades to this Baffle output format.
+
 ## Consumer integration steps
 
 1. Run Baffle as a dedicated service user on Linux or as a per-user or

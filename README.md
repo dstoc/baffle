@@ -149,21 +149,30 @@ the session:
 
 ```sh
 export BAFFLE_DIR="/tmp/baffle-quickstart.<your-suffix>"
-baffle create \
+set +x
+SESSION_JSON=$(baffle create \
   --control-socket "$BAFFLE_DIR/control.sock" \
-  --config "$BAFFLE_DIR/session.toml"
+  --config "$BAFFLE_DIR/session.toml")
+SESSION_ID=$(printf '%s' "$SESSION_JSON" | jq -r '.id')
+PROXY_SOCKET=$(printf '%s' "$SESSION_JSON" | jq -r '.socket')
+unset SESSION_JSON
+printf 'Session: %s\nSocket: %s\n' "$SESSION_ID" "$PROXY_SOCKET"
 ```
 
-The command prints a session ID and its assigned data socket:
+Successful CLI commands that return information write one JSON object and a
+newline to stdout. The `create` response also contains the credential seed and
+CA certificate:
 
-```text
-Created persistent session <session-id> (it remains active after this command exits).
-Data socket: <BAFFLE_DIR>/proxies/quickstart.sock
+```json
+{"id":"<session-id>","socket":"<BAFFLE_DIR>/proxies/quickstart.sock","persistent":true,"ca_certificate_pem":"<public CA certificate>","credential_seed_base64url":"<sensitive session seed>"}
 ```
 
-The example uses `$BAFFLE_DIR/proxies/quickstart.sock`. By default, a session
-is ephemeral: `create` prints a leased-session message and stays open to hold
-the lease. The session stops when that command exits.
+The example uses `$BAFFLE_DIR/proxies/quickstart.sock`. Keep `create` stdout
+private. Do not log it, enable shell tracing while capturing it, or forward it
+to workload or container logs. The seed appears only in this successful
+`create` response. By default, a session is ephemeral: `create` flushes its
+JSON response, then stays open to hold the lease. The session stops when that
+command exits.
 
 To send a real HTTPS request, connect a local consumer-side TCP adapter to the
 Unix socket. `curl` uses TCP here, so `socat` exposes the socket through a
@@ -178,13 +187,17 @@ curl --noproxy "" --proxy http://127.0.0.1:18080 https://example.com/
 kill "$ADAPTER_PID"
 ```
 
-Stop the persistent session with the ID printed by `create`, then stop the
-daemon with Ctrl+C in the first terminal:
+Stop the persistent session with the captured ID, then stop the daemon with
+Ctrl+C in the first terminal:
 
 ```sh
-SESSION_ID="paste-session-id-from-create-output"
 baffle stop "$SESSION_ID" --control-socket "$BAFFLE_DIR/control.sock"
 ```
+
+This JSON output format is a breaking CLI change. Cladding currently collects
+proxy startup stdout in container logs. Update consumers to capture and parse
+the `create` JSON securely before upgrading Baffle. Do not send the raw
+response to those logs.
 
 ## Security model
 
